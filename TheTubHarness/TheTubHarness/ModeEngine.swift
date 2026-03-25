@@ -45,6 +45,7 @@ struct AudioControl: Equatable {
     var grainDensity: Double = 0.35
     var scanRate: Double = 0.35
     var scanJumpProb: Double = 0.08
+    var grainPitchSpread: Double = 0.34
     var freezeProb: Double = 0.03
     var freezeLenSec: Double = 1.0
 
@@ -142,42 +143,51 @@ final class ModeEngine {
             control.wetLevel = control.reverb.wet
 
         case 1:
-            control.repeatProb = param("repeat_prob", default: control.repeatProb, from: out.params)
+            let voicing = mode1Voicing(for: resolved.picks.presetId)
+            let repeatProb = param("repeat_prob", default: control.repeatProb, from: out.params)
+            control.repeatProb = min(1.0, max(0.0, 0.10 + 0.86 * repeatProb))
             let loopLenS = paramReal("loop_len_s", fallback: "window_norm", default: 1.2, min: 0.08, max: 4.0, from: out.params)
-            control.windowNorm = normalize(loopLenS, min: 0.08, max: 4.0)
+            control.windowNorm = min(1.0, max(0.0, normalize(loopLenS, min: 0.08, max: 4.0)))
             let stutterMs = paramReal("stutter_len_ms", fallbacks: ["stutter_len_norm", "stutter_len"], default: 160.0, min: 30.0, max: 450.0, from: out.params)
-            control.stutterLenNorm = normalize(stutterMs, min: 30.0, max: 450.0)
+            control.stutterLenNorm = min(1.0, max(0.0, 0.04 + 0.92 * normalize(stutterMs, min: 30.0, max: 450.0)))
             let jitterMs = paramReal("jitter_ms", fallback: "gate_sharpness", default: 18.0, min: 0.0, max: 120.0, from: out.params)
-            control.gateSharpness = normalize(jitterMs, min: 0.0, max: 120.0)
+            control.gateSharpness = min(1.0, max(0.0, 0.15 + 0.82 * normalize(jitterMs, min: 0.0, max: 120.0)))
             let feedback = paramReal("feedback", fallback: "threshold_bias", default: 0.18, min: 0.0, max: 0.65, from: out.params)
-            control.thresholdBias = normalize(feedback, min: 0.0, max: 0.65)
+            control.thresholdBias = min(1.0, max(0.0, 0.06 + 0.74 * normalize(feedback, min: 0.0, max: 0.65)))
             control.motionIntensity = param("motion_intensity", fallback: "motion_speed", default: control.motionIntensity, from: out.params)
             control.motionSpeed = param("motion_speed", fallback: "motion_intensity", default: control.motionSpeed, from: out.params)
             control.spread = param("spread", default: control.spread, from: out.params)
-            control.wetLevel = min(0.60, 0.16 + 0.34 * control.repeatProb + 0.16 * control.thresholdBias)
-            control.dryLevel = max(0.30, 1.0 - (control.wetLevel * 0.85))
+            control.wetLevel = min(0.62, (0.18 + 0.34 * control.repeatProb + 0.16 * control.thresholdBias) * voicing.wetScale)
+            control.dryLevel = max(0.25, min(0.96, voicing.dryBase - (control.wetLevel * voicing.dryDuck)))
             control.gridDiv = normalizeGridDiv(resolved.picks.gridDiv ?? control.gridDiv)
             control.repeatStyleId = resolved.picks.repeatStyleId ?? control.repeatStyleId
-            control.motionSpeed = max(control.motionSpeed, control.motionIntensity * 0.8)
+            control.motionSpeed = max(control.motionSpeed, control.motionIntensity * voicing.motionFloor)
+            control.reverb.wet = min(0.24, 0.08 + 0.12 * control.repeatProb + 0.08 * control.thresholdBias)
+            control.reverb.damping = min(1.0, max(0.0, 0.42 + 0.34 * (1.0 - control.thresholdBias)))
 
         case 2:
+            let voicing = mode2Voicing(for: resolved.picks.presetId)
             let grainSizeMs = paramReal("grain_size_ms", fallback: "grain_size", default: 44.0, min: 12.0, max: 120.0, from: out.params)
-            control.grainSize = normalize(grainSizeMs, min: 12.0, max: 120.0)
+            let grainSizeNorm = normalize(grainSizeMs, min: 12.0, max: 120.0)
+            control.grainSize = min(1.0, max(0.0, 0.06 + 0.88 * grainSizeNorm))
             let density = paramReal("grain_density", fallback: "density", default: 0.45, min: 0.1, max: 0.9, from: out.params)
-            control.grainDensity = normalize(density, min: 0.1, max: 0.9)
-            control.scanRate = param("scan_rate", default: control.scanRate, from: out.params)
-            control.scanJumpProb = param("scan_jump_prob", default: control.scanJumpProb, from: out.params)
+            control.grainDensity = min(1.0, max(0.0, 0.15 + 0.82 * normalize(density, min: 0.1, max: 0.9)))
+            control.scanRate = min(1.0, max(0.0, 0.10 + 0.82 * param("scan_rate", default: control.scanRate, from: out.params)))
+            let scanJump = param("scan_jump_prob", default: control.scanJumpProb, from: out.params)
+            control.scanJumpProb = min(1.0, max(0.0, 0.16 + 0.78 * scanJump))
             let freezeProb = paramReal("freeze_prob", default: 0.12, min: 0.0, max: 0.75, from: out.params)
             control.freezeProb = normalize(freezeProb, min: 0.0, max: 0.75)
-            control.freezeLenSec = paramReal("freeze_len_s", default: control.freezeLenSec, min: 0.2, max: 6.0, from: out.params)
+            control.freezeLenSec = min(voicing.maxFreezeLenSec, paramReal("freeze_len_s", default: control.freezeLenSec, min: 0.2, max: 6.0, from: out.params))
             let pitchSpread = paramReal("pitch_spread_cents", fallback: "spread", default: 12.0, min: 0.0, max: 35.0, from: out.params)
             let pitchSpreadNorm = normalize(pitchSpread, min: 0.0, max: 35.0)
-            control.scanJumpProb = max(control.scanJumpProb, pitchSpreadNorm * 0.75)
+            control.grainPitchSpread = pitchSpreadNorm
+            control.scanJumpProb = max(control.scanJumpProb, pitchSpreadNorm * 0.74)
             control.motionSpeed = param("motion_speed", default: max(control.motionSpeed, control.scanRate), from: out.params)
             control.spread = max(param("spread", default: control.spread, from: out.params), pitchSpreadNorm * 0.65)
-            control.wetLevel = min(0.45, 0.14 + 0.34 * control.grainDensity)
-            control.dryLevel = max(0.30, 1.0 - (control.wetLevel * 0.90))
-            control.reverb.wet = min(0.35, 0.12 + 0.24 * control.grainDensity)
+            control.wetLevel = min(0.64, (0.20 + 0.32 * control.grainDensity + 0.10 * pitchSpreadNorm) * voicing.wetScale)
+            control.dryLevel = max(0.20, min(0.94, voicing.dryBase - (control.wetLevel * 0.58)))
+            control.reverb.wet = min(0.32, (0.08 + 0.16 * control.grainDensity + 0.06 * pitchSpreadNorm) * voicing.reverbScale)
+            control.reverb.damping = min(1.0, max(0.0, 0.35 + 0.40 * (1.0 - control.grainDensity)))
 
         case 3:
             let drive = paramReal("drive", default: 0.22, min: 0.0, max: 0.85, from: out.params)
@@ -257,8 +267,8 @@ final class ModeEngine {
             control.resetVoices = sentButtons.clear || out.flags.resetVoices
 
         case 7:
-            control.wetLevel = max(0.75, param("mix", fallback: "wet", default: control.wetLevel, from: out.params))
-            control.dryLevel = min(0.30, max(0.0, 1.0 - (control.wetLevel * 0.85)))
+            control.wetLevel = max(0.86, param("mix", fallback: "wet", default: control.wetLevel, from: out.params))
+            control.dryLevel = min(0.14, max(0.0, 0.24 - (control.wetLevel * 0.14)))
             let swapRate = paramReal("swap_rate_hz", fallback: "morph_rate", default: 1.8, min: 0.1, max: 6.0, from: out.params)
             control.morphRate = normalize(swapRate, min: 0.1, max: 6.0)
             let crossfadeMs = paramReal("crossfade_ms", fallback: "crossfade", default: 180.0, min: 20.0, max: 600.0, from: out.params)
@@ -269,8 +279,10 @@ final class ModeEngine {
             control.varianceAmt = max(0.0, min(1.0, resolved.picks.varianceAmt ?? control.varianceAmt))
             control.variantSeed = resolved.picks.variantSeed ?? control.variantSeed
             control.mappingFamily = resolved.picks.mappingFamily ?? control.mappingFamily
-            control.motionSpeed = max(control.motionSpeed, 0.12 + 0.40 * control.morphRate)
-            control.spread = max(control.spread, 0.45)
+            control.motionSpeed = max(control.motionSpeed, 0.28 + 0.52 * control.morphRate)
+            control.spread = max(control.spread, 0.62)
+            control.motionRadius = max(control.motionRadius, 0.46)
+            control.reverb.wet = min(control.reverb.wet, 0.08)
 
         case 8:
             control.motionSpeed = param("motion_speed", default: control.motionSpeed, from: out.params)
@@ -320,6 +332,7 @@ final class ModeEngine {
             if currentMode == 2 {
                 control.grainDensity = min(1.0, control.grainDensity + 0.20)
                 control.scanJumpProb = min(1.0, control.scanJumpProb + 0.15)
+                control.grainPitchSpread = min(1.0, control.grainPitchSpread + 0.12)
             } else if currentMode == 5 || currentMode == 6 {
                 control.noteRate = min(1.0, control.noteRate + 0.20)
                 control.voiceCap = min(1.0, control.voiceCap + 0.15)
@@ -335,6 +348,20 @@ final class ModeEngine {
     }
 
     // MARK: - Internals
+
+    private struct Mode1Voicing {
+        let wetScale: Double
+        let dryBase: Double
+        let dryDuck: Double
+        let motionFloor: Double
+    }
+
+    private struct Mode2Voicing {
+        let wetScale: Double
+        let reverbScale: Double
+        let dryBase: Double
+        let maxFreezeLenSec: Double
+    }
 
     private func safeControl(mode: Int) -> AudioControl {
         switch mode {
@@ -354,19 +381,19 @@ final class ModeEngine {
             return AudioControl(
                 mode: 1,
                 level: 0.82,
-                dryLevel: 0.82,
-                wetLevel: 0.35,
-                spread: 0.48,
+                dryLevel: 0.80,
+                wetLevel: 0.36,
+                spread: 0.50,
                 motionSpeed: 0.30,
                 motionRadius: 0.40,
                 spatialMotion: .orbitPulse,
-                reverb: ReverbTarget(presetId: "beat_A", wet: 0.18, decay: 0.28, preDelay: 0.05, damping: 0.45, xfadeMs: 400),
-                repeatProb: 0.50,
-                thresholdBias: 0.30,
-                windowNorm: 0.45,
-                stutterLenNorm: 0.28,
+                reverb: ReverbTarget(presetId: "beat_A", wet: 0.12, decay: 0.28, preDelay: 0.05, damping: 0.56, xfadeMs: 400),
+                repeatProb: 0.58,
+                thresholdBias: 0.18,
+                windowNorm: 0.26,
+                stutterLenNorm: 0.12,
                 gateSharpness: 0.55,
-                motionIntensity: 0.40,
+                motionIntensity: 0.38,
                 gridDiv: "1/8",
                 repeatStyleId: "stutter_a"
             )
@@ -374,18 +401,20 @@ final class ModeEngine {
             return AudioControl(
                 mode: 2,
                 level: 0.80,
-                dryLevel: 0.65,
-                wetLevel: 0.28,
-                spread: 0.55,
-                motionSpeed: 0.40,
+                dryLevel: 0.76,
+                wetLevel: 0.36,
+                spread: 0.60,
+                motionSpeed: 0.42,
                 motionRadius: 0.40,
                 spatialMotion: .fragment,
-                reverb: ReverbTarget(presetId: "fracture", wet: 0.26, decay: 0.35, preDelay: 0.10, damping: 0.45, xfadeMs: 450),
-                grainSize: 0.40,
-                grainDensity: 0.45,
-                scanRate: 0.45,
-                scanJumpProb: 0.12,
-                freezeProb: 0.05
+                reverb: ReverbTarget(presetId: "fracture", wet: 0.24, decay: 0.30, preDelay: 0.07, damping: 0.58, xfadeMs: 450),
+                grainSize: 0.22,
+                grainDensity: 0.62,
+                scanRate: 0.58,
+                scanJumpProb: 0.34,
+                grainPitchSpread: 0.62,
+                freezeProb: 0.06,
+                freezeLenSec: 0.9
             )
         case 3:
             return AudioControl(
@@ -475,19 +504,19 @@ final class ModeEngine {
             return AudioControl(
                 mode: 7,
                 level: 0.84,
-                dryLevel: 0.22,
-                wetLevel: 0.88,
-                spread: 0.52,
-                motionSpeed: 0.25,
-                motionRadius: 0.28,
+                dryLevel: 0.08,
+                wetLevel: 0.94,
+                spread: 0.68,
+                motionSpeed: 0.48,
+                motionRadius: 0.55,
                 spatialMotion: .clusterRotate,
-                reverb: ReverbTarget(presetId: "buckets_A", wet: 0.20, decay: 0.30, preDelay: 0.05, damping: 0.40, xfadeMs: 450),
-                morphRate: 0.40,
-                swapCrossfade: 0.58,
-                sharpness: 0.62,
-                bias: 0.50,
+                reverb: ReverbTarget(presetId: "buckets_A", wet: 0.06, decay: 0.24, preDelay: 0.03, damping: 0.42, xfadeMs: 420),
+                morphRate: 0.55,
+                swapCrossfade: 0.22,
+                sharpness: 0.74,
+                bias: 0.72,
                 mappingId: "swap_pairs",
-                varianceAmt: 0.20,
+                varianceAmt: 0.28,
                 variantSeed: 7,
                 mappingFamily: "bucket_swap"
             )
@@ -522,6 +551,28 @@ final class ModeEngine {
         default:
             return AudioControl(mode: mode)
         }
+    }
+
+    private func mode1Voicing(for presetId: String?) -> Mode1Voicing {
+        let id = (presetId ?? "").lowercased()
+        if id.contains("tight") {
+            return Mode1Voicing(wetScale: 0.88, dryBase: 0.84, dryDuck: 0.74, motionFloor: 0.78)
+        }
+        if id.contains("fill") || id.contains("jump") {
+            return Mode1Voicing(wetScale: 1.10, dryBase: 0.90, dryDuck: 0.92, motionFloor: 0.90)
+        }
+        return Mode1Voicing(wetScale: 1.0, dryBase: 0.87, dryDuck: 0.86, motionFloor: 0.84)
+    }
+
+    private func mode2Voicing(for presetId: String?) -> Mode2Voicing {
+        let id = (presetId ?? "").lowercased()
+        if id.contains("shimmer") {
+            return Mode2Voicing(wetScale: 1.08, reverbScale: 1.05, dryBase: 0.80, maxFreezeLenSec: 2.4)
+        }
+        if id.contains("soft") || id.contains("intelligible") {
+            return Mode2Voicing(wetScale: 0.88, reverbScale: 0.85, dryBase: 0.88, maxFreezeLenSec: 2.0)
+        }
+        return Mode2Voicing(wetScale: 1.0, reverbScale: 1.0, dryBase: 0.84, maxFreezeLenSec: 2.8)
     }
 
     private func mapSpatialMotion(id: String?, definition: SpatialPatternManifestEntry?) -> SpatialMotion {
@@ -666,6 +717,7 @@ final class ModeEngine {
         control.grainDensity = min(max(control.grainDensity, 0.0), 1.0)
         control.scanRate = min(max(control.scanRate, 0.0), 1.0)
         control.scanJumpProb = min(max(control.scanJumpProb, 0.0), 1.0)
+        control.grainPitchSpread = min(max(control.grainPitchSpread, 0.0), 1.0)
         control.freezeProb = min(max(control.freezeProb, 0.0), 1.0)
         control.freezeLenSec = min(max(control.freezeLenSec, 0.2), 6.0)
         control.exciteAmount = min(max(control.exciteAmount, 0.0), 1.0)

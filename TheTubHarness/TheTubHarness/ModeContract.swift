@@ -124,13 +124,13 @@ enum ModeContract {
 
     static let safeModeParams: [Int: [String: Double]] = [
         0: ["dry_level": 0.92, "reverb_mix": 0.12, "reverb_decay_s": 0.9, "pre_delay_ms": 12.0, "tone_db": 0.0],
-        1: ["loop_len_s": 1.2, "repeat_prob": 0.45, "stutter_len_ms": 160.0, "jitter_ms": 18.0, "feedback": 0.18, "motion_speed": 0.35, "spread": 0.42],
-        2: ["grain_size_ms": 44.0, "grain_density": 0.45, "scan_rate": 0.44, "freeze_prob": 0.12, "freeze_len_s": 1.1, "pitch_spread_cents": 12.0],
+        1: ["loop_len_s": 0.72, "repeat_prob": 0.62, "stutter_len_ms": 78.0, "jitter_ms": 22.0, "feedback": 0.15, "motion_speed": 0.30, "spread": 0.50],
+        2: ["grain_size_ms": 28.0, "grain_density": 0.62, "scan_rate": 0.58, "freeze_prob": 0.08, "freeze_len_s": 0.9, "pitch_spread_cents": 24.0],
         3: ["drive": 0.22, "bit_depth_bits": 18.0, "downsample_amt": 0.08, "res_shift": 0.45, "tone_db": -1.0],
         4: ["density": 0.38, "gesture_rate_hz": 1.2, "sample_mix": 0.30, "dry_level": 0.72, "stability": 0.7],
         5: ["note_rate_notes_per_s": 4.0, "voice_cap": 4.0, "pitch_follow": 0.82, "velocity_bias": 0.55, "level": 0.62, "stability": 0.72],
         6: ["note_rate_notes_per_s": 2.4, "voice_cap": 2.0, "pitch_follow": 0.8, "velocity_bias": 0.52, "level": 0.58, "stability": 0.72, "dry_level": 0.68],
-        7: ["swap_rate_hz": 1.8, "crossfade_ms": 180.0, "bucket_sharpness": 0.6, "mapping_entropy": 0.5, "mix": 0.88],
+        7: ["swap_rate_hz": 2.6, "crossfade_ms": 70.0, "bucket_sharpness": 0.74, "mapping_entropy": 0.72, "mix": 0.94],
         8: ["reverb_rand_amt": 0.28, "reverb_decay_base_s": 1.0, "reverb_decay_range_s": 0.6, "reverb_color": 0.42, "twitchiness": 0.32, "motion_speed": 0.38, "spread": 0.58],
         9: ["particle_density": 0.42, "particle_voice_cap": 8.0, "particle_decay_s": 0.55, "particle_brightness": 0.45, "motion_speed": 0.35, "spread": 0.65],
         10: ["scene_len_s": 24.0, "chaos": 0.55, "blend": 0.58, "stability": 0.62],

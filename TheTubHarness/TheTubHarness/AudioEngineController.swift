@@ -623,10 +623,23 @@ struct CPUGuardAction {
     let voiceLimit: Int
     let densityScale: Float
     let wetScale: Float
+    let interpolationQuality: Float
     let active: Bool
 
-    static let normal = CPUGuardAction(voiceLimit: 24, densityScale: 1.0, wetScale: 1.0, active: false)
-    static let throttled = CPUGuardAction(voiceLimit: 8, densityScale: 0.65, wetScale: 0.72, active: true)
+    static let normal = CPUGuardAction(
+        voiceLimit: 24,
+        densityScale: 1.0,
+        wetScale: 1.0,
+        interpolationQuality: 1.0,
+        active: false
+    )
+    static let throttled = CPUGuardAction(
+        voiceLimit: 8,
+        densityScale: 0.65,
+        wetScale: 0.72,
+        interpolationQuality: 0.35,
+        active: true
+    )
 }
 
 struct CPUGuard {
@@ -694,16 +707,567 @@ private struct FeedbackDetector {
 private struct GrainVoice {
     var active: Bool = false
     var position: Float = 0
+    var step: Float = 1
+    var decorrelationSamples: Float = 0
+    var pan: Float = 0
+    var envelopeBlend: Float = 0.5
     var age: Int = 0
     var length: Int = 0
     var gain: Float = 0.0
 
-    mutating func reset(position: Float, length: Int, gain: Float) {
+    mutating func reset(
+        position: Float,
+        step: Float,
+        decorrelationSamples: Float,
+        pan: Float,
+        envelopeBlend: Float,
+        length: Int,
+        gain: Float
+    ) {
         self.active = true
         self.position = position
+        self.step = step
+        self.decorrelationSamples = decorrelationSamples
+        self.pan = pan
+        self.envelopeBlend = envelopeBlend
         self.age = 0
         self.length = max(1, length)
         self.gain = gain
+    }
+}
+
+struct Mode1ClockState {
+    private(set) var beatSamples: Int = 48_000
+    private(set) var confidence: Float = 0
+    private(set) var samplesSinceOnset: Int = 0
+    private(set) var onsetCount: Int = 0
+
+    mutating func configure(sampleRate: Float) {
+        beatSamples = max(64, Int(sampleRate))
+        confidence = 0
+        samplesSinceOnset = 0
+        onsetCount = 0
+    }
+
+    mutating func advance(samples: Int = 1) {
+        samplesSinceOnset += max(1, samples)
+        if samplesSinceOnset > beatSamples * 4 {
+            confidence *= 0.985
+        }
+    }
+
+    mutating func noteOnset(intervalSamples: Int, sampleRate: Float) {
+        let minBeat = max(64, Int(sampleRate * 0.28))
+        let maxBeat = max(minBeat + 1, Int(sampleRate * 1.6))
+        let clamped = max(minBeat, min(maxBeat, intervalSamples))
+        if onsetCount == 0 {
+            beatSamples = clamped
+        } else {
+            let mixed = (Float(beatSamples) * 0.86) + (Float(clamped) * 0.14)
+            beatSamples = max(minBeat, min(maxBeat, Int(mixed)))
+        }
+        onsetCount += 1
+        samplesSinceOnset = 0
+        confidence = min(1.0, confidence + 0.17)
+    }
+
+    mutating func noteUntrustedOnset() {
+        confidence = max(0, confidence - 0.07)
+        samplesSinceOnset = 0
+    }
+
+    mutating func confidenceDecay() {
+        confidence = max(0, confidence * 0.995)
+    }
+
+    func effectiveBeatSamples(sampleRate: Float) -> Int {
+        let fallback = max(64, Int(sampleRate))
+        if confidence >= 0.42 {
+            return beatSamples
+        }
+        return fallback
+    }
+
+    func stepSamples(gridDiv: String, sampleRate: Float) -> Int {
+        let beat = effectiveBeatSamples(sampleRate: sampleRate)
+        if gridDiv == "1/16" {
+            return max(64, beat / 4)
+        }
+        return max(64, beat / 2)
+    }
+}
+
+private struct Mode1RepeatScheduler {
+    var pendingTrigger: Bool = false
+    var active: Bool = false
+    var repeatStart: Int = 0
+    var repeatLength: Int = 0
+    var repeatPos: Int = 0
+    var sliceLength: Int = 0
+    var slicePos: Int = 0
+    var sliceReadHead: Float = 0
+    var sliceStep: Float = 1
+    var repeatSamplesRemaining: Int = 0
+    var continuousRepeatSamples: Int = 0
+    var cooldownSamples: Int = 0
+    var boundaryStep: Int = -1
+    var patternStep: Int = 0
+    var lastSliceTailSample: Float = 0
+    var barStepCounter: Int = 0
+    var repeatGain: Float = 0
+    var sliceJumpIndex: Int = 0
+}
+
+struct Mode2GranulatorState {
+    var prevInput: Float = 0
+    var readHeadSeeded: Bool = false
+    var readHead: Float = 0
+    var scanVelocity: Float = 0
+    var freezeSamplesRemaining: Int = 0
+    var freezeCooldownSamples: Int = 0
+    var spawnCounter: Int = 0
+    var transientDuck: Float = 0
+    var loudnessNorm: Float = 1
+    var dampLP: Float = 0
+    var sceneWander: Float = 0
+    fileprivate var grains: [GrainVoice] = Array(repeating: GrainVoice(), count: 24)
+
+    init() {}
+
+    mutating func beginFreeze(sampleRate: Float, requestedLenSec: Float) {
+        let bounded = min(max(requestedLenSec, 0.08), 3.2)
+        freezeSamplesRemaining = max(1, Int(sampleRate * Float(bounded)))
+        freezeCooldownSamples = max(1, Int(sampleRate * 0.45))
+    }
+}
+
+private struct Mode7Biquad {
+    var b0: Float = 1
+    var b1: Float = 0
+    var b2: Float = 0
+    var a1: Float = 0
+    var a2: Float = 0
+    var z1: Float = 0
+    var z2: Float = 0
+
+    mutating func configureLowPass(cutoffHz: Float, sampleRate: Float, q: Float = 0.70710678) {
+        configure(cutoffHz: cutoffHz, sampleRate: sampleRate, q: q, highPass: false)
+    }
+
+    mutating func configureHighPass(cutoffHz: Float, sampleRate: Float, q: Float = 0.70710678) {
+        configure(cutoffHz: cutoffHz, sampleRate: sampleRate, q: q, highPass: true)
+    }
+
+    private mutating func configure(cutoffHz: Float, sampleRate: Float, q: Float, highPass: Bool) {
+        let sr = max(8_000, sampleRate)
+        let fc = max(20.0, min(cutoffHz, sr * 0.45))
+        let omega = 2.0 * Float.pi * fc / sr
+        let sinW = sinf(omega)
+        let cosW = cosf(omega)
+        let alpha = sinW / (2.0 * max(0.1, q))
+
+        let rawB0: Float
+        let rawB1: Float
+        let rawB2: Float
+        if highPass {
+            rawB0 = (1.0 + cosW) * 0.5
+            rawB1 = -(1.0 + cosW)
+            rawB2 = (1.0 + cosW) * 0.5
+        } else {
+            rawB0 = (1.0 - cosW) * 0.5
+            rawB1 = 1.0 - cosW
+            rawB2 = (1.0 - cosW) * 0.5
+        }
+        let rawA0 = 1.0 + alpha
+        let rawA1 = -2.0 * cosW
+        let rawA2 = 1.0 - alpha
+
+        let invA0 = 1.0 / max(1e-6, rawA0)
+        b0 = rawB0 * invA0
+        b1 = rawB1 * invA0
+        b2 = rawB2 * invA0
+        a1 = rawA1 * invA0
+        a2 = rawA2 * invA0
+        z1 = 0
+        z2 = 0
+    }
+
+    @inline(__always)
+    mutating func process(_ input: Float) -> Float {
+        let out = (b0 * input) + z1
+        z1 = (b1 * input) - (a1 * out) + z2
+        z2 = (b2 * input) - (a2 * out)
+        return out
+    }
+}
+
+private struct Mode7LinkwitzRileyCrossover {
+    var lowA = Mode7Biquad()
+    var lowB = Mode7Biquad()
+
+    mutating func configure(cutoffHz: Float, sampleRate: Float) {
+        lowA.configureLowPass(cutoffHz: cutoffHz, sampleRate: sampleRate)
+        lowB.configureLowPass(cutoffHz: cutoffHz, sampleRate: sampleRate)
+    }
+
+    @inline(__always)
+    mutating func split(_ input: Float) -> (Float, Float) {
+        let low = lowB.process(lowA.process(input))
+        // Keep each split complementary so identity mapping reconstructs cleanly.
+        let high = input - low
+        return (low, high)
+    }
+}
+
+struct Mode7ClockState {
+    private(set) var beatSamples: Int = 48_000
+    private(set) var confidence: Float = 0
+    private(set) var samplesSinceOnset: Int = 0
+    private(set) var onsetCount: Int = 0
+    private(set) var lastOnsetSample: Int64 = -1
+
+    mutating func configure(sampleRate: Float) {
+        beatSamples = max(64, Int(sampleRate))
+        confidence = 0
+        samplesSinceOnset = 0
+        onsetCount = 0
+        lastOnsetSample = -1
+    }
+
+    mutating func advance(samples: Int = 1) {
+        samplesSinceOnset += max(1, samples)
+        if samplesSinceOnset > beatSamples * 4 {
+            confidence *= 0.988
+        }
+    }
+
+    mutating func noteOnset(sampleCounter: Int64, sampleRate: Float) {
+        let minBeat = max(64, Int(sampleRate * 0.22))
+        let maxBeat = max(minBeat + 1, Int(sampleRate * 1.9))
+        if lastOnsetSample >= 0 {
+            let interval = Int(sampleCounter - lastOnsetSample)
+            if interval >= minBeat && interval <= maxBeat {
+                if onsetCount == 0 {
+                    beatSamples = interval
+                } else {
+                    let mixed = (Float(beatSamples) * 0.84) + (Float(interval) * 0.16)
+                    beatSamples = max(minBeat, min(maxBeat, Int(mixed)))
+                }
+                onsetCount += 1
+                confidence = min(1.0, confidence + 0.14)
+            } else {
+                confidence = max(0, confidence * 0.90)
+            }
+        } else {
+            confidence = max(0, confidence * 0.97)
+        }
+        lastOnsetSample = sampleCounter
+        samplesSinceOnset = 0
+    }
+
+    mutating func confidenceDecay() {
+        confidence = max(0, confidence * 0.996)
+    }
+
+    func effectiveBeatSamples(sampleRate: Float) -> Int {
+        let fallback = max(64, Int(sampleRate))
+        if confidence >= 0.40 {
+            return beatSamples
+        }
+        return fallback
+    }
+
+    func stepSamples(sampleRate: Float, swapRateNorm: Float) -> Int {
+        let rateHz = 0.1 + 5.9 * max(0, min(1, swapRateNorm))
+        let beat = effectiveBeatSamples(sampleRate: sampleRate)
+        let desired = max(1.0, sampleRate / rateHz)
+        let divF = Float(beat) / desired
+        let div = max(1, min(12, Int(divF.rounded())))
+        return max(64, beat / div)
+    }
+}
+
+struct Mode7SwapScheduler {
+    private(set) var sceneStep: Int = 0
+    var samplesUntilStep: Int = 0
+    private(set) var crossfadeSamples: Int = 1
+    private(set) var crossfadeRemaining: Int = 0
+    private(set) var activeMatrix: [Float] = Mode7SwapScheduler.identityMatrix()
+    private(set) var previousMatrix: [Float] = Mode7SwapScheduler.identityMatrix()
+    private(set) var targetMatrix: [Float] = Mode7SwapScheduler.identityMatrix()
+    var liveMatrix: [Float] = Mode7SwapScheduler.identityMatrix()
+    private(set) var activeBandGains: [Float] = Mode7SwapScheduler.unityBandGains()
+    private(set) var previousBandGains: [Float] = Mode7SwapScheduler.unityBandGains()
+    private(set) var targetBandGains: [Float] = Mode7SwapScheduler.unityBandGains()
+    var liveBandGains: [Float] = Mode7SwapScheduler.unityBandGains()
+
+    static func identityMatrix() -> [Float] {
+        var out = [Float](repeating: 0, count: 64)
+        for i in 0..<8 {
+            out[i * 8 + i] = 1.0
+        }
+        return out
+    }
+
+    static func unityBandGains() -> [Float] {
+        Array(repeating: 1.0, count: 8)
+    }
+
+    private static func normalizedBandGains(_ values: [Float]) -> [Float] {
+        if values.count != 8 {
+            return unityBandGains()
+        }
+        var out = [Float](repeating: 1.0, count: 8)
+        var sum: Float = 0
+        for i in 0..<8 {
+            out[i] = max(0.12, min(2.80, values[i]))
+            sum += out[i]
+        }
+        let invMean = sum > 1e-6 ? (8.0 / sum) : 1.0
+        for i in 0..<8 {
+            out[i] *= invMean
+        }
+        return out
+    }
+
+    mutating func configure(sampleRate: Float) {
+        let identity = Self.identityMatrix()
+        let unity = Self.unityBandGains()
+        sceneStep = 0
+        samplesUntilStep = max(1, Int(sampleRate * 0.50))
+        crossfadeSamples = max(1, Int(sampleRate * 0.02))
+        crossfadeRemaining = 0
+        activeMatrix = identity
+        previousMatrix = identity
+        targetMatrix = identity
+        liveMatrix = identity
+        activeBandGains = unity
+        previousBandGains = unity
+        targetBandGains = unity
+        liveBandGains = unity
+    }
+
+    mutating func beginCrossfade(to matrix: [Float], crossfadeSamples: Int, bandGains: [Float]? = nil) {
+        guard matrix.count == 64 else { return }
+        previousMatrix = liveMatrix
+        targetMatrix = matrix
+        previousBandGains = liveBandGains
+        targetBandGains = Self.normalizedBandGains(bandGains ?? activeBandGains)
+        self.crossfadeSamples = max(1, crossfadeSamples)
+        crossfadeRemaining = self.crossfadeSamples
+    }
+
+    mutating func advanceMatrix() {
+        if crossfadeRemaining > 0 {
+            let t = 1.0 - (Float(crossfadeRemaining) / Float(max(1, crossfadeSamples)))
+            for i in 0..<64 {
+                liveMatrix[i] = previousMatrix[i] + (targetMatrix[i] - previousMatrix[i]) * t
+            }
+            for i in 0..<8 {
+                liveBandGains[i] = previousBandGains[i] + (targetBandGains[i] - previousBandGains[i]) * t
+            }
+            crossfadeRemaining -= 1
+            if crossfadeRemaining <= 0 {
+                activeMatrix = targetMatrix
+                liveMatrix = activeMatrix
+                activeBandGains = targetBandGains
+                liveBandGains = activeBandGains
+            }
+        } else {
+            liveMatrix = activeMatrix
+            liveBandGains = activeBandGains
+        }
+    }
+
+    mutating func advanceSceneStep() {
+        sceneStep += 1
+    }
+}
+
+struct Mode7RedistributorState {
+    static let defaultCrossovers: [Float] = [120, 220, 420, 780, 1_400, 2_500, 4_300]
+
+    fileprivate var crossovers: [Mode7LinkwitzRileyCrossover] = Array(repeating: Mode7LinkwitzRileyCrossover(), count: 7)
+    var bands: [Float] = Array(repeating: 0, count: 8)
+    var mapped: [Float] = Array(repeating: 0, count: 8)
+    var loudnessNorm: Float = 1
+    var hfClampY: Float = 0
+    var prevInput: Float = 0
+    var inputEnv: Float = 0
+    var mappingId: String = "swap_pairs"
+    var mappingFamily: String = "bucket_swap"
+    var entropy: Float = 0.5
+    var variance: Float = 0.2
+    var seed: Int = 7
+    var clock = Mode7ClockState()
+    var scheduler = Mode7SwapScheduler()
+
+    init() {}
+
+    mutating func configure(sampleRate: Float) {
+        let nyquistBound = sampleRate * 0.45
+        for i in 0..<crossovers.count {
+            let cutoff = max(60.0, min(Self.defaultCrossovers[i], nyquistBound))
+            crossovers[i].configure(cutoffHz: cutoff, sampleRate: sampleRate)
+        }
+        bands = Array(repeating: 0, count: 8)
+        mapped = Array(repeating: 0, count: 8)
+        loudnessNorm = 1
+        hfClampY = 0
+        prevInput = 0
+        inputEnv = 0
+        clock.configure(sampleRate: sampleRate)
+        scheduler.configure(sampleRate: sampleRate)
+    }
+
+    mutating func splitBands(input: Float) {
+        var remainder = input
+        for i in 0..<crossovers.count {
+            let (low, high) = crossovers[i].split(remainder)
+            bands[i] = low
+            remainder = high
+        }
+        bands[7] = remainder
+    }
+
+    mutating func identityReconstructionSample(_ input: Float) -> Float {
+        splitBands(input: input)
+        var out: Float = 0
+        for i in 0..<bands.count {
+            out += bands[i]
+        }
+        return out
+    }
+}
+
+struct Mode7SceneBuilder {
+    static func buildMatrix(
+        mappingId: String,
+        mappingFamily: String,
+        sharpness: Float,
+        entropy: Float,
+        varianceAmt: Float,
+        seed: Int,
+        sceneStep: Int
+    ) -> [Float] {
+        let mId = mappingId.isEmpty ? "swap_pairs" : mappingId
+        let family = mappingFamily.lowercased()
+        let sharp = max(0, min(1, sharpness))
+        let ent = max(0, min(1, entropy))
+        let varAmt = max(0, min(1, varianceAmt))
+        let familyAggression: Float = family.contains("bucket") ? 1.0 : 0.85
+
+        var matrix = [Float](repeating: 0, count: 64)
+        for src in 0..<8 {
+            let primary = mappedDest(src, mappingId: mId, sceneStep: sceneStep, entropy: ent)
+            let direction = ((sceneStep + src) & 1) == 0 ? 1 : -1
+            let secondary = (primary + direction + 8) % 8
+            let tertiary = (primary + 2 + ((sceneStep + src) % 3)) % 8
+
+            var row = [Float](repeating: 0, count: 8)
+            row[primary] += max(0.05, (0.46 + 0.40 * sharp - 0.16 * ent) * familyAggression)
+            row[secondary] += max(0.04, 0.24 + 0.30 * ent + 0.08 * (1.0 - sharp))
+            row[tertiary] += max(0.03, (0.10 + 0.20 * ent) * familyAggression)
+
+            let smearBase = (0.001 + 0.032 * ent) * max(0.05, varAmt)
+            for dst in 0..<8 where dst != primary && dst != secondary && dst != tertiary {
+                let jitterSeed = seed &+ (sceneStep &* 97) &+ (src &* 13)
+                row[dst] = smearBase * noise(seed: jitterSeed, src: src, dst: dst)
+            }
+
+            var rowSum: Float = 0
+            for dst in 0..<8 {
+                rowSum += row[dst]
+            }
+            if rowSum < 1e-6 {
+                row[src] = 1
+                rowSum = 1
+            }
+            let inv = 1.0 / rowSum
+            for dst in 0..<8 {
+                matrix[src * 8 + dst] = row[dst] * inv
+            }
+        }
+        return matrix
+    }
+
+    static func buildBandGains(
+        mappingId: String,
+        mappingFamily: String,
+        sharpness: Float,
+        entropy: Float,
+        varianceAmt: Float,
+        seed: Int,
+        sceneStep: Int
+    ) -> [Float] {
+        let mId = mappingId.isEmpty ? "swap_pairs" : mappingId
+        let family = mappingFamily.lowercased()
+        let sharp = max(0, min(1, sharpness))
+        let ent = max(0, min(1, entropy))
+        let varAmt = max(0, min(1, varianceAmt))
+        let familyDrive: Float = family.contains("bucket") ? 1.0 : 0.84
+        let depth = (0.24 + 0.92 * ent) * familyDrive
+        let sweepDir: Float = mId == "invert_diagonal" ? -1.0 : 1.0
+
+        let profile: [Float]
+        switch mId {
+        case "invert_diagonal":
+            profile = [1.60, 1.44, 1.30, 1.16, 0.98, 0.82, 0.68, 0.56]
+        case "octave_flip":
+            profile = [1.34, 0.92, 0.70, 1.08, 1.24, 0.76, 0.62, 1.50]
+        default:
+            profile = [0.60, 1.44, 0.78, 1.34, 0.86, 1.24, 0.98, 1.14]
+        }
+        let rotationStep = max(1, Int((1.0 + floor(ent * 3.0))))
+        let rot = (sceneStep * rotationStep) % 8
+        var gains = [Float](repeating: 1.0, count: 8)
+        for band in 0..<8 {
+            let idx = (band + rot + 8) % 8
+            let base = profile[idx]
+            let stripe: Float = ((band + sceneStep) & 1) == 0 ? 1.0 : -0.72
+            let accentDepth: Float = 0.30 + 0.40 * sharp
+            let accent = 1.0 + (stripe * depth * accentDepth)
+            let sweepSlope: Float = 0.02 + 0.04 * ent
+            let bandOffset = Float(band) - 3.5
+            let sweep = 1.0 + (sweepDir * bandOffset * sweepSlope)
+            let jitterSeed = seed &+ (sceneStep &* 71)
+            let jitterNoise = noise(seed: jitterSeed, src: band, dst: idx)
+            let jitterDepth: Float = 0.18 + 0.70 * varAmt
+            let jitter = 1.0 + ((jitterNoise - 0.5) * jitterDepth)
+            let shaped = base * accent * sweep * jitter
+            gains[band] = max(0.12, min(2.80, shaped))
+        }
+        var sum: Float = 0
+        for value in gains {
+            sum += value
+        }
+        if sum < 1e-6 {
+            return Array(repeating: 1.0, count: 8)
+        }
+        let invMean = 8.0 / sum
+        for i in 0..<8 {
+            gains[i] *= invMean
+        }
+        return gains
+    }
+
+    private static func mappedDest(_ src: Int, mappingId: String, sceneStep: Int, entropy: Float) -> Int {
+        let jumpSpan = max(1, Int((entropy * 3.0).rounded()))
+        let offset = (sceneStep * jumpSpan) % 8
+        switch mappingId {
+        case "invert_diagonal":
+            return (7 - src + offset) % 8
+        case "octave_flip":
+            return (src + 4 + offset) % 8
+        default:
+            return ((src ^ 1) + offset) % 8
+        }
+    }
+
+    private static func noise(seed: Int, src: Int, dst: Int) -> Float {
+        let x = Float((seed &* 31) ^ (src &* 131) ^ (dst &* 521))
+        let n = sinf(x * 12.9898 + 78.233) * 43758.5453
+        return n - floorf(n)
     }
 }
 
@@ -955,11 +1519,8 @@ private final class MasterRenderState {
 
     private var granBuffer = [Float](repeating: 0, count: 262_144)
     private var granWrite: Int = 0
-    private var granReadHead: Float = 0
-    private var freezeSamplesRemaining: Int = 0
-    private var grainSpawnCounter: Int = 0
     private var grainRng: UInt64 = 0x9E3779B97F4A7C15
-    private var grains = Array(repeating: GrainVoice(), count: 24)
+    private var mode2State = Mode2GranulatorState()
 
     private var resonY1 = [Float](repeating: 0, count: 6)
     private var resonY2 = [Float](repeating: 0, count: 6)
@@ -977,18 +1538,12 @@ private final class MasterRenderState {
     private var mode1Write: Int = 0
     private var mode1PrevInput: Float = 0
     private var mode1Env: Float = 0
-    private var mode1PendingTrigger: Bool = false
-    private var mode1RepeatActive: Bool = false
-    private var mode1RepeatStart: Int = 0
-    private var mode1RepeatLength: Int = 0
-    private var mode1RepeatPos: Int = 0
-    private var mode1SliceLength: Int = 0
-    private var mode1SlicePos: Int = 0
-    private var mode1RepeatSamplesRemaining: Int = 0
-    private var mode1ContinuousRepeatSamples: Int = 0
-    private var mode1CooldownSamples: Int = 0
-    private var mode1BoundaryStep: Int = -1
-    private var mode1PatternStep: Int = 0
+    private var mode1Clock = Mode1ClockState()
+    private var mode1Scheduler = Mode1RepeatScheduler()
+    private var mode1TransientDuck: Float = 0
+    private var mode1DryAttackBoost: Float = 0
+    private var mode1FeedbackLP: Float = 0
+    private var mode1LastOnsetSample: Int64 = -1
     private var mode1SpatialX: Float = 0
     private var mode1SpatialY: Float = 0
 
@@ -1027,18 +1582,8 @@ private final class MasterRenderState {
     private var resonNoteAccumulator: Float = 0
     private var resonDebugCounter: Int = 0
 
-    // Mode 7 frequency bucket swap.
-    private var mode7CrossFreqs: [Float] = [90, 170, 320, 620, 1_200, 2_300, 4_200]
-    private var mode7LPStates = [Float](repeating: 0, count: 7)
-    private var mode7BandScratch = [Float](repeating: 0, count: 8)
-    private var mode7MappedScratch = [Float](repeating: 0, count: 8)
-    private var mode7MatrixCurrent = [Float](repeating: 0, count: 64)
-    private var mode7MatrixTarget = [Float](repeating: 0, count: 64)
-    private var mode7MappingIdCurrent: String = "swap_pairs"
-    private var mode7MorphPhase: Float = 1
-    private var mode7LoudnessNorm: Float = 1
-    private var mode7HfClampY: Float = 0
-    private var mode7BeatStep: Int = -1
+    // Mode 7 true redistribution state.
+    private var mode7State = Mode7RedistributorState()
 
     // Gesture-aware mode switching.
     private var pendingControl: AudioControl?
@@ -1062,10 +1607,12 @@ private final class MasterRenderState {
             self.hpAlpha = hpfAlpha(fc: 100.0, sampleRate: self.sampleRate)
             self.reverb.configure(sampleRate: self.sampleRate)
             self.reverb.setTarget(controlCurrent.reverb)
+            self.mode1Clock.configure(sampleRate: self.sampleRate)
+            self.mode2State = Mode2GranulatorState()
+            self.mode7State.configure(sampleRate: self.sampleRate)
             seedMode4Tables()
             preloadResonifierDefaults()
-            setMode7TargetMatrix(mappingId: "swap_pairs", bias: 0.5, varianceAmt: 0.2, seed: 7)
-            mode7MatrixCurrent = mode7MatrixTarget
+            setMode7TargetMatrix(mappingId: "swap_pairs", mappingFamily: "bucket_swap", bias: 0.5, varianceAmt: 0.2, seed: 7)
             mode4SessionId = "session_\(Int(Date().timeIntervalSince1970))"
         }
     }
@@ -1093,6 +1640,7 @@ private final class MasterRenderState {
             if clamped.mode == 7 {
                 setMode7TargetMatrix(
                     mappingId: clamped.mappingId,
+                    mappingFamily: clamped.mappingFamily,
                     bias: Float(clamped.bias),
                     varianceAmt: Float(clamped.varianceAmt),
                     seed: clamped.variantSeed
@@ -1124,6 +1672,11 @@ private final class MasterRenderState {
             if controlCurrent.mode == 1 {
                 out.append("mode1_grid_div:\(controlCurrent.gridDiv)")
                 out.append("mode1_repeat_style:\(controlCurrent.repeatStyleId)")
+                out.append("mode1_clock_conf:\(String(format: "%.2f", mode1Clock.confidence))")
+                out.append("mode1_beat_samples:\(mode1Clock.effectiveBeatSamples(sampleRate: sampleRate))")
+            } else if controlCurrent.mode == 2 {
+                out.append("mode2_freeze:\(mode2State.freezeSamplesRemaining > 0 ? 1 : 0)")
+                out.append("mode2_voices:\(mode2State.grains.filter { $0.active }.count)")
             } else if controlCurrent.mode == 4 {
                 out.append("performer_session_id:\(mode4SessionId)")
                 out.append("mode4_gesture_type:\(controlCurrent.gestureTypeId)")
@@ -1134,6 +1687,9 @@ private final class MasterRenderState {
             } else if controlCurrent.mode == 7 {
                 out.append("mode7_mapping_id:\(controlCurrent.mappingId)")
                 out.append("mode7_wet:\(String(format: "%.3f", controlCurrent.wetLevel))")
+                out.append("mode7_clock_conf:\(String(format: "%.2f", mode7State.clock.confidence))")
+                out.append("mode7_step_samples:\(mode7State.clock.stepSamples(sampleRate: sampleRate, swapRateNorm: Float(controlCurrent.morphRate)))")
+                out.append("mode7_crossfade_samples:\(mode7State.scheduler.crossfadeSamples)")
             }
             return out
         }
@@ -1170,8 +1726,8 @@ private final class MasterRenderState {
     private func pendingGestureSamples(outgoingMode: Int) -> Int {
         switch outgoingMode {
         case 1:
-            if mode1RepeatActive {
-                let remainingInSlice = max(0, mode1SliceLength - mode1SlicePos)
+            if mode1Scheduler.active {
+                let remainingInSlice = max(0, mode1Scheduler.sliceLength - mode1Scheduler.slicePos)
                 return min(max(remainingInSlice, Int(sampleRate * 0.08)), Int(sampleRate * 0.60))
             }
             return Int(sampleRate * 0.06)
@@ -1327,8 +1883,10 @@ private final class MasterRenderState {
                 switch mode {
                 case 1:
                     let repeatOut = processMode1(input: hp, interventions: &interventions)
-                    dryMono = hp * Float(controlCurrent.dryLevel)
-                    fxMono = repeatOut * Float(controlCurrent.wetLevel)
+                    let dryBoost = 1.0 + 0.22 * mode1DryAttackBoost
+                    let wetDuck = max(0.45, 1.0 - 0.52 * mode1TransientDuck)
+                    dryMono = hp * Float(controlCurrent.dryLevel) * dryBoost
+                    fxMono = repeatOut * Float(controlCurrent.wetLevel) * wetDuck
                     reverbSend = (dryMono * 0.08) + (fxMono * 0.20)
                     placeMode1Object(
                         sample: dryMono + fxMono,
@@ -1338,8 +1896,12 @@ private final class MasterRenderState {
 
                 case 2:
                     let gran = processGranulator(input: hp, cpuAction: activeCpu, interventions: &interventions)
-                    dryMono = hp * Float(controlCurrent.dryLevel)
-                    fxMono = gran * Float(controlCurrent.wetLevel)
+                    let mode2DryBoost = 1.0 + 0.14 * mode2State.transientDuck
+                    let mode2WetDuck = max(0.50, 1.0 - 0.44 * mode2State.transientDuck)
+                    let densityBias = Float(controlCurrent.grainDensity)
+                    let densityWetTrim = 1.0 - 0.24 * max(0, densityBias - 0.55)
+                    dryMono = hp * Float(controlCurrent.dryLevel) * mode2DryBoost
+                    fxMono = gran * Float(controlCurrent.wetLevel) * mode2WetDuck * densityWetTrim
                     reverbSend = (dryMono * 0.12) + (fxMono * 0.48)
                     placeMainObject(
                         sample: dryMono + fxMono,
@@ -1399,14 +1961,14 @@ private final class MasterRenderState {
 
                 case 7:
                     let swapped = processMode7(input: hp)
-                    dryMono = hp * Float(controlCurrent.dryLevel)
-                    fxMono = swapped * Float(controlCurrent.wetLevel)
-                    reverbSend = fxMono * 0.08
+                    dryMono = hp * min(Float(controlCurrent.dryLevel), 0.12)
+                    fxMono = swapped * min(1.0, Float(controlCurrent.wetLevel) * 1.08)
+                    reverbSend = fxMono * 0.015
                     placeMainObject(
                         sample: dryMono + fxMono,
-                        spread: Float(controlCurrent.spread),
-                        motionSpeed: Float(controlCurrent.motionSpeed),
-                        radius: Float(max(0.20, controlCurrent.motionRadius)),
+                        spread: max(0.60, Float(controlCurrent.spread)),
+                        motionSpeed: max(0.28, Float(controlCurrent.motionSpeed)),
+                        radius: max(0.44, Float(controlCurrent.motionRadius)),
                         mode: mode,
                         &ch0, &ch1, &ch2, &ch3, &ch4, &ch5
                     )
@@ -1446,6 +2008,9 @@ private final class MasterRenderState {
                 var reverbWet = reverb.process(reverbSend) * activeCpu.wetScale * feedbackWetScale
                 if controlCurrent.mode == 3 {
                     reverbWet = processWetHFClamp(input: reverbWet)
+                } else if controlCurrent.mode == 7 {
+                    // Keep Mode 7 character dominated by redistribution, not room wash.
+                    reverbWet *= 0.16
                 }
                 let diffuse = reverbWet * 0.408
                 ch0 += diffuse
@@ -1539,6 +2104,7 @@ private final class MasterRenderState {
         controlCurrent.grainDensity += Double(slew) * (controlTarget.grainDensity - controlCurrent.grainDensity)
         controlCurrent.scanRate += Double(slew) * (controlTarget.scanRate - controlCurrent.scanRate)
         controlCurrent.scanJumpProb += Double(slew) * (controlTarget.scanJumpProb - controlCurrent.scanJumpProb)
+        controlCurrent.grainPitchSpread += Double(slew) * (controlTarget.grainPitchSpread - controlCurrent.grainPitchSpread)
         controlCurrent.freezeProb += Double(slew) * (controlTarget.freezeProb - controlCurrent.freezeProb)
         controlCurrent.freezeLenSec += Double(slew) * (controlTarget.freezeLenSec - controlCurrent.freezeLenSec)
         controlCurrent.repeatProb += Double(slew) * (controlTarget.repeatProb - controlCurrent.repeatProb)
@@ -1630,33 +2196,81 @@ private final class MasterRenderState {
     }
 
     private func mode1GridSamples() -> Int {
-        if controlCurrent.gridDiv == "1/16" {
-            return max(64, Int(sampleRate * 0.25))
-        }
-        return max(64, Int(sampleRate * 0.5))
+        mode1Clock.stepSamples(gridDiv: controlCurrent.gridDiv, sampleRate: sampleRate)
     }
 
-    private func startMode1Repeat(gridSamples: Int) {
-        let windowSec = 0.5 + 1.5 * Float(controlCurrent.windowNorm)
-        var windowSamples = Int(windowSec * sampleRate)
+    private func mode1StepsPerBar() -> Int {
+        controlCurrent.gridDiv == "1/16" ? 16 : 8
+    }
+
+    private func mode1WrappedIndex(_ index: Int) -> Int {
+        var out = index % mode1Buffer.count
+        if out < 0 { out += mode1Buffer.count }
+        return out
+    }
+
+    private func mode1SampleLinear(_ position: Float) -> Float {
+        let i0 = Int(floorf(position))
+        let frac = position - Float(i0)
+        let s0 = mode1Buffer[mode1WrappedIndex(i0)]
+        let s1 = mode1Buffer[mode1WrappedIndex(i0 + 1)]
+        return s0 + (s1 - s0) * frac
+    }
+
+    private func resetMode1SliceReadHead(gridSamples: Int) {
+        let gate = Float(controlCurrent.gateSharpness)
+        let jitterDepth = Float(gridSamples) * (0.10 + 0.22 * gate)
+        let jitter = Int((randomUnit() * 2.0 - 1.0) * jitterDepth)
+        let base = mode1Scheduler.repeatStart + mode1Scheduler.repeatPos + jitter
+        mode1Scheduler.sliceReadHead = Float(mode1WrappedIndex(base))
+
+        let speedVariance = (randomUnit() * 2.0 - 1.0) * (0.05 + 0.16 * gate)
+        var step: Float
+        if controlCurrent.repeatStyleId == "stutter_b" {
+            let rateSet: [Float] = [1.0, -1.0, 0.5, 1.4, -0.72, 1.2]
+            step = rateSet[mode1Scheduler.sliceJumpIndex % rateSet.count] + speedVariance
+        } else {
+            let rateSet: [Float] = [1.0, 0.5, 1.0, 1.33]
+            step = rateSet[mode1Scheduler.sliceJumpIndex % rateSet.count] + speedVariance
+        }
+        mode1Scheduler.sliceStep = step
+    }
+
+    private func startMode1Repeat(gridSamples: Int, triggerStrength: Float) {
+        let feedbackAmount = min(max(Float(controlCurrent.thresholdBias), 0), 1)
+        let beatSamples = mode1Clock.effectiveBeatSamples(sampleRate: sampleRate)
+        let phraseBeats = 1.0 + (3.0 * Float(controlCurrent.windowNorm))
+        var windowSamples = Int(Float(beatSamples) * phraseBeats)
         windowSamples = max(gridSamples, min(windowSamples, Int(2.0 * sampleRate)))
         windowSamples = max(gridSamples, (windowSamples / gridSamples) * gridSamples)
 
         let start = mode1Write - windowSamples
-        mode1RepeatStart = start >= 0 ? start : (start + mode1Buffer.count)
-        mode1RepeatLength = max(gridSamples, windowSamples)
-        mode1RepeatPos = 0
+        mode1Scheduler.repeatStart = start >= 0 ? start : (start + mode1Buffer.count)
+        mode1Scheduler.repeatLength = max(gridSamples, windowSamples)
+        mode1Scheduler.repeatPos = 0
 
-        let baseSlice = Int((0.05 + 0.35 * Float(controlCurrent.stutterLenNorm)) * sampleRate)
-        let minSlice = max(32, gridSamples / 2)
-        mode1SliceLength = max(minSlice, min(mode1RepeatLength, (baseSlice / minSlice) * minSlice))
-        if mode1SliceLength <= 0 {
-            mode1SliceLength = minSlice
+        let baseSliceMs = 30.0 + (420.0 * Float(controlCurrent.stutterLenNorm))
+        let baseSlice = Int((baseSliceMs / 1000.0) * sampleRate)
+        let quantum = max(16, gridSamples / 4)
+        var slice = max(quantum, (baseSlice / quantum) * quantum)
+        if controlCurrent.stutterLenNorm < 0.20 {
+            slice = max(quantum, gridSamples / 4)
+        } else if controlCurrent.stutterLenNorm < 0.55 {
+            slice = max(quantum, gridSamples / 2)
+        } else {
+            slice = max(quantum, gridSamples)
         }
-        mode1SlicePos = 0
+        mode1Scheduler.sliceLength = max(quantum, min(mode1Scheduler.repeatLength, slice))
+        mode1Scheduler.slicePos = 0
 
-        mode1RepeatSamplesRemaining = Int((0.8 + 5.2 * Float(controlCurrent.repeatProb)) * sampleRate)
-        mode1RepeatActive = true
+        let baseDurSec = 0.55 + 5.5 * Float(controlCurrent.repeatProb)
+        mode1Scheduler.repeatSamplesRemaining = Int(baseDurSec * sampleRate)
+        mode1Scheduler.active = true
+        mode1Scheduler.pendingTrigger = false
+        mode1Scheduler.lastSliceTailSample = triggerStrength * 0.06
+        mode1Scheduler.repeatGain = min(1.12, (0.58 + 0.34 * feedbackAmount) * (0.86 + 0.24 * triggerStrength))
+        mode1Scheduler.sliceJumpIndex = 0
+        resetMode1SliceReadHead(gridSamples: gridSamples)
     }
 
     private func updateMode1Spatial(step: Int) {
@@ -1694,80 +2308,151 @@ private final class MasterRenderState {
     }
 
     private func processMode1(input: Float, interventions: inout SafetyInterventions) -> Float {
-        mode1Buffer[mode1Write] = input
+        let feedbackAmount = min(max(Float(controlCurrent.thresholdBias), 0), 1)
+        let feedbackWrite = mode1FeedbackLP * (0.02 + 0.08 * feedbackAmount)
+        mode1Buffer[mode1Write] = input + feedbackWrite
         mode1Write += 1
         if mode1Write >= mode1Buffer.count { mode1Write = 0 }
+
+        mode1Clock.advance()
+        mode1TransientDuck *= 0.9962
+        mode1DryAttackBoost *= 0.9930
+        mode1FeedbackLP *= 0.9994
 
         let delta = abs(input - mode1PrevInput)
         mode1PrevInput = input
         mode1Env += 0.004 * (abs(input) - mode1Env)
 
-        if mode1CooldownSamples > 0 {
-            mode1CooldownSamples -= 1
+        if mode1Scheduler.cooldownSamples > 0 {
+            mode1Scheduler.cooldownSamples -= 1
         }
 
         let gridSamples = mode1GridSamples()
         let step = Int(sampleCounter / Int64(max(1, gridSamples)))
-        if step != mode1BoundaryStep {
-            mode1BoundaryStep = step
-            mode1PatternStep += 1
-            updateMode1Spatial(step: mode1PatternStep)
-            if mode1PendingTrigger, mode1CooldownSamples <= 0 {
-                startMode1Repeat(gridSamples: gridSamples)
-                mode1PendingTrigger = false
+        if step != mode1Scheduler.boundaryStep {
+            mode1Scheduler.boundaryStep = step
+            mode1Scheduler.patternStep += 1
+            mode1Scheduler.barStepCounter = (mode1Scheduler.barStepCounter + 1) % mode1StepsPerBar()
+            updateMode1Spatial(step: mode1Scheduler.patternStep)
+            if mode1Scheduler.pendingTrigger, mode1Scheduler.cooldownSamples <= 0 {
+                startMode1Repeat(gridSamples: gridSamples, triggerStrength: 1.0)
+            } else if !mode1Scheduler.active, mode1Scheduler.cooldownSamples <= 0 {
+                let repeatsPerBar = 0.8 + (5.2 * Float(controlCurrent.repeatProb))
+                let stepProb = min(0.95, repeatsPerBar / Float(max(1, mode1StepsPerBar())))
+                let loudnessGate = min(1.0, max(0.22, mode1Env * 20.0))
+                if randomUnit() < (stepProb * loudnessGate * 0.10) {
+                    startMode1Repeat(gridSamples: gridSamples, triggerStrength: 0.72)
+                }
             }
         }
 
-        let threshold = 0.008 + (0.060 * Float(controlCurrent.thresholdBias)) + (0.040 * Float(controlCurrent.gateSharpness))
-        let loudEnough = mode1Env > (0.02 + 0.10 * Float(controlCurrent.thresholdBias))
-        if loudEnough, delta > threshold, mode1CooldownSamples <= 0 {
-            let triggerProb = Float(controlCurrent.repeatProb) * (0.30 + 0.60 * Float(controlCurrent.gateSharpness))
-            if randomUnit() < triggerProb * 0.06 {
-                mode1PendingTrigger = true
+        let threshold = 0.007 + (0.050 * feedbackAmount) + (0.036 * Float(controlCurrent.gateSharpness))
+        let loudEnough = mode1Env > (0.018 + 0.085 * feedbackAmount)
+        let minOnsetGap = Int64(sampleRate * 0.06)
+        if loudEnough, delta > threshold, (mode1LastOnsetSample < 0 || (sampleCounter - mode1LastOnsetSample) >= minOnsetGap) {
+            if mode1LastOnsetSample >= 0 {
+                let interval = Int(sampleCounter - mode1LastOnsetSample)
+                let minInterval = Int(sampleRate * 0.20)
+                let maxInterval = Int(sampleRate * 1.8)
+                if interval >= minInterval && interval <= maxInterval {
+                    mode1Clock.noteOnset(intervalSamples: interval, sampleRate: sampleRate)
+                } else {
+                    mode1Clock.noteUntrustedOnset()
+                }
+            } else {
+                mode1Clock.confidenceDecay()
             }
+            mode1LastOnsetSample = sampleCounter
+            let onsetStrength = min(1.0, max(0.0, (delta - threshold) / (threshold * 2.2 + 0.001)))
+            mode1TransientDuck = max(mode1TransientDuck, 0.70 + 0.30 * onsetStrength)
+            mode1DryAttackBoost = max(mode1DryAttackBoost, 0.62 + 0.38 * onsetStrength)
+            let triggerProb = (0.20 + 0.72 * Float(controlCurrent.repeatProb)) * (0.35 + 0.65 * mode1Clock.confidence)
+            if randomUnit() < triggerProb {
+                mode1Scheduler.pendingTrigger = true
+            }
+        } else {
+            mode1Clock.confidenceDecay()
         }
 
         var wet: Float = 0
-        if mode1RepeatActive, mode1RepeatLength > 0 {
-            let idx = (mode1RepeatStart + mode1RepeatPos) % mode1Buffer.count
-            let raw = mode1Buffer[idx]
-            let phase = Float(mode1SlicePos) / Float(max(1, mode1SliceLength))
-            let edge = sinf(Float.pi * phase)
-            wet = raw * edge
+        if mode1Scheduler.active, mode1Scheduler.repeatLength > 0 {
+            let raw = mode1SampleLinear(mode1Scheduler.sliceReadHead)
+            let phase = Float(mode1Scheduler.slicePos) / Float(max(1, mode1Scheduler.sliceLength))
+            let p = min(max(phase, 0), 1)
+            let hann = 0.5 - 0.5 * cosf(2.0 * .pi * p)
+            let blackman = 0.42 - 0.5 * cosf(2.0 * .pi * p) + 0.08 * cosf(4.0 * .pi * p)
+            var sliceWet = raw * ((0.62 * hann) + (0.38 * blackman))
+            let crossfadeSamples = max(12, min(mode1Scheduler.sliceLength / 8, Int(sampleRate * 0.004)))
+            if mode1Scheduler.slicePos < crossfadeSamples {
+                let t = Float(mode1Scheduler.slicePos) / Float(max(1, crossfadeSamples))
+                sliceWet = (mode1Scheduler.lastSliceTailSample * (1.0 - t)) + (sliceWet * t)
+            }
+            let pulseCount = max(
+                1,
+                Int(1 + round(3.0 * Float(controlCurrent.gateSharpness))) + (controlCurrent.repeatStyleId == "stutter_b" ? 1 : 0)
+            )
+            let pulsePhase = (phase * Float(pulseCount)).truncatingRemainder(dividingBy: 1.0)
+            let pulseDuty: Float = max(0.18, 0.58 - 0.30 * Float(controlCurrent.gateSharpness))
+            let gate: Float = pulsePhase < pulseDuty ? 1.0 : 0.20
+            wet = sliceWet * gate * mode1Scheduler.repeatGain
 
-            mode1SlicePos += 1
-            mode1RepeatPos += 1
-            mode1RepeatSamplesRemaining -= 1
-            mode1ContinuousRepeatSamples += 1
+            mode1Scheduler.slicePos += 1
+            mode1Scheduler.sliceReadHead += mode1Scheduler.sliceStep
+            if mode1Scheduler.sliceReadHead < 0 {
+                mode1Scheduler.sliceReadHead += Float(mode1Buffer.count)
+            } else if mode1Scheduler.sliceReadHead >= Float(mode1Buffer.count) {
+                mode1Scheduler.sliceReadHead -= Float(mode1Buffer.count)
+            }
+            mode1Scheduler.repeatSamplesRemaining -= 1
+            mode1Scheduler.continuousRepeatSamples += 1
+            let regen = 0.9990 + (0.0008 * feedbackAmount)
+            mode1Scheduler.repeatGain = min(1.12, mode1Scheduler.repeatGain * regen)
 
-            if mode1SlicePos >= mode1SliceLength {
-                mode1SlicePos = 0
+            if mode1Scheduler.slicePos >= mode1Scheduler.sliceLength {
+                mode1Scheduler.slicePos = 0
+                mode1Scheduler.lastSliceTailSample = wet
+                let quantum = max(16, mode1Scheduler.sliceLength)
+                let maxSlices = max(1, mode1Scheduler.repeatLength / quantum)
+                let jumpTableA: [Int] = [0, 1, 0, 2, 1, 0, 3, 1, 2, 0, 1, 2, 3, 1, 0, 2]
+                let jumpTableB: [Int] = [0, 2, 4, 1, 5, 3, 6, 2, 7, 4, 1, 6, 3, 7, 2, 5]
+                let table = controlCurrent.repeatStyleId == "stutter_b" ? jumpTableB : jumpTableA
+                let jump = table[mode1Scheduler.sliceJumpIndex % table.count]
+                mode1Scheduler.sliceJumpIndex += 1
+                let jitterSpan = 1 + Int(2.0 * Float(controlCurrent.gateSharpness))
+                let jitter = Int((randomUnit() * 2.0 - 1.0) * Float(jitterSpan))
+                let currentSlice = max(0, mode1Scheduler.repeatPos / quantum)
+                let nextSlice = (currentSlice + jump + jitter + (maxSlices * 8)) % maxSlices
+                mode1Scheduler.repeatPos = nextSlice * quantum
                 if controlCurrent.repeatStyleId == "stutter_b" {
-                    let jump = max(1, gridSamples / 2)
-                    mode1RepeatPos = (mode1RepeatPos + jump) % mode1RepeatLength
+                    mode1Scheduler.repeatGain *= 0.97 + 0.06 * feedbackAmount
+                } else {
+                    mode1Scheduler.repeatGain *= 0.95 + 0.08 * feedbackAmount
                 }
-            }
-            if mode1RepeatPos >= mode1RepeatLength {
-                mode1RepeatPos = 0
+                resetMode1SliceReadHead(gridSamples: gridSamples)
             }
 
-            if mode1ContinuousRepeatSamples > Int(sampleRate * 6.0) {
-                mode1RepeatActive = false
-                mode1ContinuousRepeatSamples = 0
-                mode1CooldownSamples = Int(sampleRate * 2.0)
+            if mode1Scheduler.continuousRepeatSamples > Int(sampleRate * 6.0) {
+                mode1Scheduler.active = false
+                mode1Scheduler.continuousRepeatSamples = 0
+                mode1Scheduler.repeatGain = 0
+                mode1Scheduler.cooldownSamples = Int(sampleRate * 2.0)
                 interventions.insert(.densityCap)
             }
 
-            if mode1RepeatSamplesRemaining <= 0 {
-                mode1RepeatActive = false
-                mode1ContinuousRepeatSamples = 0
-                mode1CooldownSamples = Int(sampleRate * 0.9)
+            if mode1Scheduler.repeatSamplesRemaining <= 0 {
+                mode1Scheduler.active = false
+                mode1Scheduler.continuousRepeatSamples = 0
+                mode1Scheduler.repeatGain = 0
+                mode1Scheduler.cooldownSamples = Int(sampleRate * 0.9)
             }
         } else {
-            mode1ContinuousRepeatSamples = max(0, mode1ContinuousRepeatSamples - 1)
+            mode1Scheduler.continuousRepeatSamples = max(0, mode1Scheduler.continuousRepeatSamples - 1)
+            mode1Scheduler.pendingTrigger = false
         }
 
-        return tanhf(wet * 1.4)
+        let feedbackToneAlpha = 0.020 + 0.070 * (1.0 - feedbackAmount)
+        mode1FeedbackLP += feedbackToneAlpha * (wet - mode1FeedbackLP)
+        return tanhf(wet * 1.32)
     }
 
     private func placeMode1Object(
@@ -2185,94 +2870,182 @@ private final class MasterRenderState {
         resonDebugCounter += 1
     }
 
-    private func mode7MappedDest(_ src: Int, mappingId: String) -> Int {
-        switch mappingId {
-        case "invert_diagonal":
-            return 7 - src
-        case "octave_flip":
-            return (src + 4) % 8
-        default:
-            return (src ^ 1) % 8
-        }
+    private func mode7CrossfadeSamples() -> Int {
+        let ms = 20.0 + (580.0 * Float(controlCurrent.swapCrossfade))
+        return max(1, Int((ms / 1_000.0) * sampleRate))
     }
 
-    private func mode7Noise(seed: Int, src: Int, dst: Int) -> Float {
-        let x = Float((seed &* 31) ^ (src &* 131) ^ (dst &* 521))
-        let n = sinf(x * 12.9898 + 78.233) * 43758.5453
-        return n - floorf(n)
-    }
-
-    private func setMode7TargetMatrix(mappingId: String, bias: Float, varianceAmt: Float, seed: Int) {
-        let mId = mappingId.isEmpty ? "swap_pairs" : mappingId
-        mode7MappingIdCurrent = mId
-        let clampedBias = max(0, min(1, bias))
-        let varAmt = max(0, min(1, varianceAmt))
-        for src in 0..<8 {
-            var rowSum: Float = 0
-            let p = mode7MappedDest(src, mappingId: mId)
-            let s = (p + 1) % 8
-            for dst in 0..<8 {
-                var w: Float = 0
-                if dst == p {
-                    w = 0.70 + 0.22 * clampedBias
-                } else if dst == s {
-                    w = 0.14 + 0.10 * (1.0 - clampedBias)
-                } else {
-                    w = 0.01 * varAmt * mode7Noise(seed: seed, src: src, dst: dst)
-                }
-                mode7MatrixTarget[src * 8 + dst] = w
-                rowSum += w
-            }
-            let norm = rowSum > 1e-6 ? 1.0 / rowSum : 1.0
-            for dst in 0..<8 {
-                mode7MatrixTarget[src * 8 + dst] *= norm
-            }
-        }
-        mode7MorphPhase = 0
-    }
-
-    private func processMode7(input: Float) -> Float {
-        // Build 8 bands from cascaded low-pass outputs.
-        for i in 0..<mode7CrossFreqs.count {
-            let a = onePoleAlpha(cutoffHz: mode7CrossFreqs[i], sampleRate: sampleRate)
-            mode7LPStates[i] += a * (input - mode7LPStates[i])
-        }
-        mode7BandScratch[0] = mode7LPStates[0]
-        for i in 1..<7 {
-            mode7BandScratch[i] = mode7LPStates[i] - mode7LPStates[i - 1]
-        }
-        mode7BandScratch[7] = input - mode7LPStates[6]
-
-        // Matrix-space morph.
-        let morph = 0.00003 + (0.0018 * Float(controlCurrent.morphRate))
-        for i in 0..<64 {
-            mode7MatrixCurrent[i] += morph * (mode7MatrixTarget[i] - mode7MatrixCurrent[i])
-        }
-
+    private func mode7ApplyMatrix(bands: [Float], matrix: [Float], into mapped: inout [Float]) {
         for dst in 0..<8 {
             var acc: Float = 0
             for src in 0..<8 {
-                acc += mode7BandScratch[src] * mode7MatrixCurrent[src * 8 + dst]
+                acc += bands[src] * matrix[src * 8 + dst]
             }
-            mode7MappedScratch[dst] = acc
+            mapped[dst] = acc
+        }
+    }
+
+    private func setMode7TargetMatrix(mappingId: String, mappingFamily: String, bias: Float, varianceAmt: Float, seed: Int) {
+        let mId = mappingId.isEmpty ? "swap_pairs" : mappingId
+        let family = mappingFamily.isEmpty ? "bucket_swap" : mappingFamily
+        let ent = max(0, min(1, bias))
+        let varAmt = max(0, min(1, varianceAmt))
+        let configChanged =
+            mode7State.mappingId != mId ||
+            mode7State.mappingFamily != family ||
+            abs(mode7State.entropy - ent) > 0.0001 ||
+            abs(mode7State.variance - varAmt) > 0.0001 ||
+            mode7State.seed != seed
+
+        mode7State.mappingId = mId
+        mode7State.mappingFamily = family
+        mode7State.entropy = ent
+        mode7State.variance = varAmt
+        mode7State.seed = seed
+
+        guard configChanged else { return }
+        let immediateMatrix = Mode7SceneBuilder.buildMatrix(
+            mappingId: mId,
+            mappingFamily: family,
+            sharpness: Float(controlCurrent.sharpness),
+            entropy: ent,
+            varianceAmt: varAmt,
+            seed: seed,
+            sceneStep: mode7State.scheduler.sceneStep
+        )
+        let immediateBandGains = Mode7SceneBuilder.buildBandGains(
+            mappingId: mId,
+            mappingFamily: family,
+            sharpness: Float(controlCurrent.sharpness),
+            entropy: ent,
+            varianceAmt: varAmt,
+            seed: seed,
+            sceneStep: mode7State.scheduler.sceneStep
+        )
+        mode7State.scheduler.beginCrossfade(
+            to: immediateMatrix,
+            crossfadeSamples: max(1, Int(sampleRate * 0.02)),
+            bandGains: immediateBandGains
+        )
+        mode7State.scheduler.advanceMatrix()
+    }
+
+    private func processMode7(input: Float) -> Float {
+        mode7State.clock.advance()
+
+        let delta = abs(input - mode7State.prevInput)
+        mode7State.prevInput = input
+        mode7State.inputEnv += 0.0038 * (abs(input) - mode7State.inputEnv)
+        let onsetThreshold = 0.006 + (0.025 * (1.0 - Float(controlCurrent.sharpness)))
+        let loudEnough = mode7State.inputEnv > 0.010
+        let minOnsetGap = Int64(sampleRate * 0.055)
+        if loudEnough,
+           delta > onsetThreshold,
+           (mode7State.clock.lastOnsetSample < 0 || (sampleCounter - mode7State.clock.lastOnsetSample) >= minOnsetGap) {
+            mode7State.clock.noteOnset(sampleCounter: sampleCounter, sampleRate: sampleRate)
+        } else {
+            mode7State.clock.confidenceDecay()
         }
 
-        let bias = Float(controlCurrent.bias)
+        let stepSamples = mode7State.clock.stepSamples(
+            sampleRate: sampleRate,
+            swapRateNorm: Float(controlCurrent.morphRate)
+        )
+        if mode7State.scheduler.samplesUntilStep <= 0 {
+            let nextMatrix = Mode7SceneBuilder.buildMatrix(
+                mappingId: mode7State.mappingId,
+                mappingFamily: mode7State.mappingFamily,
+                sharpness: Float(controlCurrent.sharpness),
+                entropy: mode7State.entropy,
+                varianceAmt: mode7State.variance,
+                seed: mode7State.seed,
+                sceneStep: mode7State.scheduler.sceneStep
+            )
+            let nextBandGains = Mode7SceneBuilder.buildBandGains(
+                mappingId: mode7State.mappingId,
+                mappingFamily: mode7State.mappingFamily,
+                sharpness: Float(controlCurrent.sharpness),
+                entropy: mode7State.entropy,
+                varianceAmt: mode7State.variance,
+                seed: mode7State.seed,
+                sceneStep: mode7State.scheduler.sceneStep
+            )
+            mode7State.scheduler.beginCrossfade(
+                to: nextMatrix,
+                crossfadeSamples: mode7CrossfadeSamples(),
+                bandGains: nextBandGains
+            )
+            mode7State.scheduler.advanceSceneStep()
+            mode7State.scheduler.samplesUntilStep = stepSamples
+        } else {
+            mode7State.scheduler.samplesUntilStep -= 1
+        }
+        mode7State.scheduler.advanceMatrix()
+
+        mode7State.splitBands(input: input)
+        mode7ApplyMatrix(
+            bands: mode7State.bands,
+            matrix: mode7State.scheduler.liveMatrix,
+            into: &mode7State.mapped
+        )
+
         var wet: Float = 0
-        for i in 0..<8 {
-            let bandPos = Float(i) / 7.0
-            let weight = 0.55 + (0.70 * ((1.0 - bias) * (1.0 - bandPos) + bias * bandPos))
-            wet += mode7MappedScratch[i] * weight
+        for i in 0..<mode7State.mapped.count {
+            wet += mode7State.mapped[i] * mode7State.scheduler.liveBandGains[i]
         }
 
-        let targetNorm = min(1.8, max(0.35, 0.22 / max(0.02, abs(wet))))
-        mode7LoudnessNorm += 0.0015 * (targetNorm - mode7LoudnessNorm)
-        wet *= mode7LoudnessNorm
+        let targetNorm = min(1.85, max(0.40, 0.26 / max(0.02, abs(wet))))
+        mode7State.loudnessNorm += 0.0018 * (targetNorm - mode7State.loudnessNorm)
+        wet *= mode7State.loudnessNorm
 
-        let cutoff = 2_200.0 + 6_000.0 * (1.0 - Float(controlCurrent.sharpness) * 0.65)
+        let cutoff = 1_500.0 + (6_500.0 * (1.0 - Float(controlCurrent.sharpness) * 0.70))
         let alpha = onePoleAlpha(cutoffHz: cutoff, sampleRate: sampleRate)
-        mode7HfClampY += alpha * (wet - mode7HfClampY)
-        return mode7HfClampY
+        mode7State.hfClampY += alpha * (wet - mode7State.hfClampY)
+        return tanhf(mode7State.hfClampY * 1.08)
+    }
+
+    private func wrappedSample(_ index: Int) -> Float {
+        var i = index % granBuffer.count
+        if i < 0 { i += granBuffer.count }
+        return granBuffer[i]
+    }
+
+    private func sampleLinear(at position: Float) -> Float {
+        let i0 = Int(floorf(position))
+        let frac = position - Float(i0)
+        let s0 = wrappedSample(i0)
+        let s1 = wrappedSample(i0 + 1)
+        return s0 + (s1 - s0) * frac
+    }
+
+    private func sampleCubic(at position: Float) -> Float {
+        let i1 = Int(floorf(position))
+        let t = position - Float(i1)
+        let ym1 = wrappedSample(i1 - 1)
+        let y0 = wrappedSample(i1)
+        let y1 = wrappedSample(i1 + 1)
+        let y2 = wrappedSample(i1 + 2)
+        let a0 = -0.5 * ym1 + 1.5 * y0 - 1.5 * y1 + 0.5 * y2
+        let a1 = ym1 - 2.5 * y0 + 2.0 * y1 - 0.5 * y2
+        let a2 = -0.5 * ym1 + 0.5 * y1
+        let a3 = y0
+        return ((a0 * t + a1) * t + a2) * t + a3
+    }
+
+    private func sampleGranulator(at position: Float, quality: Float) -> Float {
+        if quality >= 0.7 {
+            return sampleCubic(at: position)
+        } else if quality >= 0.32 {
+            return sampleLinear(at: position)
+        }
+        return wrappedSample(Int(position))
+    }
+
+    private func grainEnvelope(age: Int, length: Int, blend: Float) -> Float {
+        let t = min(max(Float(age) / Float(max(1, length)), 0), 1)
+        let hann = 0.5 - 0.5 * cosf(2.0 * .pi * t)
+        let blackman = 0.42 - 0.5 * cosf(2.0 * .pi * t) + 0.08 * cosf(4.0 * .pi * t)
+        return hann * (1.0 - blend) + blackman * blend
     }
 
     private func processGranulator(input: Float, cpuAction: CPUGuardAction, interventions: inout SafetyInterventions) -> Float {
@@ -2285,64 +3058,142 @@ private final class MasterRenderState {
             interventions.insert(.densityCap)
         }
 
-        let spawnRateHz = 2.0 + density * 45.0
-        let interval = max(1, Int(sampleRate / spawnRateHz))
-        if grainSpawnCounter <= 0 {
-            let voiceLimit = min(grains.count, cpuAction.voiceLimit)
-            var spawned = false
-            for i in 0..<voiceLimit where !grains[i].active {
-                let lenMs = 18.0 + 190.0 * Float(controlCurrent.grainSize)
-                let len = max(16, Int((lenMs / 1000.0) * sampleRate))
-                let offset = randomUnit() * min(Float(granBuffer.count - 1), sampleRate * 0.65)
-                var position = Float(granWrite) - offset
-                while position < 0 { position += Float(granBuffer.count) }
-                grains[i].reset(position: position, length: len, gain: 0.45 + 0.45 * randomUnit())
-                spawned = true
-                break
-            }
-            if !spawned && cpuAction.active {
-                interventions.insert(.voiceCap)
-            }
-            grainSpawnCounter = interval
+        let transient = abs(input - mode2State.prevInput)
+        mode2State.prevInput = input
+        if transient > (0.03 + 0.08 * density) {
+            mode2State.transientDuck = max(mode2State.transientDuck, 0.85)
         } else {
-            grainSpawnCounter -= 1
+            mode2State.transientDuck *= 0.996
         }
 
-        if freezeSamplesRemaining > 0 {
-            freezeSamplesRemaining -= 1
-        } else {
-            if randomUnit() < Float(controlCurrent.freezeProb) * 0.0025 {
-                let freezeLen = max(0.05, min(6.0, Float(controlCurrent.freezeLenSec)))
-                freezeSamplesRemaining = Int(freezeLen * sampleRate)
-            } else {
-                let step = 0.20 + 2.8 * Float(controlCurrent.scanRate)
-                granReadHead += step
-                if randomUnit() < Float(controlCurrent.scanJumpProb) * 0.0015 {
-                    granReadHead += (randomUnit() - 0.5) * sampleRate * 0.25
+        let spawnRateHz = 2.2 + density * 52.0
+        let interval = max(1, Int(sampleRate / spawnRateHz))
+        if !mode2State.readHeadSeeded {
+            mode2State.readHeadSeeded = true
+            mode2State.readHead = Float(granWrite) - (sampleRate * 0.24)
+            if mode2State.readHead < 0 {
+                mode2State.readHead += Float(granBuffer.count)
+            }
+        }
+        if mode2State.spawnCounter <= 0 {
+            let voiceLimit = min(mode2State.grains.count, cpuAction.voiceLimit)
+            var spawnedCount = 0
+            let pitchSpreadCents = 35.0 * Float(controlCurrent.grainPitchSpread)
+            let scanRate = Float(controlCurrent.scanRate)
+            let burstCount = density > 0.56 ? 2 : 1
+            for _ in 0..<burstCount {
+                guard let slot = (0..<voiceLimit).first(where: { !mode2State.grains[$0].active }) else { break }
+                let lenMs = 14.0 + 148.0 * Float(controlCurrent.grainSize)
+                let len = max(16, Int((lenMs / 1000.0) * sampleRate))
+                let scatter = (randomUnit() * 2.0 - 1.0) * sampleRate * (0.06 + 0.42 * Float(controlCurrent.grainSize))
+                var position = mode2State.readHead + scatter
+                while position < 0 { position += Float(granBuffer.count) }
+                while position >= Float(granBuffer.count) { position -= Float(granBuffer.count) }
+                let cents = (randomUnit() * 2.0 - 1.0) * pitchSpreadCents
+                let scanWarp = 0.52 + 1.42 * scanRate
+                let jitterWarp = 0.82 + 0.44 * randomUnit()
+                var detuneStep = scanWarp * jitterWarp * powf(2.0, cents / 1200.0)
+                if randomUnit() < (0.10 + 0.20 * Float(controlCurrent.grainPitchSpread)) {
+                    detuneStep = -detuneStep * (0.88 + 0.18 * randomUnit())
                 }
-                while granReadHead < 0 { granReadHead += Float(granBuffer.count) }
-                while granReadHead >= Float(granBuffer.count) { granReadHead -= Float(granBuffer.count) }
+                detuneStep = max(-2.4, min(2.4, detuneStep))
+                let pan = randomUnit() * 2.0 - 1.0
+                let decorrelation = (6.0 + 48.0 * abs(pan)) * (0.6 + 0.4 * density)
+                let envBlend = min(1.0, max(0.0, 0.35 + 0.50 * Float(controlCurrent.grainSize)))
+                mode2State.grains[slot].reset(
+                    position: position,
+                    step: detuneStep,
+                    decorrelationSamples: decorrelation,
+                    pan: pan,
+                    envelopeBlend: envBlend,
+                    length: len,
+                    gain: 0.40 + 0.52 * randomUnit()
+                )
+                spawnedCount += 1
+            }
+            if spawnedCount == 0 && cpuAction.active {
+                interventions.insert(.voiceCap)
+            }
+            mode2State.spawnCounter = interval
+        } else {
+            mode2State.spawnCounter -= 1
+        }
+
+        if mode2State.freezeSamplesRemaining > 0 {
+            mode2State.freezeSamplesRemaining -= 1
+        } else if mode2State.freezeCooldownSamples > 0 {
+            mode2State.freezeCooldownSamples -= 1
+        } else {
+            if randomUnit() < Float(controlCurrent.freezeProb) * 0.0021 {
+                mode2State.beginFreeze(sampleRate: sampleRate, requestedLenSec: Float(controlCurrent.freezeLenSec))
+            } else {
+                let scanRate = Float(controlCurrent.scanRate)
+                let targetStep = 0.10 + 1.9 * scanRate
+                mode2State.scanVelocity += 0.0045 * (targetStep - mode2State.scanVelocity)
+                let driftNoise = (randomUnit() * 2.0 - 1.0) * (0.008 + 0.050 * scanRate)
+                mode2State.sceneWander = (mode2State.sceneWander * 0.992) + driftNoise
+                mode2State.readHead += mode2State.scanVelocity + mode2State.sceneWander
+
+                var writeAhead = Float(granWrite) - mode2State.readHead
+                if writeAhead < 0 {
+                    writeAhead += Float(granBuffer.count)
+                }
+                let minLag = sampleRate * 0.07
+                let maxLag = sampleRate * 0.95
+                if writeAhead < minLag {
+                    mode2State.readHead -= (minLag - writeAhead) * 0.16
+                } else if writeAhead > maxLag {
+                    mode2State.readHead += (writeAhead - maxLag) * 0.08
+                }
+
+                if randomUnit() < Float(controlCurrent.scanJumpProb) * 0.0019 {
+                    let jumpDepth = sampleRate * (0.06 + 0.26 * scanRate)
+                    mode2State.readHead += (randomUnit() - 0.5) * jumpDepth
+                }
+                while mode2State.readHead < 0 { mode2State.readHead += Float(granBuffer.count) }
+                while mode2State.readHead >= Float(granBuffer.count) { mode2State.readHead -= Float(granBuffer.count) }
             }
         }
 
         var out: Float = 0
-        for i in 0..<grains.count where grains[i].active {
-            let idx = Int(grains[i].position) % granBuffer.count
-            let sample = granBuffer[idx]
-            let t = Float(grains[i].age) / Float(max(1, grains[i].length))
-            let env = 0.5 - 0.5 * cosf(2.0 * .pi * min(max(t, 0), 1))
-            out += sample * env * grains[i].gain
+        for i in 0..<mode2State.grains.count where mode2State.grains[i].active {
+            let base = sampleGranulator(at: mode2State.grains[i].position, quality: cpuAction.interpolationQuality)
+            let decoPos = mode2State.grains[i].position + mode2State.grains[i].decorrelationSamples
+            let decorrelated = sampleGranulator(at: decoPos, quality: cpuAction.interpolationQuality)
+            let panAmt = 0.12 + 0.38 * abs(mode2State.grains[i].pan) * Float(controlCurrent.spread)
+            let sample = (base * (1.0 - panAmt)) + (decorrelated * panAmt)
+            let env = grainEnvelope(
+                age: mode2State.grains[i].age,
+                length: mode2State.grains[i].length,
+                blend: mode2State.grains[i].envelopeBlend
+            )
+            out += sample * env * mode2State.grains[i].gain
 
-            grains[i].position += 1.0
-            if grains[i].position >= Float(granBuffer.count) {
-                grains[i].position -= Float(granBuffer.count)
+            mode2State.grains[i].position += mode2State.grains[i].step
+            while mode2State.grains[i].position >= Float(granBuffer.count) {
+                mode2State.grains[i].position -= Float(granBuffer.count)
             }
-            grains[i].age += 1
-            if grains[i].age >= grains[i].length {
-                grains[i].active = false
+            while mode2State.grains[i].position < 0 {
+                mode2State.grains[i].position += Float(granBuffer.count)
+            }
+            mode2State.grains[i].age += 1
+            if mode2State.grains[i].age >= mode2State.grains[i].length {
+                mode2State.grains[i].active = false
             }
         }
-        return out * 0.6
+
+        let targetNorm = min(1.9, max(0.34, 0.24 / max(0.02, abs(out))))
+        mode2State.loudnessNorm += 0.0018 * (targetNorm - mode2State.loudnessNorm)
+        out *= mode2State.loudnessNorm
+
+        let densityT = density
+        let cutoff = 1_800.0 + 5_200.0 * (1.0 - densityT)
+        let alpha = onePoleAlpha(cutoffHz: cutoff, sampleRate: sampleRate)
+        mode2State.dampLP += alpha * (out - mode2State.dampLP)
+        let tilt = min(0.62, 0.12 + densityT * 0.55)
+        let filtered = (out * (1.0 - tilt)) + (mode2State.dampLP * tilt)
+        let safetyGain = 0.52 + 0.12 * cpuAction.wetScale
+        return tanhf(filtered * safetyGain)
     }
 
     private func processResonator(input: Float) -> Float {

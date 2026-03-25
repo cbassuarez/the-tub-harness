@@ -967,6 +967,344 @@ struct TheTubHarnessTests {
         #expect(!replayWithoutAudio.frames.isEmpty)
     }
 
+    @MainActor
+    @Test("Control room state replay flags and alignment warnings")
+    func controlRoomStateReplayMapping() {
+        let state = ControlRoomState()
+        state.setReplayRunning(true)
+        state.setReplayStatus("running")
+        #expect(state.replay.isRunning)
+        #expect(state.transport.isReplayRunning)
+        #expect(state.replay.statusMessage == "running")
+
+        let initialCount = state.events.count
+        state.noteReplayAlignment(targetTimeS: 0.0, audioTimeS: 0.25)
+        #expect(state.events.count >= initialCount + 1)
+        #expect(state.events.first?.message.contains("alignment drift") ?? false)
+    }
+
+    @Test("Model slot persistence round-trip")
+    func modelSlotPersistenceRoundTrip() {
+        let appName = "TheTubHarnessTests_\(UUID().uuidString)"
+        let slots = [
+            ModelSlotProfile(id: UUID(), name: "A", host: "127.0.0.1", port: 9910, notes: "n1"),
+            ModelSlotProfile(id: UUID(), name: "B", host: "127.0.0.2", port: 9920, notes: "n2")
+        ]
+        ModelSlotPersistence.save(slots: slots, appName: appName)
+        let loaded = ModelSlotPersistence.load(appName: appName)
+        #expect(loaded.count == 2)
+        #expect(loaded[0].name == "A")
+        #expect(loaded[1].host == "127.0.0.2")
+    }
+
+    @MainActor
+    @Test("Control room slot management enforces minimum one slot")
+    func controlRoomSlotManagement() {
+        let state = ControlRoomState()
+        state.modelSlots = ModelSlotsPanelViewModel(
+            slots: [ModelSlotProfile(id: UUID(), name: "Only", host: "127.0.0.1", port: 9910, notes: "")]
+        )
+        let firstId = state.modelSlots.slots[0].id
+        state.removeSlot(firstId)
+        #expect(state.modelSlots.slots.count == 1)
+
+        state.addModelSlot()
+        #expect(state.modelSlots.slots.count == 2)
+        state.removeSlot(firstId)
+        #expect(state.modelSlots.slots.count == 1)
+    }
+
+    @Test("Client endpoint reconfigure updates model endpoint")
+    func clientEndpointReconfigure() async throws {
+        let client = TubMLClient(host: "127.0.0.1", port: 9910)
+        client.reconfigureEndpoint(host: "127.0.0.1", port: 9922)
+
+        var endpoint = client.modelEndpoint()
+        for _ in 0..<40 {
+            endpoint = client.modelEndpoint()
+            if endpoint.host == "127.0.0.1" && endpoint.port == 9922 {
+                break
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+
+        #expect(endpoint.host == "127.0.0.1")
+        #expect(endpoint.port == 9922)
+    }
+
+    @Test("Control room state can bind to endpoint updates")
+    func controlRoomStateBindsEndpointChanges() async throws {
+        let client = TubMLClient(host: "127.0.0.1", port: 9910)
+        let audio = AudioEngineController()
+        let analyzer = AudioInputAnalyzer()
+        let state = ControlRoomState()
+        state.bind(client: client, audio: audio, analyzer: analyzer)
+
+        client.reconfigureEndpoint(host: "127.0.0.1", port: 9923)
+
+        for _ in 0..<40 {
+            if state.transport.endpointPort == 9923 {
+                break
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+
+        #expect(state.transport.endpointHost == "127.0.0.1")
+        #expect(state.transport.endpointPort == 9923)
+    }
+
+    @Test("Client endpoint reconfigure keeps modelEndpoint stable for readers")
+    func clientEndpointReconfigureImmediateRead() {
+        let client = TubMLClient(host: "127.0.0.1", port: 9910)
+        client.reconfigureEndpoint(host: "127.0.0.1", port: 9922)
+
+        // Ensure method is always callable synchronously while updates settle.
+        _ = client.modelEndpoint()
+    }
+
+    @Test("Client endpoint reconfigure updates model endpoint (legacy check)")
+    func clientEndpointReconfigureLegacyCheck() async throws {
+        let client = TubMLClient(host: "127.0.0.1", port: 9910)
+        client.reconfigureEndpoint(host: "127.0.0.1", port: 9922)
+
+        for _ in 0..<40 {
+            let endpoint = client.modelEndpoint()
+            #expect(endpoint.host == "127.0.0.1")
+            if endpoint.port == 9922 {
+                #expect(endpoint.port == 9922)
+                return
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        let endpoint = client.modelEndpoint()
+        #expect(endpoint.port == 9922)
+    }
+
+    @Test("Mode 1 clock locks to stable onsets and quantizes 1/8 step")
+    func mode1ClockQuantization() {
+        var clock = Mode1ClockState()
+        let sampleRate: Float = 48_000
+        clock.configure(sampleRate: sampleRate)
+
+        for _ in 0..<10 {
+            clock.advance(samples: 24_000)
+            clock.noteOnset(intervalSamples: 24_000, sampleRate: sampleRate)
+        }
+
+        #expect(clock.confidence > 0.75)
+        #expect(abs(clock.effectiveBeatSamples(sampleRate: sampleRate) - 24_000) < 1_500)
+        #expect(abs(clock.stepSamples(gridDiv: "1/8", sampleRate: sampleRate) - 12_000) < 800)
+    }
+
+    @Test("Mode 1 clock falls back to 60 BPM when confidence is low")
+    func mode1ClockFallback() {
+        var clock = Mode1ClockState()
+        let sampleRate: Float = 48_000
+        clock.configure(sampleRate: sampleRate)
+
+        clock.advance(samples: Int(sampleRate * 8))
+        for _ in 0..<64 {
+            clock.confidenceDecay()
+        }
+
+        #expect(clock.confidence < 0.42)
+        #expect(clock.effectiveBeatSamples(sampleRate: sampleRate) == Int(sampleRate))
+        #expect(clock.stepSamples(gridDiv: "1/8", sampleRate: sampleRate) == Int(sampleRate / 2))
+    }
+
+    @Test("Mode 2 freeze scene bounds and pitch spread mapping")
+    func mode2FreezeAndPitchSpreadMapping() {
+        var state = Mode2GranulatorState()
+        state.beginFreeze(sampleRate: 48_000, requestedLenSec: 12.0)
+        #expect(state.freezeSamplesRemaining <= Int(48_000 * 3.2))
+        #expect(state.freezeSamplesRemaining > 0)
+        #expect(state.freezeCooldownSamples > 0)
+
+        let engine = ModeEngine()
+        let out = ModelOut(
+            protocolVersion: 1,
+            tsMs: 42_000,
+            mode: 2,
+            params: [
+                "grain_size_ms": 40.0,
+                "grain_density": 0.55,
+                "scan_rate": 0.4,
+                "freeze_prob": 0.2,
+                "freeze_len_s": 2.2,
+                "pitch_spread_cents": 35.0,
+            ],
+            picks: ModeContract.defaultPicksByMode[2] ?? Picks(),
+            flags: Flags()
+        )
+        let control = engine.makeControl(out: out, sentButtons: Buttons())
+        #expect(control.mode == 2)
+        #expect(control.grainPitchSpread > 0.95)
+        #expect(control.scanJumpProb >= 0.70)
+    }
+
+    @Test("CPU guard throttling degrades interpolation quality after density/voices")
+    func cpuGuardInterpolationDegradeOrder() {
+        var guardrail = CPUGuard()
+        for _ in 0..<3 {
+            guardrail.note(renderTimeNs: 90_000, budgetNs: 100_000)
+        }
+        #expect(guardrail.currentAction.active)
+        #expect(guardrail.currentAction.densityScale < 1.0)
+        #expect(guardrail.currentAction.voiceLimit < 24)
+        #expect(guardrail.currentAction.interpolationQuality < 1.0)
+    }
+
+    @Test("Mode 7 contract stays v1-compatible")
+    func mode7ContractCompatibility() {
+        let allowed = ModeContract.canonicalAllowedParams(for: 7)
+        #expect(allowed == Set(["swap_rate_hz", "crossfade_ms", "bucket_sharpness", "mapping_entropy", "mix"]))
+        let required = ModeContract.requiredPicks(for: 7)
+        #expect(required.contains("preset_id"))
+        #expect(required.contains("spatial_pattern_id"))
+        #expect(!required.contains("mapping_id"))
+        let defaults = ModeContract.defaultPicksByMode[7] ?? Picks()
+        #expect(defaults.mappingId == "swap_pairs")
+        #expect(defaults.mappingFamily == "bucket_swap")
+    }
+
+    @Test("Mode 7 clock adapts to stable onsets then falls back to 60 BPM")
+    func mode7ClockHybridFallback() {
+        var clock = Mode7ClockState()
+        let sampleRate: Float = 48_000
+        clock.configure(sampleRate: sampleRate)
+
+        var sampleCounter: Int64 = 0
+        for _ in 0..<10 {
+            sampleCounter += 24_000
+            clock.advance(samples: 24_000)
+            clock.noteOnset(sampleCounter: sampleCounter, sampleRate: sampleRate)
+        }
+        #expect(clock.confidence > 0.65)
+        #expect(abs(clock.effectiveBeatSamples(sampleRate: sampleRate) - 24_000) < 1_800)
+        let quantized = clock.stepSamples(sampleRate: sampleRate, swapRateNorm: 0.7)
+        #expect(quantized > 64)
+        #expect(quantized < 24_000)
+
+        for _ in 0..<360 {
+            clock.confidenceDecay()
+        }
+        #expect(clock.confidence < 0.40)
+        #expect(clock.effectiveBeatSamples(sampleRate: sampleRate) == Int(sampleRate))
+    }
+
+    @Test("Mode 7 scene builder is deterministic and normalized")
+    func mode7SceneMatrixDeterministic() {
+        let a = Mode7SceneBuilder.buildMatrix(
+            mappingId: "swap_pairs",
+            mappingFamily: "bucket_swap",
+            sharpness: 0.72,
+            entropy: 0.55,
+            varianceAmt: 0.30,
+            seed: 17,
+            sceneStep: 3
+        )
+        let b = Mode7SceneBuilder.buildMatrix(
+            mappingId: "swap_pairs",
+            mappingFamily: "bucket_swap",
+            sharpness: 0.72,
+            entropy: 0.55,
+            varianceAmt: 0.30,
+            seed: 17,
+            sceneStep: 3
+        )
+        #expect(a == b)
+        var hasDifference = false
+        let c = Mode7SceneBuilder.buildMatrix(
+            mappingId: "swap_pairs",
+            mappingFamily: "bucket_swap",
+            sharpness: 0.72,
+            entropy: 0.55,
+            varianceAmt: 0.30,
+            seed: 17,
+            sceneStep: 4
+        )
+        for i in 0..<a.count where abs(a[i] - c[i]) > 1e-5 {
+            hasDifference = true
+            break
+        }
+        #expect(hasDifference)
+        for src in 0..<8 {
+            var row: Float = 0
+            for dst in 0..<8 {
+                row += a[src * 8 + dst]
+            }
+            #expect(abs(row - 1.0) < 0.001)
+        }
+    }
+
+    @Test("Mode 7 scheduler crossfade duration and final target lock")
+    func mode7SchedulerCrossfadeTiming() {
+        var scheduler = Mode7SwapScheduler()
+        scheduler.configure(sampleRate: 48_000)
+        let target = Mode7SceneBuilder.buildMatrix(
+            mappingId: "octave_flip",
+            mappingFamily: "bucket_swap",
+            sharpness: 0.6,
+            entropy: 0.7,
+            varianceAmt: 0.25,
+            seed: 23,
+            sceneStep: 2
+        )
+        scheduler.beginCrossfade(to: target, crossfadeSamples: 240)
+        var ticks = 0
+        while scheduler.crossfadeRemaining > 0, ticks < 1_000 {
+            scheduler.advanceMatrix()
+            ticks += 1
+        }
+        #expect(ticks == 240)
+        #expect(scheduler.crossfadeRemaining == 0)
+        var matrixMatches = true
+        for i in 0..<64 where abs(scheduler.liveMatrix[i] - target[i]) > 1e-5 {
+            matrixMatches = false
+            break
+        }
+        #expect(matrixMatches)
+    }
+
+    @Test("Mode 7 identity mapping reconstructs near-unity from filterbank")
+    func mode7IdentityReconstruction() {
+        var state = Mode7RedistributorState()
+        let sampleRate: Float = 48_000
+        state.configure(sampleRate: sampleRate)
+
+        let sampleCount = 8_192
+        var input = [Float](repeating: 0, count: sampleCount)
+        var output = [Float](repeating: 0, count: sampleCount)
+        for i in 0..<sampleCount {
+            let t = Float(i) / sampleRate
+            let x = (0.42 * sinf(2.0 * .pi * 180.0 * t)) +
+                (0.30 * sinf(2.0 * .pi * 740.0 * t)) +
+                (0.22 * sinf(2.0 * .pi * 2_200.0 * t))
+            input[i] = x
+            output[i] = state.identityReconstructionSample(x)
+        }
+
+        // The crossover bank is IIR-based, so account for startup/group delay.
+        let warmup = 512
+        var bestRel = Double.greatestFiniteMagnitude
+        for lag in 0...256 {
+            let start = warmup + lag
+            if start >= sampleCount { break }
+            var err2: Double = 0
+            var ref2: Double = 0
+            for i in start..<sampleCount {
+                let x = Double(input[i - lag])
+                let y = Double(output[i])
+                let e = y - x
+                err2 += e * e
+                ref2 += x * x
+            }
+            let rel = sqrt(err2 / max(ref2, 1e-9))
+            bestRel = min(bestRel, rel)
+        }
+        #expect(bestRel < 0.16)
+    }
+
     private func writeTinyCAF(url: URL, sampleRate: Double, channels: AVAudioChannelCount) throws {
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,

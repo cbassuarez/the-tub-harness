@@ -122,7 +122,7 @@ With the model server running, pick `Audio + Real Features`, select your mic/lin
 - Mode `4` (Clean + samples + resynthesis): clean bed always present; gesture layer adds sparse sample/resynth responses with bounded concurrency.
 - Mode `5` (MIDI-resonification wet-only): only resonifier/sampler layer audible; CLEAR releases voices; JOLT audibly pushes harmony/energy.
 - Mode `6` (Parallel dry + resonifier): dry input stays centered while resonifier voices are spatialized; CLEAR releases voices cleanly.
-- Mode `7` (Swap Buckets): committed wet posture with spectral bucket remap/morph; source remains recognizable but band roles shift.
+- Mode `7` (Swap Buckets): wet-dominant stepped spectral redistribution with deterministic bucket-scene swaps and crossfaded handoffs (`crossfade_ms`), so band roles audibly move instead of sounding like broad filtering.
 - Mode `0` (Clean): mostly dry input, subtle room reverb, minimal motion.
 - Mode `2` (Granulator): discontinuous “shattered time” texture from your input; density responds quickly.
 - Mode `3` (Roar/Resonator): resonant wet layer over punchy dry; distortion/bit reduction remains bounded.

@@ -31,6 +31,8 @@ final class TubMLClient: ObservableObject {
     @Published var lastLatencyMs: Int?
     @Published var lastTickIntervalMs: Double?
     @Published var isReady: Bool = false
+    @Published private(set) var endpointHost: String
+    @Published private(set) var endpointPort: UInt16
 
     private var timer: DispatchSourceTimer?
     private var trainingLogSession: TrainingLogSession?
@@ -68,10 +70,10 @@ final class TubMLClient: ObservableObject {
 
     // MARK: - Config
 
-    private let host: NWEndpoint.Host
-    private let port: NWEndpoint.Port
-    private let hostString: String
-    private let portValue: UInt16
+    private var host: NWEndpoint.Host
+    private var port: NWEndpoint.Port
+    private var hostString: String
+    private var portValue: UInt16
     private let queue = DispatchQueue(label: "tub.ml.udp", qos: .userInitiated)
 
     // MARK: - Networking
@@ -97,6 +99,8 @@ final class TubMLClient: ObservableObject {
         self.port = NWEndpoint.Port(rawValue: port)!
         self.hostString = host
         self.portValue = port
+        self.endpointHost = host
+        self.endpointPort = port
         start()
     }
 
@@ -275,6 +279,35 @@ final class TubMLClient: ObservableObject {
 
     func modelEndpoint() -> (host: String, port: UInt16) {
         (hostString, portValue)
+    }
+
+    func reconfigureEndpoint(host: String, port: UInt16) {
+        let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedHost.isEmpty else { return }
+
+        let endpointPort = max(UInt16(1), min(port, UInt16.max))
+        queue.async {
+            self.timeoutWork?.cancel()
+            self.timeoutWork = nil
+            self.inFlight = false
+            self.activeRequestId = 0
+
+            self.conn?.cancel()
+            self.conn = nil
+
+            self.hostString = normalizedHost
+            self.portValue = endpointPort
+            self.host = NWEndpoint.Host(normalizedHost)
+            self.port = NWEndpoint.Port(rawValue: endpointPort) ?? NWEndpoint.Port(rawValue: 9910)!
+
+            DispatchQueue.main.async {
+                self.isReady = false
+                self.endpointHost = normalizedHost
+                self.endpointPort = endpointPort
+                self.lastError = nil
+            }
+            self.start()
+        }
     }
 
     func sendOnce(mode: Int, jolt: Bool = false, clear: Bool = false) {
