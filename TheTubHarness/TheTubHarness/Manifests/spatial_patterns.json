@@ -1,0 +1,51 @@
+{
+  "drift_slow": {
+    "algo": "drift",
+    "speed": 0.2,
+    "spread": 0.65
+  },
+  "orbit_slow": {
+    "algo": "orbit",
+    "speed": 0.25,
+    "spread": 0.55
+  },
+  "orbit_mid": {
+    "algo": "orbit",
+    "speed": 0.45,
+    "spread": 0.55
+  },
+  "tight_static": {
+    "algo": "static",
+    "spread": 0.25
+  },
+  "fragment_soft": {
+    "algo": "fragment",
+    "speed": 0.35,
+    "spread": 0.45,
+    "jump_prob": 0.25
+  },
+  "orbit_var": {
+    "algo": "orbit",
+    "speed": 0.55,
+    "spread": 0.6,
+    "jitter": 0.2
+  },
+  "orbit_pulse": {
+    "algo": "orbit_pulse",
+    "speed": 0.52,
+    "spread": 0.42,
+    "jitter": 0.12
+  },
+  "jump_cut": {
+    "algo": "jump_cut",
+    "speed": 0.70,
+    "spread": 0.38,
+    "jump_prob": 0.55
+  },
+  "cluster_rotate": {
+    "algo": "cluster_rotate",
+    "speed": 0.30,
+    "spread": 0.62,
+    "jitter": 0.08
+  }
+}

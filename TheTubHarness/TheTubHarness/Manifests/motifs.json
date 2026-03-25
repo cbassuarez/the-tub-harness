@@ -1,0 +1,12 @@
+{
+  "motif_run_up": { "notes": [0, 2, 4, 7], "durations_ms": [120, 120, 140, 200], "velocity_scale": 1.0 },
+  "motif_pulse_low": { "notes": [0, -5, 0], "durations_ms": [220, 180, 260], "velocity_scale": 0.85 },
+  "motif_down_fall": { "notes": [7, 4, 2, 0], "durations_ms": [140, 140, 140, 220], "velocity_scale": 0.95 },
+  "motif_broken_triad": { "notes": [0, 7, 12, 7], "durations_ms": [160, 150, 170, 220], "velocity_scale": 0.92 },
+  "motif_crawl": { "notes": [0, 1, 3, 5], "durations_ms": [180, 180, 180, 220], "velocity_scale": 0.88 },
+  "motif_step_up": { "notes": [0, 2, 4], "durations_ms": [130, 130, 180], "velocity_scale": 0.90 },
+  "motif_step_down": { "notes": [4, 2, 0], "durations_ms": [130, 130, 180], "velocity_scale": 0.90 },
+  "motif_wide_jump": { "notes": [0, 12, 7], "durations_ms": [180, 150, 220], "velocity_scale": 0.96 },
+  "motif_minor_wave": { "notes": [0, 3, 7, 3], "durations_ms": [170, 140, 170, 210], "velocity_scale": 0.94 },
+  "motif_sparse": { "notes": [0, 7], "durations_ms": [260, 320], "velocity_scale": 0.80 }
+}

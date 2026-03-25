@@ -1,0 +1,22 @@
+{
+  "cs_neutral": { "key": "unknown", "intervals": [0, 3, 7, 10] },
+  "cs_open5": { "key": "unknown", "intervals": [0, 7, 12] },
+  "cs_modal": { "key": "unknown", "intervals": [0, 2, 5, 7, 10] },
+  "cs_C_major": { "key": "C", "intervals": [0, 4, 7, 11] },
+  "cs_C_minor": { "key": "C", "intervals": [0, 3, 7, 10] },
+  "cs_D_major": { "key": "D", "intervals": [0, 4, 7, 11] },
+  "cs_D_minor": { "key": "D", "intervals": [0, 3, 7, 10] },
+  "cs_E_major": { "key": "E", "intervals": [0, 4, 7, 11] },
+  "cs_E_minor": { "key": "E", "intervals": [0, 3, 7, 10] },
+  "cs_F_major": { "key": "F", "intervals": [0, 4, 7, 11] },
+  "cs_F_minor": { "key": "F", "intervals": [0, 3, 7, 10] },
+  "cs_G_major": { "key": "G", "intervals": [0, 4, 7, 11] },
+  "cs_G_minor": { "key": "G", "intervals": [0, 3, 7, 10] },
+  "cs_A_major": { "key": "A", "intervals": [0, 4, 7, 11] },
+  "cs_A_minor": { "key": "A", "intervals": [0, 3, 7, 10] },
+  "cs_B_major": { "key": "B", "intervals": [0, 4, 7, 11] },
+  "cs_B_minor": { "key": "B", "intervals": [0, 3, 7, 10] },
+  "cs_whole_tone": { "key": "unknown", "intervals": [0, 2, 4, 6, 8, 10] },
+  "cs_pent_major": { "key": "unknown", "intervals": [0, 2, 4, 7, 9] },
+  "cs_pent_minor": { "key": "unknown", "intervals": [0, 3, 5, 7, 10] }
+}

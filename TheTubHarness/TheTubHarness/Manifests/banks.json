@@ -1,0 +1,52 @@
+{
+  "samples_A": {
+    "type": "samples",
+    "default_sample_id": "s000",
+    "assets": [
+      {
+        "id": "s000",
+        "path": "Assets/Samples/ultrachunk/s000.wav",
+        "gain": 0.95,
+        "category": "general"
+      },
+      {
+        "id": "s001",
+        "path": "Assets/Samples/ultrachunk/s001.wav",
+        "gain": 0.95,
+        "category": "metal"
+      },
+      {
+        "id": "s002",
+        "path": "Assets/Samples/ultrachunk/s002.wav",
+        "gain": 0.9,
+        "category": "room"
+      },
+      {
+        "id": "s003",
+        "path": "Assets/Samples/ultrachunk/s003.wav",
+        "gain": 0.92,
+        "category": "transient"
+      }
+    ]
+  },
+  "phrases_A": {
+    "type": "midi_phrases",
+    "default_phrase_id": "p000",
+    "assets": [
+      {
+        "id": "p000",
+        "path": "Assets/MIDI/phrases/p000.mid"
+      }
+    ]
+  },
+  "particles_A": {
+    "type": "particles",
+    "default_profile_id": "ptc0",
+    "assets": [
+      {
+        "id": "ptc0",
+        "path": "Assets/Particles/ptc0.json"
+      }
+    ]
+  }
+}

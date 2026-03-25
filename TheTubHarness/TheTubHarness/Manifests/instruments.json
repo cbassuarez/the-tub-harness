@@ -1,0 +1,45 @@
+{
+  "inst_A": {
+    "type": "sampler",
+    "sample_pack_path": "Assets/Sampler/inst_A",
+    "sampler_preset_ref": "SamplerPresets/inst_A.exs",
+    "gain_db": -1.0,
+    "polyphony_hint": 8,
+    "velocity_layers": 3,
+    "round_robin_count": 2
+  },
+  "inst_B": {
+    "type": "sampler",
+    "sample_pack_path": "Assets/Sampler/inst_B",
+    "sampler_preset_ref": "SamplerPresets/inst_B.exs",
+    "gain_db": -2.5,
+    "polyphony_hint": 8,
+    "velocity_layers": 2,
+    "round_robin_count": 1
+  },
+  "inst_C": {
+    "type": "sampler",
+    "soundfont_path": "Assets/Soundfonts/reso_pad.sf2",
+    "gain_db": -3.0,
+    "polyphony_hint": 6,
+    "velocity_layers": 2,
+    "round_robin_count": 1
+  },
+  "inst_D": {
+    "type": "sampler",
+    "sample_pack_path": "Assets/Sampler/inst_D",
+    "sampler_preset_ref": "SamplerPresets/inst_D.exs",
+    "gain_db": -1.5,
+    "polyphony_hint": 6,
+    "velocity_layers": 4,
+    "round_robin_count": 2
+  },
+  "inst_E": {
+    "type": "sampler",
+    "soundfont_path": "Assets/Soundfonts/reso_pluck.sf2",
+    "gain_db": -4.0,
+    "polyphony_hint": 4,
+    "velocity_layers": 2,
+    "round_robin_count": 1
+  }
+}

@@ -1,0 +1,109 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "srgb:1.00000,1.00000,1.00000,1.00000",
+      "srgb:0.92143,0.92145,0.92144,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "blend-mode" : "overlay",
+      "blur-material" : 0.5,
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "linear-gradient" : [
+              "srgb:0.00000,0.58980,1.00000,1.00000",
+              "srgb:0.00000,0.56905,0.57462,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.5,
+                "y" : 1
+              },
+              "stop" : {
+                "x" : 0.5,
+                "y" : 0.3
+              }
+            }
+          },
+          "image-name" : "THE-TUB_harness-app-icon.png",
+          "name" : "THE-TUB_harness-app-icon",
+          "opacity" : 0.71,
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              311,
+              -67.5
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.98
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 1
+      }
+    },
+    {
+      "blur-material" : 0.5,
+      "layers" : [
+        {
+          "fill" : {
+            "linear-gradient" : [
+              "srgb:0.83742,0.83744,0.83743,1.00000",
+              "srgb:1.00000,1.00000,1.00000,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.44272440843621397,
+                "y" : 0
+              },
+              "stop" : {
+                "x" : 0.5,
+                "y" : 0.8703900709219858
+              }
+            }
+          },
+          "image-name" : "THE-TUB_harness-app-icon.png",
+          "name" : "THE-TUB_harness-app-icon",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              311,
+              -67.5
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.98
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 1
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
