@@ -26,8 +26,53 @@ struct RunBundleMetadata: Codable, Equatable {
     let policyVersion: String
     let bankManifestVersion: String
     let contractVersion: String
+    let contractFingerprint: String
     let harnessRepoSha: String?
     let modelRepoSha: String?
+
+    enum CodingKeys: String, CodingKey {
+        case bundleId
+        case createdAt
+        case policyVersion
+        case bankManifestVersion
+        case contractVersion
+        case contractFingerprint
+        case harnessRepoSha
+        case modelRepoSha
+    }
+
+    init(
+        bundleId: String,
+        createdAt: String,
+        policyVersion: String,
+        bankManifestVersion: String,
+        contractVersion: String,
+        contractFingerprint: String,
+        harnessRepoSha: String?,
+        modelRepoSha: String?
+    ) {
+        self.bundleId = bundleId
+        self.createdAt = createdAt
+        self.policyVersion = policyVersion
+        self.bankManifestVersion = bankManifestVersion
+        self.contractVersion = contractVersion
+        self.contractFingerprint = contractFingerprint
+        self.harnessRepoSha = harnessRepoSha
+        self.modelRepoSha = modelRepoSha
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.bundleId = try c.decode(String.self, forKey: .bundleId)
+        self.createdAt = try c.decode(String.self, forKey: .createdAt)
+        self.policyVersion = try c.decode(String.self, forKey: .policyVersion)
+        self.bankManifestVersion = try c.decode(String.self, forKey: .bankManifestVersion)
+        self.contractVersion = try c.decode(String.self, forKey: .contractVersion)
+        self.contractFingerprint = try c.decodeIfPresent(String.self, forKey: .contractFingerprint)
+            ?? "unknown_contract_fingerprint"
+        self.harnessRepoSha = try c.decodeIfPresent(String.self, forKey: .harnessRepoSha)
+        self.modelRepoSha = try c.decodeIfPresent(String.self, forKey: .modelRepoSha)
+    }
 }
 
 struct LabelChangeEvent: Codable, Equatable {
@@ -308,6 +353,17 @@ struct SessionMetadata: Codable, Equatable {
     var replayMode: Bool
     var replayedSessionId: String?
     var replayAudioMissing: Bool
+    var inputDeviceUID: String?
+    var inputDeviceName: String?
+    var inputChannels: Int?
+    var inputActiveChannels: String?
+    var inputRouteWarning: String?
+    var outputDeviceUID: String?
+    var outputDeviceName: String?
+    var outputChannels: Int?
+    var outputRouteMode: String?
+    var outputRouteMapping: String?
+    var outputRouteWarning: String?
     var alignment: SessionAlignment
 }
 
@@ -324,6 +380,7 @@ final class TrainingLogSession {
     private let eventWriter: AsyncJSONLWriter
     private let metadataLock = NSLock()
     private var metadata: SessionMetadata
+    private static let detachedEventWriteQueue = DispatchQueue(label: "tub.training.events.detached", qos: .utility)
 
     init(
         bundle: RunBundleMetadata,
@@ -379,6 +436,17 @@ final class TrainingLogSession {
             replayMode: replayMode,
             replayedSessionId: replayedSessionId,
             replayAudioMissing: false,
+            inputDeviceUID: nil,
+            inputDeviceName: nil,
+            inputChannels: nil,
+            inputActiveChannels: nil,
+            inputRouteWarning: nil,
+            outputDeviceUID: nil,
+            outputDeviceName: nil,
+            outputChannels: nil,
+            outputRouteMode: nil,
+            outputRouteMapping: nil,
+            outputRouteWarning: nil,
             alignment: SessionAlignment(startTsMs: 0, audioStartHostTime: 0, audioStartSampleIndex: 0)
         )
 
@@ -416,6 +484,55 @@ final class TrainingLogSession {
         )
     }
 
+    @discardableResult
+    static func appendDetachedLabelChange(
+        eventURL: URL,
+        bundleId: String,
+        sessionId: String,
+        from oldLabel: HumanLabel?,
+        to newLabel: HumanLabel?
+    ) -> Bool {
+        var wrote = false
+        detachedEventWriteQueue.sync {
+            let encoder = JSONEncoder()
+            encoder.keyEncodingStrategy = .convertToSnakeCase
+
+            let payload: Data
+            do {
+                var line = try encoder.encode(
+                    LabelChangeEvent(
+                        tsMs: currentEpochMs(),
+                        from: oldLabel,
+                        to: newLabel,
+                        bundleId: bundleId,
+                        sessionId: sessionId
+                    )
+                )
+                line.append(0x0A)
+                payload = line
+            } catch {
+                wrote = false
+                return
+            }
+
+            do {
+                let parent = eventURL.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+                if !FileManager.default.fileExists(atPath: eventURL.path) {
+                    FileManager.default.createFile(atPath: eventURL.path, contents: nil)
+                }
+                let handle = try FileHandle(forWritingTo: eventURL)
+                try handle.seekToEnd()
+                handle.write(payload)
+                try handle.close()
+                wrote = true
+            } catch {
+                wrote = false
+            }
+        }
+        return wrote
+    }
+
     func setAudioCaptureInfo(sampleRate: Double, channels: Int, inputAudioFormat: String, inputAudioPath: String?) {
         metadataLock.lock()
         metadata.sampleRate = sampleRate
@@ -423,6 +540,40 @@ final class TrainingLogSession {
         metadata.inputAudioFormat = TrainingLogSession.normalizedInputAudioFormat(inputAudioFormat)
         metadata.inputAudioPath = inputAudioPath
         metadata.recordInputAudioEnabled = (inputAudioPath != nil)
+        metadataLock.unlock()
+    }
+
+    func setInputRouteInfo(
+        inputDeviceUID: String?,
+        inputDeviceName: String?,
+        inputChannels: Int,
+        inputActiveChannels: String,
+        inputRouteWarning: String?
+    ) {
+        metadataLock.lock()
+        metadata.inputDeviceUID = inputDeviceUID
+        metadata.inputDeviceName = inputDeviceName
+        metadata.inputChannels = inputChannels
+        metadata.inputActiveChannels = inputActiveChannels
+        metadata.inputRouteWarning = inputRouteWarning
+        metadataLock.unlock()
+    }
+
+    func setOutputRouteInfo(
+        outputDeviceUID: String?,
+        outputDeviceName: String?,
+        outputChannels: Int,
+        outputRouteMode: String,
+        outputRouteMapping: String,
+        outputRouteWarning: String?
+    ) {
+        metadataLock.lock()
+        metadata.outputDeviceUID = outputDeviceUID
+        metadata.outputDeviceName = outputDeviceName
+        metadata.outputChannels = outputChannels
+        metadata.outputRouteMode = outputRouteMode
+        metadata.outputRouteMapping = outputRouteMapping
+        metadata.outputRouteWarning = outputRouteWarning
         metadataLock.unlock()
     }
 
@@ -518,6 +669,7 @@ enum RunBundleFactory {
             policyVersion: policyVersion,
             bankManifestVersion: bankManifestVersion,
             contractVersion: ModeContract.contractVersion,
+            contractFingerprint: ModeContract.contractFingerprint(),
             harnessRepoSha: harnessSha,
             modelRepoSha: modelSha
         )
@@ -542,7 +694,9 @@ enum RunBundleFactory {
     }
 
     static func startupBanner(bundle: RunBundleMetadata) -> String {
-        "running bundle \(bundle.bundleId) (policy=\(bundle.policyVersion.prefix(12)), banks=\(bundle.bankManifestVersion.prefix(12)), contract=\(bundle.contractVersion))"
+        let fp = bundle.contractFingerprint.prefix(10)
+        let lockState = bundle.contractFingerprint == ModeContract.lockedContractFingerprint ? "ok" : "mismatch"
+        return "running bundle \(bundle.bundleId) (policy=\(bundle.policyVersion.prefix(12)), banks=\(bundle.bankManifestVersion.prefix(12)), contract=\(bundle.contractVersion), fp=\(fp), lock=\(lockState))"
     }
 
     private static func resolvedPolicyVersion(policyConfigPath: String?) -> String {
@@ -565,7 +719,7 @@ enum RunBundleFactory {
             return "unknown_manifest_version"
         }
         var merged = Data()
-        for file in ["banks.json", "instruments.json", "spatial_patterns.json"] {
+        for file in ["banks.json", "instruments.json", "chords.json", "motifs.json", "spatial_patterns.json"] {
             let url = dir.appendingPathComponent(file)
             guard let data = try? Data(contentsOf: url) else {
                 return "unknown_manifest_version"

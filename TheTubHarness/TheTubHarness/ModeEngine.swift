@@ -50,6 +50,16 @@ struct AudioControl: Equatable {
     var freezeLenSec: Double = 1.0
 
     // Mode 1
+    var mode1Fracture: Double = 0.55
+    var mode1Mutation: Double = 0.40
+    var mode1PitchLock: Double = 0.68
+    var mode1HoldLenSec: Double = 8.0
+    var mode1TailFadeMs: Double = 420.0
+    var mode1SceneRateHz: Double = 3.0
+    var mode1SceneId: String = "razor_gate"
+    var mode1ClearRequest: Bool = false
+    var mode1JoltRequest: Bool = false
+    // Legacy compatibility mirrors retained for internal stability.
     var repeatProb: Double = 0.40
     var thresholdBias: Double = 0.30
     var windowNorm: Double = 0.45
@@ -143,27 +153,86 @@ final class ModeEngine {
             control.wetLevel = control.reverb.wet
 
         case 1:
-            let voicing = mode1Voicing(for: resolved.picks.presetId)
-            let repeatProb = param("repeat_prob", default: control.repeatProb, from: out.params)
-            control.repeatProb = min(1.0, max(0.0, 0.10 + 0.86 * repeatProb))
-            let loopLenS = paramReal("loop_len_s", fallback: "window_norm", default: 1.2, min: 0.08, max: 4.0, from: out.params)
-            control.windowNorm = min(1.0, max(0.0, normalize(loopLenS, min: 0.08, max: 4.0)))
-            let stutterMs = paramReal("stutter_len_ms", fallbacks: ["stutter_len_norm", "stutter_len"], default: 160.0, min: 30.0, max: 450.0, from: out.params)
-            control.stutterLenNorm = min(1.0, max(0.0, 0.04 + 0.92 * normalize(stutterMs, min: 30.0, max: 450.0)))
-            let jitterMs = paramReal("jitter_ms", fallback: "gate_sharpness", default: 18.0, min: 0.0, max: 120.0, from: out.params)
-            control.gateSharpness = min(1.0, max(0.0, 0.15 + 0.82 * normalize(jitterMs, min: 0.0, max: 120.0)))
-            let feedback = paramReal("feedback", fallback: "threshold_bias", default: 0.18, min: 0.0, max: 0.65, from: out.params)
-            control.thresholdBias = min(1.0, max(0.0, 0.06 + 0.74 * normalize(feedback, min: 0.0, max: 0.65)))
-            control.motionIntensity = param("motion_intensity", fallback: "motion_speed", default: control.motionIntensity, from: out.params)
-            control.motionSpeed = param("motion_speed", fallback: "motion_intensity", default: control.motionSpeed, from: out.params)
-            control.spread = param("spread", default: control.spread, from: out.params)
-            control.wetLevel = min(0.62, (0.18 + 0.34 * control.repeatProb + 0.16 * control.thresholdBias) * voicing.wetScale)
-            control.dryLevel = max(0.25, min(0.96, voicing.dryBase - (control.wetLevel * voicing.dryDuck)))
+            let fracture = param("fracture", fallback: "repeat_prob", default: control.mode1Fracture, from: out.params)
+            let mutation: Double = {
+                if let value = out.params["mutation"] {
+                    return min(max(value, 0.0), 1.0)
+                }
+                if let jitterRaw = out.params["jitter_ms"] ?? out.params["gate_sharpness"] {
+                    if jitterRaw > 1.0 {
+                        return min(max(jitterRaw / 120.0, 0.0), 1.0)
+                    }
+                    return min(max(jitterRaw, 0.0), 1.0)
+                }
+                return control.mode1Mutation
+            }()
+            let pitchLock: Double = {
+                if let value = out.params["pitch_lock"] {
+                    return min(max(value, 0.0), 1.0)
+                }
+                if let followRaw = out.params["pitch_follow"] {
+                    if followRaw > 1.0 {
+                        return normalize(followRaw, min: 0.65, max: 1.0)
+                    }
+                    return min(max(followRaw, 0.0), 1.0)
+                }
+                return control.mode1PitchLock
+            }()
+            let holdLenS: Double = {
+                if let value = out.params["hold_len_s"] {
+                    return min(max(value, 6.0), 12.0)
+                }
+                if let loopRaw = out.params["loop_len_s"] ?? out.params["window_norm"] ?? out.params["repeat_grid"] {
+                    let norm = loopRaw > 1.0 ? normalize(loopRaw, min: 0.08, max: 4.0) : min(max(loopRaw, 0.0), 1.0)
+                    return 6.0 + (6.0 * norm)
+                }
+                if let feedbackRaw = out.params["feedback"] ?? out.params["threshold_bias"] {
+                    let norm = min(max(feedbackRaw / 0.65, 0.0), 1.0)
+                    return 6.0 + (6.0 * norm)
+                }
+                return min(max(control.mode1HoldLenSec, 6.0), 12.0)
+            }()
+            let tailFadeMs = paramReal("tail_fade_ms", default: control.mode1TailFadeMs, min: 150.0, max: 1_200.0, from: out.params)
+            let sceneRateHz: Double = {
+                if let value = out.params["scene_rate_hz"] {
+                    return min(max(value, 0.25), 12.0)
+                }
+                if let stutterRaw = out.params["stutter_len_ms"] ?? out.params["stutter_len_norm"] ?? out.params["stutter_len"] {
+                    let ms = stutterRaw > 1.0
+                        ? min(max(stutterRaw, 30.0), 450.0)
+                        : 30.0 + (420.0 * min(max(stutterRaw, 0.0), 1.0))
+                    let t = normalize(ms, min: 30.0, max: 450.0)
+                    return 12.0 - ((12.0 - 0.25) * t)
+                }
+                return min(max(control.mode1SceneRateHz, 0.25), 12.0)
+            }()
+
+            control.mode1Fracture = fracture
+            control.mode1Mutation = mutation
+            control.mode1PitchLock = pitchLock
+            control.mode1HoldLenSec = holdLenS
+            control.mode1TailFadeMs = tailFadeMs
+            control.mode1SceneRateHz = sceneRateHz
+            control.repeatProb = fracture
+            control.thresholdBias = min(1.0, max(0.0, (holdLenS - 6.0) / 6.0))
+            control.windowNorm = min(1.0, max(0.0, (holdLenS - 6.0) / 6.0))
+            control.stutterLenNorm = 1.0 - normalize(sceneRateHz, min: 0.25, max: 12.0)
+            control.gateSharpness = mutation
+            control.motionIntensity = max(fracture, mutation)
+            control.motionSpeed = param("motion_speed", fallback: "motion_intensity", default: max(control.motionSpeed, 0.22 + 0.60 * normalize(sceneRateHz, min: 0.25, max: 12.0)), from: out.params)
+            control.spread = max(param("spread", default: control.spread, from: out.params), 0.45 + 0.35 * fracture)
+            control.wetLevel = min(0.60, max(0.54, 0.52 + 0.12 * fracture + 0.12 * mutation))
+            control.dryLevel = max(0.02, min(0.30, 0.24 - (0.10 * fracture) - (0.08 * mutation)))
             control.gridDiv = normalizeGridDiv(resolved.picks.gridDiv ?? control.gridDiv)
             control.repeatStyleId = resolved.picks.repeatStyleId ?? control.repeatStyleId
-            control.motionSpeed = max(control.motionSpeed, control.motionIntensity * voicing.motionFloor)
-            control.reverb.wet = min(0.24, 0.08 + 0.12 * control.repeatProb + 0.08 * control.thresholdBias)
-            control.reverb.damping = min(1.0, max(0.0, 0.42 + 0.34 * (1.0 - control.thresholdBias)))
+            control.mode1SceneId = resolveMode1SceneId(
+                requestedSceneId: resolved.picks.sceneId,
+                repeatStyleId: control.repeatStyleId
+            )
+            control.reverb.wet = min(0.36, 0.14 + 0.16 * mutation + 0.10 * fracture)
+            control.reverb.damping = min(1.0, max(0.0, 0.35 + 0.45 * (1.0 - mutation)))
+            control.mode1ClearRequest = sentButtons.clear
+            control.mode1JoltRequest = sentButtons.jolt
 
         case 2:
             let voicing = mode2Voicing(for: resolved.picks.presetId)
@@ -190,20 +259,23 @@ final class ModeEngine {
             control.reverb.damping = min(1.0, max(0.0, 0.35 + 0.40 * (1.0 - control.grainDensity)))
 
         case 3:
-            let drive = paramReal("drive", default: 0.22, min: 0.0, max: 0.85, from: out.params)
+            let drive = paramReal("drive", default: 0.52, min: 0.0, max: 0.85, from: out.params)
             control.drive = normalize(drive, min: 0.0, max: 0.85)
-            let bitDepthBits = paramReal("bit_depth_bits", fallback: "bit_depth", default: 18.0, min: 8.0, max: 24.0, from: out.params)
+            let bitDepthBits = paramReal("bit_depth_bits", fallback: "bit_depth", default: 12.0, min: 8.0, max: 24.0, from: out.params)
+            let bitDepthNorm = normalize(bitDepthBits, min: 8.0, max: 24.0)
             control.bitDepth = (bitDepthBits - 8.0) / 8.0
             control.downsample = param("downsample_amt", fallback: "downsample", default: control.downsample, from: out.params)
             control.resonance = param("res_shift", fallback: "resonance", default: control.resonance, from: out.params)
-            let toneDb = paramReal("tone_db", fallback: "brightness", default: -1.0, min: -9.0, max: 6.0, from: out.params)
-            control.exciteAmount = min(1.0, max(0.0, 0.35 + (toneDb / 18.0) + (0.45 * control.resonance)))
-            control.wetLevel = min(0.32, 0.10 + 0.20 * control.drive + 0.08 * control.resonance)
-            control.dryLevel = max(0.50, 1.0 - (control.wetLevel * 0.90))
+            let toneDb = paramReal("tone_db", fallback: "brightness", default: -3.0, min: -9.0, max: 6.0, from: out.params)
+            let toneNorm = normalize(toneDb, min: -9.0, max: 6.0)
+            let crushSeverity = min(1.0, max(0.0, (0.60 * (1.0 - bitDepthNorm)) + (0.40 * control.downsample)))
+            control.exciteAmount = toneNorm
+            control.wetLevel = min(0.60, max(0.40, 0.42 + (0.20 * crushSeverity) + (0.08 * control.resonance)))
+            control.dryLevel = min(0.56, max(0.20, 0.44 - (0.22 * crushSeverity) + (0.08 * (1.0 - control.drive))))
             control.motionSpeed = param("motion_speed", default: control.motionSpeed, from: out.params)
             control.spread = param("spread", default: control.spread, from: out.params)
             control.resonatorTuningProfileId = resolved.picks.presetId ?? "res_default"
-            control.reverb.wet = min(0.22, 0.06 + 0.18 * control.wetLevel)
+            control.reverb.wet = min(0.14, 0.03 + (0.06 * (1.0 - crushSeverity)))
             control.hfClampWetPath = true
 
         case 4:
@@ -349,13 +421,6 @@ final class ModeEngine {
 
     // MARK: - Internals
 
-    private struct Mode1Voicing {
-        let wetScale: Double
-        let dryBase: Double
-        let dryDuck: Double
-        let motionFloor: Double
-    }
-
     private struct Mode2Voicing {
         let wetScale: Double
         let reverbScale: Double
@@ -381,19 +446,28 @@ final class ModeEngine {
             return AudioControl(
                 mode: 1,
                 level: 0.82,
-                dryLevel: 0.80,
-                wetLevel: 0.36,
-                spread: 0.50,
-                motionSpeed: 0.30,
+                dryLevel: 0.30,
+                wetLevel: 0.52,
+                spread: 0.62,
+                motionSpeed: 0.44,
                 motionRadius: 0.40,
                 spatialMotion: .orbitPulse,
-                reverb: ReverbTarget(presetId: "beat_A", wet: 0.12, decay: 0.28, preDelay: 0.05, damping: 0.56, xfadeMs: 400),
-                repeatProb: 0.58,
-                thresholdBias: 0.18,
-                windowNorm: 0.26,
-                stutterLenNorm: 0.12,
-                gateSharpness: 0.55,
-                motionIntensity: 0.38,
+                reverb: ReverbTarget(presetId: "beat_A", wet: 0.11, decay: 0.28, preDelay: 0.05, damping: 0.52, xfadeMs: 400),
+                mode1Fracture: 0.58,
+                mode1Mutation: 0.42,
+                mode1PitchLock: 0.68,
+                mode1HoldLenSec: 8.0,
+                mode1TailFadeMs: 480.0,
+                mode1SceneRateHz: 3.0,
+                mode1SceneId: "razor_gate",
+                mode1ClearRequest: false,
+                mode1JoltRequest: false,
+                repeatProb: 0.66,
+                thresholdBias: 0.32,
+                windowNorm: 0.24,
+                stutterLenNorm: 0.10,
+                gateSharpness: 0.70,
+                motionIntensity: 0.42,
                 gridDiv: "1/8",
                 repeatStyleId: "stutter_a"
             )
@@ -420,18 +494,18 @@ final class ModeEngine {
             return AudioControl(
                 mode: 3,
                 level: 0.78,
-                dryLevel: 0.70,
-                wetLevel: 0.22,
-                spread: 0.45,
-                motionSpeed: 0.30,
+                dryLevel: 0.33,
+                wetLevel: 0.52,
+                spread: 0.50,
+                motionSpeed: 0.34,
                 motionRadius: 0.30,
                 spatialMotion: .orbit,
-                reverb: ReverbTarget(presetId: "plate_dark", wet: 0.14, decay: 0.30, preDelay: 0.08, damping: 0.65, xfadeMs: 500),
-                exciteAmount: 0.45,
-                resonance: 0.50,
-                drive: 0.15,
-                bitDepth: 0.92,
-                downsample: 0.02,
+                reverb: ReverbTarget(presetId: "plate_dark", wet: 0.08, decay: 0.26, preDelay: 0.06, damping: 0.70, xfadeMs: 500),
+                exciteAmount: 0.40,
+                resonance: 0.64,
+                drive: 0.52,
+                bitDepth: 0.50,
+                downsample: 0.44,
                 resonatorTuningProfileId: "res_default",
                 hfClampWetPath: true
             )
@@ -553,15 +627,23 @@ final class ModeEngine {
         }
     }
 
-    private func mode1Voicing(for presetId: String?) -> Mode1Voicing {
-        let id = (presetId ?? "").lowercased()
-        if id.contains("tight") {
-            return Mode1Voicing(wetScale: 0.88, dryBase: 0.84, dryDuck: 0.74, motionFloor: 0.78)
+    private func resolveMode1SceneId(requestedSceneId: String?, repeatStyleId: String) -> String {
+        let allowed: Set<String> = [
+            "razor_gate", "databend", "arp_shred",
+            "reverse_flock", "spectral_melt", "void_strobe",
+        ]
+        if let requested = requestedSceneId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           !requested.isEmpty,
+           allowed.contains(requested) {
+            return requested
         }
-        if id.contains("fill") || id.contains("jump") {
-            return Mode1Voicing(wetScale: 1.10, dryBase: 0.90, dryDuck: 0.92, motionFloor: 0.90)
+        let style = repeatStyleId.lowercased()
+        if style == "stutter_b" {
+            return "databend"
         }
-        return Mode1Voicing(wetScale: 1.0, dryBase: 0.87, dryDuck: 0.86, motionFloor: 0.84)
+        return "razor_gate"
     }
 
     private func mode2Voicing(for presetId: String?) -> Mode2Voicing {
@@ -735,6 +817,12 @@ final class ModeEngine {
         control.stutterLenNorm = min(max(control.stutterLenNorm, 0.0), 1.0)
         control.gateSharpness = min(max(control.gateSharpness, 0.0), 1.0)
         control.motionIntensity = min(max(control.motionIntensity, 0.0), 1.0)
+        control.mode1Fracture = min(max(control.mode1Fracture, 0.0), 1.0)
+        control.mode1Mutation = min(max(control.mode1Mutation, 0.0), 1.0)
+        control.mode1PitchLock = min(max(control.mode1PitchLock, 0.0), 1.0)
+        control.mode1HoldLenSec = min(max(control.mode1HoldLenSec, 6.0), 12.0)
+        control.mode1TailFadeMs = min(max(control.mode1TailFadeMs, 150.0), 1_200.0)
+        control.mode1SceneRateHz = min(max(control.mode1SceneRateHz, 0.25), 12.0)
         control.gridDiv = normalizeGridDiv(control.gridDiv)
         control.gestureRate = min(max(control.gestureRate, 0.0), 1.0)
         control.interruptiveness = min(max(control.interruptiveness, 0.0), 1.0)

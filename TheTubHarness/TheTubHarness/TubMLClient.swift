@@ -11,6 +11,12 @@ import SwiftUI
 import Combine
 import Darwin
 
+enum FeedbackTargetState: String {
+    case none
+    case active
+    case lastFinished = "last_finished"
+}
+
 final class TubMLClient: ObservableObject {
     @Published var isRunning: Bool = false
     @Published var logPath: String?
@@ -20,7 +26,11 @@ final class TubMLClient: ObservableObject {
     @Published var sessionDirectoryPath: String?
     @Published var inputAudioPath: String?
     @Published var activeSessionId: String?
+    @Published private(set) var activeBundleId: String?
     @Published var currentLabel: HumanLabel?
+    @Published private(set) var feedbackTargetSessionId: String?
+    @Published private(set) var feedbackTargetBundleId: String?
+    @Published private(set) var feedbackTargetState: FeedbackTargetState = .none
 
     @Published var sentCount: Int = 0
     @Published var recvCount: Int = 0
@@ -49,6 +59,12 @@ final class TubMLClient: ObservableObject {
     private var phase: Double = 0.0
     private let timeoutMs: Int = 500
     private var previousTickNs: UInt64?
+    private struct FeedbackTargetRef {
+        let sessionId: String
+        let bundleId: String
+        let eventURL: URL
+    }
+    private var lastFeedbackTarget: FeedbackTargetRef?
 
     /// Called on reply decode success.
     /// - Parameters: (decoded out, latencyMs, buttons that were sent for that packet)
@@ -93,6 +109,17 @@ final class TubMLClient: ObservableObject {
         d.keyDecodingStrategy = .convertFromSnakeCase
         return d
     }()
+
+    private func decodeModelOut(_ data: Data) throws -> ModelOut {
+        if Thread.isMainThread {
+            return try decoder.decode(ModelOut.self, from: data)
+        }
+        var decoded: Result<ModelOut, Error>?
+        DispatchQueue.main.sync {
+            decoded = Result { try self.decoder.decode(ModelOut.self, from: data) }
+        }
+        return try decoded!.get()
+    }
 
     init(host: String = "127.0.0.1", port: UInt16 = 9910) {
         self.host = NWEndpoint.Host(host)
@@ -143,7 +170,33 @@ final class TubMLClient: ObservableObject {
         DispatchQueue.main.async {
             self.currentLabel = newLabel
         }
-        trainingLogSession?.appendLabelChange(from: oldLabel, to: newLabel)
+        if let trainingLogSession {
+            trainingLogSession.appendLabelChange(from: oldLabel, to: newLabel)
+            updateFeedbackTarget()
+            return
+        }
+
+        guard let lastFeedbackTarget else {
+            DispatchQueue.main.async {
+                self.lastError = "feedback target unavailable"
+            }
+            updateFeedbackTarget()
+            return
+        }
+
+        let wrote = TrainingLogSession.appendDetachedLabelChange(
+            eventURL: lastFeedbackTarget.eventURL,
+            bundleId: lastFeedbackTarget.bundleId,
+            sessionId: lastFeedbackTarget.sessionId,
+            from: oldLabel,
+            to: newLabel
+        )
+        if !wrote {
+            DispatchQueue.main.async {
+                self.lastError = "failed to append label for \(lastFeedbackTarget.sessionId)"
+            }
+        }
+        updateFeedbackTarget()
     }
 
     private func snapshotControlsAndConsumeMomentaries() -> (mode: Int, buttons: Buttons) {
@@ -152,6 +205,31 @@ final class TubMLClient: ObservableObject {
         let b = controlsButtons
         controlsButtons = Buttons(jolt: false, clear: false)
         return (m, b)
+    }
+
+    private func updateFeedbackTarget() {
+        let targetState: FeedbackTargetState
+        let targetSessionId: String?
+        let targetBundleId: String?
+        if isRunning, let activeSessionId, trainingLogSession != nil {
+            targetState = .active
+            targetSessionId = activeSessionId
+            targetBundleId = activeBundleId
+        } else if let lastFeedbackTarget {
+            targetState = .lastFinished
+            targetSessionId = lastFeedbackTarget.sessionId
+            targetBundleId = lastFeedbackTarget.bundleId
+        } else {
+            targetState = .none
+            targetSessionId = nil
+            targetBundleId = nil
+        }
+
+        DispatchQueue.main.async {
+            self.feedbackTargetState = targetState
+            self.feedbackTargetSessionId = targetSessionId
+            self.feedbackTargetBundleId = targetBundleId
+        }
     }
 
     // MARK: - Public API
@@ -172,13 +250,19 @@ final class TubMLClient: ObservableObject {
         frameIndex = 0
         sessionId = "session_\(nowMs())"
         activeSessionId = sessionId
+        updateFeedbackTarget()
 
         do {
             let bundleBuild = try RunBundleFactory.create()
             activeBundle = bundleBuild.bundle
+            activeBundleId = bundleBuild.bundle.bundleId
             bundlePath = bundleBuild.fileURL.path
             print("[app] \(RunBundleFactory.startupBanner(bundle: bundleBuild.bundle))")
             print("[app] bundle file: \(bundleBuild.fileURL.path)")
+            let lockStatus = ModeContract.contractLockStatus()
+            if !lockStatus.matched {
+                print("[app][contract_lock] mismatch locked=\(lockStatus.lockedFingerprint) computed=\(lockStatus.computedFingerprint)")
+            }
 
             let logger = try TrainingLogSession(
                 bundle: bundleBuild.bundle,
@@ -194,10 +278,13 @@ final class TubMLClient: ObservableObject {
             self.sessionMetaPath = logger.metaURL.path
             self.sessionDirectoryPath = logger.sessionDirectoryURL.path
             self.inputAudioPath = logger.inputAudioURL?.path
+            self.lastFeedbackTarget = nil
+            self.updateFeedbackTarget()
         } catch {
             self.lastError = "trace init error: \(error)"
             self.trainingLogSession = nil
             self.activeBundle = nil
+            self.activeBundleId = nil
             self.logPath = nil
             self.eventLogPath = nil
             self.bundlePath = nil
@@ -205,6 +292,7 @@ final class TubMLClient: ObservableObject {
             self.sessionDirectoryPath = nil
             self.inputAudioPath = nil
             self.activeSessionId = nil
+            self.updateFeedbackTarget()
         }
 
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -240,9 +328,19 @@ final class TubMLClient: ObservableObject {
             self.lastTickIntervalMs = nil
         }
 
+        if let trainingLogSession {
+            lastFeedbackTarget = FeedbackTargetRef(
+                sessionId: trainingLogSession.sessionId,
+                bundleId: trainingLogSession.bundle.bundleId,
+                eventURL: trainingLogSession.eventURL
+            )
+        }
+
         trainingLogSession?.close()
         trainingLogSession = nil
         activeBundle = nil
+        activeBundleId = nil
+        updateFeedbackTarget()
     }
 
     func setLogInputSource(_ source: FrameInputSource, replayMode: Bool) {
@@ -267,6 +365,40 @@ final class TubMLClient: ObservableObject {
         DispatchQueue.main.async {
             self.inputAudioPath = path
         }
+    }
+
+    func configureSessionInputRoute(
+        inputDeviceUID: String?,
+        inputDeviceName: String?,
+        inputChannels: Int,
+        inputActiveChannels: String,
+        inputRouteWarning: String?
+    ) {
+        trainingLogSession?.setInputRouteInfo(
+            inputDeviceUID: inputDeviceUID,
+            inputDeviceName: inputDeviceName,
+            inputChannels: inputChannels,
+            inputActiveChannels: inputActiveChannels,
+            inputRouteWarning: inputRouteWarning
+        )
+    }
+
+    func configureSessionOutputRoute(
+        outputDeviceUID: String?,
+        outputDeviceName: String?,
+        outputChannels: Int,
+        outputRouteMode: String,
+        outputRouteMapping: String,
+        outputRouteWarning: String?
+    ) {
+        trainingLogSession?.setOutputRouteInfo(
+            outputDeviceUID: outputDeviceUID,
+            outputDeviceName: outputDeviceName,
+            outputChannels: outputChannels,
+            outputRouteMode: outputRouteMode,
+            outputRouteMapping: outputRouteMapping,
+            outputRouteWarning: outputRouteWarning
+        )
     }
 
     func noteSessionAudioAlignment(hostTime: UInt64, sampleIndex: Int64) {
@@ -515,9 +647,38 @@ final class TubMLClient: ObservableObject {
 
         guard let conn else {
             inFlight = false
+            let recvTsMs = nowMs()
+            let latency = max(0, recvTsMs - sendTsMs)
+            let (fallback, pickInterventions) = resolvedSafeFallback(mode: mode, tsMs: recvTsMs)
             DispatchQueue.main.async {
+                self.lastOut = fallback
+                self.lastLatencyMs = latency
                 self.lastError = "udp transport unavailable for \(self.hostString):\(self.portValue)"
             }
+            self.onModelOut?(fallback, latency, buttons)
+
+            var interventions = ["transport_unavailable", "fallback_safe_defaults"]
+            interventions.append(contentsOf: audioInterventions)
+            if let reason = featureFrame.fallbackReason {
+                interventions.append("feature_fallback:\(reason)")
+            }
+            interventions.append(contentsOf: pickInterventions)
+
+            self.logFrame(
+                input: inp,
+                output: fallback,
+                frameIndex: tickIndex,
+                requestId: requestId,
+                sendTsMs: sendTsMs,
+                recvTsMs: recvTsMs,
+                latencyMs: latency,
+                timedOut: true,
+                decodeError: "transport_unavailable",
+                interventions: interventions,
+                featureSource: featureFrame.source,
+                fallbackReason: featureFrame.fallbackReason,
+                sentPacketJson: sentPacketJson
+            )
             return
         }
 
@@ -544,25 +705,32 @@ final class TubMLClient: ObservableObject {
             }
 
             self.inFlight = false
+            let recvTsMs = nowMs()
+            let latency = max(0, recvTsMs - sendTsMs)
+            let (fallback, pickInterventions) = self.resolvedSafeFallback(mode: mode, tsMs: recvTsMs)
             DispatchQueue.main.async {
                 self.timeoutCount += 1
+                self.lastOut = fallback
+                self.lastLatencyMs = latency
                 self.lastError = "timeout (\(self.timeoutMs)ms) waiting for \(self.hostString):\(self.portValue)"
             }
+            self.onModelOut?(fallback, latency, buttons)
 
-            var interventions = ["timeout"]
+            var interventions = ["timeout", "fallback_safe_defaults"]
             interventions.append(contentsOf: audioInterventions)
             if let reason = featureFrame.fallbackReason {
                 interventions.append("feature_fallback:\(reason)")
             }
+            interventions.append(contentsOf: pickInterventions)
 
             self.logFrame(
                 input: inp,
-                output: nil,
+                output: fallback,
                 frameIndex: tickIndex,
                 requestId: requestId,
                 sendTsMs: sendTsMs,
-                recvTsMs: nil,
-                latencyMs: nil,
+                recvTsMs: recvTsMs,
+                latencyMs: latency,
                 timedOut: true,
                 decodeError: nil,
                 interventions: interventions,
@@ -579,22 +747,31 @@ final class TubMLClient: ObservableObject {
             if let err {
                 self.timeoutWork?.cancel()
                 self.inFlight = false
-                DispatchQueue.main.async { self.lastError = "send error: \(err)" }
+                let recvTsMs = nowMs()
+                let latency = max(0, recvTsMs - sendTsMs)
+                let (fallback, pickInterventions) = self.resolvedSafeFallback(mode: mode, tsMs: recvTsMs)
+                DispatchQueue.main.async {
+                    self.lastError = "send error: \(err)"
+                    self.lastOut = fallback
+                    self.lastLatencyMs = latency
+                }
+                self.onModelOut?(fallback, latency, buttons)
 
-                var interventions = ["send_error"]
+                var interventions = ["send_error", "fallback_safe_defaults"]
                 interventions.append(contentsOf: audioInterventions)
                 if let reason = featureFrame.fallbackReason {
                     interventions.append("feature_fallback:\(reason)")
                 }
+                interventions.append(contentsOf: pickInterventions)
 
                 self.logFrame(
                     input: inp,
-                    output: nil,
+                    output: fallback,
                     frameIndex: tickIndex,
                     requestId: requestId,
                     sendTsMs: sendTsMs,
-                    recvTsMs: nil,
-                    latencyMs: nil,
+                    recvTsMs: recvTsMs,
+                    latencyMs: latency,
                     timedOut: true,
                     decodeError: err.localizedDescription,
                     interventions: interventions,
@@ -615,22 +792,31 @@ final class TubMLClient: ObservableObject {
                 self.inFlight = false
 
                 if let recvErr {
-                    DispatchQueue.main.async { self.lastError = "recv error: \(recvErr)" }
+                    let recvTsMs = nowMs()
+                    let latency = max(0, recvTsMs - sendTsMs)
+                    let (fallback, pickInterventions) = self.resolvedSafeFallback(mode: mode, tsMs: recvTsMs)
+                    DispatchQueue.main.async {
+                        self.lastError = "recv error: \(recvErr)"
+                        self.lastOut = fallback
+                        self.lastLatencyMs = latency
+                    }
+                    self.onModelOut?(fallback, latency, buttons)
 
-                    var interventions = ["recv_error"]
+                    var interventions = ["recv_error", "fallback_safe_defaults"]
                     interventions.append(contentsOf: audioInterventions)
                     if let reason = featureFrame.fallbackReason {
                         interventions.append("feature_fallback:\(reason)")
                     }
+                    interventions.append(contentsOf: pickInterventions)
 
                     self.logFrame(
                         input: inp,
-                        output: nil,
+                        output: fallback,
                         frameIndex: tickIndex,
                         requestId: requestId,
                         sendTsMs: sendTsMs,
-                        recvTsMs: nil,
-                        latencyMs: nil,
+                        recvTsMs: recvTsMs,
+                        latencyMs: latency,
                         timedOut: true,
                         decodeError: recvErr.localizedDescription,
                         interventions: interventions,
@@ -641,22 +827,31 @@ final class TubMLClient: ObservableObject {
                     return
                 }
                 guard let content else {
-                    DispatchQueue.main.async { self.lastError = "recv empty" }
+                    let recvTsMs = nowMs()
+                    let latency = max(0, recvTsMs - sendTsMs)
+                    let (fallback, pickInterventions) = self.resolvedSafeFallback(mode: mode, tsMs: recvTsMs)
+                    DispatchQueue.main.async {
+                        self.lastError = "recv empty"
+                        self.lastOut = fallback
+                        self.lastLatencyMs = latency
+                    }
+                    self.onModelOut?(fallback, latency, buttons)
 
-                    var interventions = ["recv_empty"]
+                    var interventions = ["recv_empty", "fallback_safe_defaults"]
                     interventions.append(contentsOf: audioInterventions)
                     if let reason = featureFrame.fallbackReason {
                         interventions.append("feature_fallback:\(reason)")
                     }
+                    interventions.append(contentsOf: pickInterventions)
 
                     self.logFrame(
                         input: inp,
-                        output: nil,
+                        output: fallback,
                         frameIndex: tickIndex,
                         requestId: requestId,
                         sendTsMs: sendTsMs,
-                        recvTsMs: nil,
-                        latencyMs: nil,
+                        recvTsMs: recvTsMs,
+                        latencyMs: latency,
                         timedOut: true,
                         decodeError: "recv_empty",
                         interventions: interventions,
@@ -671,7 +866,7 @@ final class TubMLClient: ObservableObject {
                 let latency = max(0, recvTsMs - sendTsMs)
 
                 do {
-                    let decoded = try self.decoder.decode(ModelOut.self, from: content)
+                    let decoded = try self.decodeModelOut(content)
                     let enforced = ModeContract.enforceIncoming(modelOut: decoded, currentMode: mode)
                     let manifestResolution = self.manifests.resolve(mode: enforced.0.mode, picks: enforced.0.picks)
                     let out = ModelOut(
@@ -691,9 +886,13 @@ final class TubMLClient: ObservableObject {
                     if !enforced.1.isEmpty {
                         interventions.append(contentsOf: enforced.1.map { "contract_violation:\($0)" })
                     }
-                    interventions.append(contentsOf: self.pickResolutionInterventions(
+                    let pickNotes = self.significantPickResolutionNotes(
                         mode: out.mode,
                         notes: manifestResolution.notes
+                    )
+                    interventions.append(contentsOf: self.pickResolutionInterventions(
+                        mode: out.mode,
+                        notes: pickNotes
                     ))
 
                     DispatchQueue.main.async {
@@ -701,7 +900,7 @@ final class TubMLClient: ObservableObject {
                         self.lastLatencyMs = latency
                         if !enforced.1.isEmpty {
                             self.lastError = "contract fallback for mode \(mode)"
-                        } else if !manifestResolution.notes.isEmpty {
+                        } else if !pickNotes.isEmpty {
                             self.lastError = "pick fallback for mode \(mode)"
                         } else {
                             self.lastError = nil
@@ -751,9 +950,13 @@ final class TubMLClient: ObservableObject {
                         interventions.append("feature_fallback:\(reason)")
                     }
                     interventions.append("fallback_safe_defaults")
-                    interventions.append(contentsOf: self.pickResolutionInterventions(
+                    let pickNotes = self.significantPickResolutionNotes(
                         mode: fallback.mode,
                         notes: manifestResolution.notes
+                    )
+                    interventions.append(contentsOf: self.pickResolutionInterventions(
+                        mode: fallback.mode,
+                        notes: pickNotes
                     ))
 
                     self.logFrame(
@@ -774,6 +977,22 @@ final class TubMLClient: ObservableObject {
                 }
             }
         })
+    }
+
+    private func resolvedSafeFallback(mode: Int, tsMs: Int) -> (ModelOut, [String]) {
+        var fallback = ModeContract.protocolViolationFallback(mode: mode, tsMs: tsMs)
+        let manifestResolution = manifests.resolve(mode: fallback.mode, picks: fallback.picks)
+        fallback = ModelOut(
+            protocolVersion: fallback.protocolVersion,
+            tsMs: fallback.tsMs,
+            mode: fallback.mode,
+            params: fallback.params,
+            picks: manifestResolution.picks,
+            flags: fallback.flags
+        )
+        let pickNotes = significantPickResolutionNotes(mode: fallback.mode, notes: manifestResolution.notes)
+        let interventions = pickResolutionInterventions(mode: fallback.mode, notes: pickNotes)
+        return (fallback, interventions)
     }
 
     private enum SocketRoundTripError: Error {
@@ -861,7 +1080,7 @@ final class TubMLClient: ObservableObject {
         let latency = max(0, recvTsMs - sendTsMs)
 
         do {
-            let decoded = try self.decoder.decode(ModelOut.self, from: content)
+            let decoded = try self.decodeModelOut(content)
             let enforced = ModeContract.enforceIncoming(modelOut: decoded, currentMode: mode)
             let manifestResolution = self.manifests.resolve(mode: enforced.0.mode, picks: enforced.0.picks)
             let out = ModelOut(
@@ -881,9 +1100,13 @@ final class TubMLClient: ObservableObject {
             if !enforced.1.isEmpty {
                 interventions.append(contentsOf: enforced.1.map { "contract_violation:\($0)" })
             }
-            interventions.append(contentsOf: self.pickResolutionInterventions(
+            let pickNotes = self.significantPickResolutionNotes(
                 mode: out.mode,
                 notes: manifestResolution.notes
+            )
+            interventions.append(contentsOf: self.pickResolutionInterventions(
+                mode: out.mode,
+                notes: pickNotes
             ))
 
             DispatchQueue.main.async {
@@ -891,7 +1114,7 @@ final class TubMLClient: ObservableObject {
                 self.lastLatencyMs = latency
                 if !enforced.1.isEmpty {
                     self.lastError = "contract fallback for mode \(mode)"
-                } else if !manifestResolution.notes.isEmpty {
+                } else if !pickNotes.isEmpty {
                     self.lastError = "pick fallback for mode \(mode)"
                 } else {
                     self.lastError = nil
@@ -942,9 +1165,13 @@ final class TubMLClient: ObservableObject {
             if let reason = featureFrame.fallbackReason {
                 interventions.append("feature_fallback:\(reason)")
             }
-            interventions.append(contentsOf: self.pickResolutionInterventions(
+            let pickNotes = self.significantPickResolutionNotes(
                 mode: fallback.mode,
                 notes: manifestResolution.notes
+            )
+            interventions.append(contentsOf: self.pickResolutionInterventions(
+                mode: fallback.mode,
+                notes: pickNotes
             ))
 
             self.logFrame(
@@ -1004,6 +1231,40 @@ final class TubMLClient: ObservableObject {
 
     private func nowMs() -> Int {
         Int(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private func significantPickResolutionNotes(mode: Int, notes: [String]) -> [String] {
+        guard !notes.isEmpty else { return [] }
+        switch mode {
+        case 4:
+            return notes.filter { note in
+                if note.hasPrefix("sample_id fallback to ") { return false }
+                if note.hasPrefix("bank_id fallback to ") { return false }
+                if note.hasPrefix("preset_id fallback to ") { return false }
+                if note.hasPrefix("spatial_pattern_id fallback to ") { return false }
+                return true
+            }
+        case 9:
+            return notes.filter { note in
+                if note.hasPrefix("bank_id fallback to ") { return false }
+                if note.hasPrefix("midi_inst_id fallback to ") { return false }
+                if note.hasPrefix("preset_id fallback to ") { return false }
+                if note.hasPrefix("spatial_pattern_id fallback to ") { return false }
+                if note.hasPrefix("bank_id ") && note.hasSuffix(" unknown, ignoring") { return false }
+                if note.hasPrefix("midi_inst_id ") && note.hasSuffix(" unknown, ignoring") { return false }
+                return true
+            }
+        case 5, 6:
+            return notes.filter { note in
+                if note.hasPrefix("preset_id fallback to ") { return false }
+                if note.hasPrefix("spatial_pattern_id fallback to ") { return false }
+                if note.hasPrefix("bank_id fallback to ") { return false }
+                if note.hasPrefix("bank_id ") && note.hasSuffix(" unknown, ignoring") { return false }
+                return true
+            }
+        default:
+            return notes
+        }
     }
 
     private func pickResolutionInterventions(mode: Int, notes: [String]) -> [String] {

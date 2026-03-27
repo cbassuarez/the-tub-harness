@@ -41,5 +41,14 @@
     "polyphony_hint": 4,
     "velocity_layers": 2,
     "round_robin_count": 1
+  },
+  "inst_P": {
+    "type": "sampler",
+    "sample_pack_path": "Assets/Sampler/inst_P",
+    "soundfont_path": "Assets/Soundfonts/inst_P.sf2",
+    "gain_db": -2.0,
+    "polyphony_hint": 8,
+    "velocity_layers": 3,
+    "round_robin_count": 2
   }
 }

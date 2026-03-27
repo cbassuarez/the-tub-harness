@@ -149,8 +149,10 @@ final class ManifestCatalog {
         }
 
         var spatialPatternId = picks.spatialPatternId
-        if isBlank(spatialPatternId) || spatialPatterns[spatialPatternId ?? ""] == nil {
-            let fallback = defaults.spatialPatternId ?? "drift_slow"
+        if let canonicalSpatial = canonicalDictKey(spatialPatternId, in: spatialPatterns) {
+            spatialPatternId = canonicalSpatial
+        } else if isBlank(spatialPatternId) || spatialPatterns[spatialPatternId ?? ""] == nil {
+            let fallback = canonicalDictKey(defaults.spatialPatternId, in: spatialPatterns) ?? "drift_slow"
             if spatialPatternId != fallback {
                 notes.append("spatial_pattern_id fallback to \(fallback)")
             }
@@ -159,10 +161,20 @@ final class ManifestCatalog {
         let spatial = spatialPatternId.flatMap { spatialPatterns[$0] }
 
         var bankId = picks.bankId
-        var bank = bankId.flatMap { banks[$0] }
-        if required.contains("bank_id") {
+        var bank: BankManifestEntry?
+        if let canonicalBank = canonicalDictKey(bankId, in: banks) {
+            bankId = canonicalBank
+            bank = banks[canonicalBank]
+        }
+        if modeClamped == 9, isBlank(bankId) || bank == nil {
+            let fallback = canonicalDictKey(defaults.bankId, in: banks)
+            if let fallback {
+                bankId = fallback
+                bank = banks[fallback]
+            }
+        } else if required.contains("bank_id") {
             if isBlank(bankId) || bank == nil {
-                let fallback = defaults.bankId
+                let fallback = canonicalDictKey(defaults.bankId, in: banks)
                     ?? banks.keys.sorted().first
                     ?? "missing_bank_m\(modeClamped)"
                 if bankId != fallback {
@@ -181,16 +193,15 @@ final class ManifestCatalog {
         var resolvedBankAsset: BankAsset?
         let shouldResolveSample = required.contains("sample_id") || (bank?.type == .samples && required.contains("bank_id"))
         if shouldResolveSample {
-            let requested = sampleId ?? ""
-            let validRequested = bank?.assets.first(where: { $0.id == requested })
-            if let validRequested {
-                resolvedBankAsset = validRequested
+            if let canonicalSample = canonicalBankAssetId(sampleId, in: bank?.assets) {
+                sampleId = canonicalSample
+                resolvedBankAsset = bank?.assets.first(where: { $0.id == canonicalSample })
             } else {
-                let fallbackId = bank?.defaultSampleId
+                let fallbackId = canonicalBankAssetId(bank?.defaultSampleId, in: bank?.assets)
                     ?? bank?.assets.first?.id
-                    ?? defaults.sampleId
+                    ?? canonicalBankAssetId(defaults.sampleId, in: bank?.assets)
                     ?? "missing_sample_m\(modeClamped)"
-                if sampleId != fallbackId {
+                if sampleId != fallbackId, modeClamped != 4 {
                     notes.append("sample_id fallback to \(fallbackId)")
                 }
                 sampleId = fallbackId
@@ -199,10 +210,20 @@ final class ManifestCatalog {
         }
 
         var midiInstId = picks.midiInstId
-        var instrument = midiInstId.flatMap { instruments[$0] }
-        if required.contains("midi_inst_id") {
+        var instrument: InstrumentManifestEntry?
+        if let canonicalInst = canonicalDictKey(midiInstId, in: instruments) {
+            midiInstId = canonicalInst
+            instrument = instruments[canonicalInst]
+        }
+        if modeClamped == 9, isBlank(midiInstId) || instrument == nil {
+            let fallback = canonicalDictKey(defaults.midiInstId, in: instruments)
+            if let fallback {
+                midiInstId = fallback
+                instrument = instruments[fallback]
+            }
+        } else if required.contains("midi_inst_id") {
             if isBlank(midiInstId) || instrument == nil {
-                let fallback = defaults.midiInstId
+                let fallback = canonicalDictKey(defaults.midiInstId, in: instruments)
                     ?? instruments.keys.sorted().first
                     ?? "missing_inst_m\(modeClamped)"
                 if midiInstId != fallback {
@@ -215,8 +236,10 @@ final class ManifestCatalog {
 
         var chordSetId = picks.chordSetId
         if required.contains("chord_set_id") {
-            if isBlank(chordSetId) || chords[chordSetId ?? ""] == nil {
-                let fallback = defaults.chordSetId
+            if let canonicalChord = canonicalDictKey(chordSetId, in: chords) {
+                chordSetId = canonicalChord
+            } else if isBlank(chordSetId) || chords[chordSetId ?? ""] == nil {
+                let fallback = canonicalDictKey(defaults.chordSetId, in: chords)
                     ?? chords.keys.sorted().first
                     ?? "cs_neutral"
                 if chordSetId != fallback {
@@ -530,6 +553,15 @@ final class ManifestCatalog {
                     BankAsset(id: "p000", path: "Assets/MIDI/phrases/p000.mid", gain: nil, category: nil),
                 ]
             ),
+            "particles_A": BankManifestEntry(
+                type: .particles,
+                defaultSampleId: nil,
+                defaultPhraseId: nil,
+                defaultProfileId: "ptc0",
+                assets: [
+                    BankAsset(id: "ptc0", path: "Assets/Particles/ptc0.json", gain: nil, category: nil),
+                ]
+            ),
         ]
     }
 
@@ -559,6 +591,18 @@ final class ManifestCatalog {
                 velocityLayers: 2,
                 roundRobinCount: 1
             ),
+            "inst_P": InstrumentManifestEntry(
+                type: .sampler,
+                preset: nil,
+                polyphony: 8,
+                samplePackPath: "Assets/Sampler/inst_P",
+                soundfontPath: "Assets/Soundfonts/inst_P.sf2",
+                samplerPresetRef: nil,
+                gainDb: -2.0,
+                polyphonyHint: 8,
+                velocityLayers: 3,
+                roundRobinCount: 2
+            ),
         ]
     }
 
@@ -574,6 +618,24 @@ final class ManifestCatalog {
             "jump_cut": SpatialPatternManifestEntry(algo: .jumpCut, speed: 0.70, spread: 0.38, jumpProb: 0.55, jitter: nil),
             "cluster_rotate": SpatialPatternManifestEntry(algo: .clusterRotate, speed: 0.30, spread: 0.62, jumpProb: nil, jitter: 0.08),
         ]
+    }
+
+    private func canonicalDictKey<T>(_ raw: String?, in dict: [String: T]) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if dict[trimmed] != nil { return trimmed }
+        let lower = trimmed.lowercased()
+        return dict.keys.first(where: { $0.lowercased() == lower })
+    }
+
+    private func canonicalBankAssetId(_ raw: String?, in assets: [BankAsset]?) -> String? {
+        guard let assets, let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if assets.contains(where: { $0.id == trimmed }) { return trimmed }
+        let lower = trimmed.lowercased()
+        return assets.first(where: { $0.id.lowercased() == lower })?.id
     }
 
     private func isBlank(_ value: String?) -> Bool {

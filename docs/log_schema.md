@@ -37,6 +37,11 @@ Bundle header event on startup:
 - `event = "bundle_header"`
 - `bundle_id`
 - `session_id`
+- `bundle` payload includes:
+  - `policy_version`
+  - `bank_manifest_version`
+  - `contract_version`
+  - `contract_fingerprint`
 
 ## Session Metadata (`session_meta_<session_id>.json`)
 
@@ -57,7 +62,6 @@ Bundle header event on startup:
 - `alignment.start_ts_ms`
 - `alignment.audio_start_host_time`
 - `alignment.audio_start_sample_index`
-- `bundle` metadata payload
 
 Label change events:
 - `ts_ms`

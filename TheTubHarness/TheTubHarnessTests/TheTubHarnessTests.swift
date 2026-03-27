@@ -192,7 +192,20 @@ struct TheTubHarnessTests {
         #expect(pickViolations.contains("missing_pick:spatial_pattern_id"))
     }
 
-    @Test("ModeContract accepts legacy aliases for modes 0, 1, 4, 7, 8, 9")
+    @Test("ModeContract fingerprint is locked")
+    func modeContractFingerprintLocked() {
+        let computed = ModeContract.contractFingerprint()
+        if computed != ModeContract.lockedContractFingerprint {
+            Issue.record("ModeContract fingerprint mismatch. locked=\(ModeContract.lockedContractFingerprint) computed=\(computed)")
+        }
+        #expect(computed == ModeContract.lockedContractFingerprint)
+        let status = ModeContract.contractLockStatus()
+        #expect(status.matched)
+        #expect(status.lockedFingerprint == ModeContract.lockedContractFingerprint)
+        #expect(status.computedFingerprint == computed)
+    }
+
+    @Test("ModeContract accepts legacy aliases for modes 0, 1, 3, 4, 7, 8, 9")
     func modeContractLegacyAliases() {
         let mode0 = ModelOut(
             protocolVersion: 1,
@@ -216,6 +229,7 @@ struct TheTubHarnessTests {
             params: [
                 "repeat_grid": 0.33,
                 "stutter_len": 0.44,
+                "feedback": 0.52,
                 "motion_speed": 0.55,
             ],
             picks: ModeContract.defaultPicksByMode[1] ?? Picks(),
@@ -223,9 +237,31 @@ struct TheTubHarnessTests {
         )
         let enforced1 = ModeContract.enforceIncoming(modelOut: mode1, currentMode: 1)
         #expect(enforced1.1.isEmpty)
-        #expect(enforced1.0.params["loop_len_s"] != nil)
-        #expect(enforced1.0.params["stutter_len_ms"] != nil)
+        #expect(enforced1.0.params["hold_len_s"] != nil)
+        #expect(enforced1.0.params["scene_rate_hz"] != nil)
+        #expect(enforced1.0.params["hold_len_s"]! >= 6.0)
+        #expect(enforced1.0.params["hold_len_s"]! <= 12.0)
         #expect(enforced1.0.params["motion_speed"] == 0.55)
+
+        let mode3 = ModelOut(
+            protocolVersion: 1,
+            tsMs: 1000,
+            mode: 3,
+            params: [
+                "bit_depth": 0.32,
+                "downsample": 0.61,
+                "resonance": 0.57,
+                "brightness": 0.22,
+            ],
+            picks: ModeContract.defaultPicksByMode[3] ?? Picks(),
+            flags: Flags()
+        )
+        let enforced3 = ModeContract.enforceIncoming(modelOut: mode3, currentMode: 3)
+        #expect(enforced3.1.isEmpty)
+        #expect(enforced3.0.params["bit_depth_bits"] != nil)
+        #expect(enforced3.0.params["downsample_amt"] == 0.61)
+        #expect(enforced3.0.params["res_shift"] == 0.57)
+        #expect(enforced3.0.params["tone_db"] != nil)
 
         let mode4 = ModelOut(
             protocolVersion: 1,
@@ -286,7 +322,14 @@ struct TheTubHarnessTests {
                 "band_high": 0.36,
                 "motion_speed": 0.47,
             ],
-            picks: ModeContract.defaultPicksByMode[9] ?? Picks(),
+            picks: Picks(
+                presetId: "field_diffuse",
+                bankId: nil,
+                sampleId: nil,
+                midiInstId: nil,
+                spatialPatternId: "orbit_mid",
+                sceneId: nil
+            ),
             flags: Flags()
         )
         let enforced9 = ModeContract.enforceIncoming(modelOut: mode9, currentMode: 9)
@@ -294,6 +337,73 @@ struct TheTubHarnessTests {
         #expect(enforced9.0.params["particle_density"] == 0.41)
         #expect(enforced9.0.params["particle_brightness"] == 0.36)
         #expect(enforced9.0.params["motion_speed"] == 0.47)
+    }
+
+    @Test("Manifest defaults resolve cleanly for modes 4 and 9")
+    func manifestDefaultsResolveMode4AndMode9() {
+        let manifests = ManifestCatalog.shared
+        for mode in [4, 9] {
+            let defaults = ModeContract.defaultPicksByMode[mode] ?? Picks()
+            let resolved = manifests.resolve(mode: mode, picks: defaults)
+            #expect(resolved.notes.isEmpty)
+        }
+    }
+
+    @Test("Manifest resolution is case-insensitive for mode 4 and mode 9 picks")
+    func manifestResolutionCaseInsensitiveMode4AndMode9() {
+        let manifests = ManifestCatalog.shared
+
+        let mode4 = manifests.resolve(
+            mode: 4,
+            picks: Picks(
+                presetId: "ultrachunk_A",
+                bankId: "SAMPLES_A",
+                sampleId: "S000",
+                midiInstId: nil,
+                spatialPatternId: "CLUSTER_ROTATE",
+                sceneId: nil
+            )
+        )
+        #expect(mode4.picks.bankId == "samples_A")
+        #expect(mode4.picks.sampleId == "s000")
+        #expect(mode4.picks.spatialPatternId == "cluster_rotate")
+        #expect(mode4.notes.isEmpty)
+
+        let mode9 = manifests.resolve(
+            mode: 9,
+            picks: Picks(
+                presetId: "field_diffuse",
+                bankId: "PARTICLES_A",
+                sampleId: nil,
+                midiInstId: "INST_P",
+                spatialPatternId: "ORBIT_MID",
+                sceneId: nil
+            )
+        )
+        #expect(mode9.picks.bankId == "particles_A")
+        #expect(mode9.picks.midiInstId == "inst_P")
+        #expect(mode9.picks.spatialPatternId == "orbit_mid")
+        #expect(mode9.notes.isEmpty)
+    }
+
+    @Test("Mode 9 silently defaults optional bank and instrument picks")
+    func manifestResolutionMode9SilentlyDefaultsOptionalPicks() {
+        let manifests = ManifestCatalog.shared
+        let resolved = manifests.resolve(
+            mode: 9,
+            picks: Picks(
+                presetId: "field_diffuse",
+                bankId: "unknown_particles_bank",
+                sampleId: nil,
+                midiInstId: "unknown_inst",
+                spatialPatternId: "orbit_mid",
+                sceneId: nil
+            )
+        )
+
+        #expect(resolved.picks.bankId == "particles_A")
+        #expect(resolved.picks.midiInstId == "inst_P")
+        #expect(resolved.notes.isEmpty)
     }
 
     @Test("Control Surface sweep applies bounded params per mode")
@@ -350,6 +460,64 @@ struct TheTubHarnessTests {
         #expect(parsed.contractViolation)
     }
 
+    @Test("Mode 3 mapping is wet-forward and bit/downsample-led")
+    func mode3MappingBitFirstPosture() {
+        let engine = ModeEngine()
+        let defaults = ModeContract.defaultPicksByMode[3] ?? Picks()
+
+        let baseOut = ModelOut(
+            protocolVersion: 1,
+            tsMs: 5_000,
+            mode: 3,
+            params: ModeContract.safeModeParams[3] ?? [:],
+            picks: defaults,
+            flags: Flags()
+        )
+        let base = engine.makeControl(out: baseOut, sentButtons: Buttons())
+        #expect(base.mode == 3)
+        #expect(base.wetLevel > base.dryLevel)
+        #expect(base.wetLevel >= 0.40 && base.wetLevel <= 0.60)
+        #expect(base.dryLevel >= 0.20 && base.dryLevel <= 0.56)
+        #expect(base.exciteAmount >= 0.0 && base.exciteAmount <= 1.0)
+
+        let driveHeavyOut = ModelOut(
+            protocolVersion: 1,
+            tsMs: 5_010,
+            mode: 3,
+            params: [
+                "drive": 0.85,
+                "bit_depth_bits": 12.0,
+                "downsample_amt": 0.44,
+                "res_shift": 0.64,
+                "tone_db": -3.0,
+            ],
+            picks: defaults,
+            flags: Flags()
+        )
+        let driveHeavy = engine.makeControl(out: driveHeavyOut, sentButtons: Buttons())
+
+        let crushHeavyOut = ModelOut(
+            protocolVersion: 1,
+            tsMs: 5_020,
+            mode: 3,
+            params: [
+                "drive": 0.52,
+                "bit_depth_bits": 8.0,
+                "downsample_amt": 1.0,
+                "res_shift": 0.64,
+                "tone_db": -3.0,
+            ],
+            picks: defaults,
+            flags: Flags()
+        )
+        let crushHeavy = engine.makeControl(out: crushHeavyOut, sentButtons: Buttons())
+
+        let driveDelta = abs(driveHeavy.wetLevel - base.wetLevel)
+        let crushDelta = abs(crushHeavy.wetLevel - base.wetLevel)
+        #expect(crushDelta > driveDelta)
+        #expect(crushHeavy.wetLevel >= driveHeavy.wetLevel)
+    }
+
     @Test("Manifest catalog resolves picks with deterministic fallbacks")
     func manifestCatalogResolution() {
         let catalog = ManifestCatalog.shared
@@ -391,6 +559,7 @@ struct TheTubHarnessTests {
         #expect(resolvedMode9.picks.bankId != nil)
         #expect(resolvedMode9.picks.midiInstId != nil)
         #expect(resolvedMode9.picks.spatialPatternId == "orbit_mid")
+        #expect(resolvedMode9.notes.isEmpty)
     }
 
     @Test("ModeEngine target modes switch with finite controls")
@@ -492,6 +661,82 @@ struct TheTubHarnessTests {
         #expect(c6.mode == 6)
         #expect(c6.resetVoices)
         #expect(c6.dryLevel >= 0.45)
+    }
+
+    @Test("Mode 1 scene macros map and scene_id override is honored")
+    func mode1SceneMacroMappingAndSceneOverride() {
+        let engine = ModeEngine()
+        let out = ModelOut(
+            protocolVersion: 1,
+            tsMs: 2_400,
+            mode: 1,
+            params: [
+                "fracture": 0.72,
+                "mutation": 0.44,
+                "pitch_lock": 0.81,
+                "hold_len_s": 10.5,
+                "tail_fade_ms": 820.0,
+                "scene_rate_hz": 6.0,
+                "motion_speed": 0.65,
+                "spread": 0.74,
+            ],
+            picks: Picks(
+                presetId: "beat_A",
+                bankId: nil,
+                sampleId: nil,
+                midiInstId: nil,
+                spatialPatternId: "orbit_pulse",
+                sceneId: "spectral_melt",
+                gridDiv: "1/16",
+                repeatStyleId: "stutter_b"
+            ),
+            flags: Flags()
+        )
+        let control = engine.makeControl(out: out, sentButtons: Buttons(jolt: true, clear: true))
+        #expect(control.mode == 1)
+        #expect(control.mode1SceneId == "spectral_melt")
+        #expect(control.mode1Fracture > 0.70)
+        #expect(control.mode1Mutation > 0.40)
+        #expect(control.mode1PitchLock > 0.75)
+        #expect(control.mode1HoldLenSec >= 6.0 && control.mode1HoldLenSec <= 12.0)
+        #expect(control.mode1TailFadeMs >= 150.0 && control.mode1TailFadeMs <= 1_200.0)
+        #expect(control.mode1SceneRateHz >= 0.25 && control.mode1SceneRateHz <= 12.0)
+        #expect(control.mode1ClearRequest)
+        #expect(control.mode1JoltRequest)
+    }
+
+    @Test("Mode 1 legacy params deterministically map into scene macros")
+    func mode1LegacyParamsMapToSceneMacros() {
+        let engine = ModeEngine()
+        let out = ModelOut(
+            protocolVersion: 1,
+            tsMs: 2_450,
+            mode: 1,
+            params: [
+                "repeat_prob": 0.80,
+                "jitter_ms": 72.0,
+                "feedback": 0.40,
+                "stutter_len_ms": 90.0,
+            ],
+            picks: Picks(
+                presetId: "beat_A",
+                bankId: nil,
+                sampleId: nil,
+                midiInstId: nil,
+                spatialPatternId: "orbit_pulse",
+                sceneId: nil,
+                gridDiv: "1/8",
+                repeatStyleId: "stutter_a"
+            ),
+            flags: Flags()
+        )
+        let control = engine.makeControl(out: out, sentButtons: Buttons())
+        #expect(control.mode == 1)
+        #expect(control.mode1Fracture >= 0.79)
+        #expect(control.mode1Mutation > 0.50)
+        #expect(control.mode1HoldLenSec > 9.0)
+        #expect(control.mode1SceneRateHz > 1.0)
+        #expect(control.mode1SceneId == "razor_gate")
     }
 
     @Test("Grid spatializer gains are normalized")
@@ -707,6 +952,7 @@ struct TheTubHarnessTests {
 
         #expect(out.bundle.bundleId == "bundle_2026-03-24_testrev")
         #expect(out.bundle.contractVersion == ModeContract.contractVersion)
+        #expect(out.bundle.contractFingerprint == ModeContract.lockedContractFingerprint)
         #expect(FileManager.default.fileExists(atPath: out.fileURL.path))
 
         let payload = try JSONSerialization.jsonObject(with: Data(contentsOf: out.fileURL)) as? [String: Any]
@@ -714,6 +960,10 @@ struct TheTubHarnessTests {
         #expect(payload?["policy_version"] as? String != nil)
         #expect(payload?["bank_manifest_version"] as? String != nil)
         #expect(payload?["contract_version"] as? String == ModeContract.contractVersion)
+        #expect(payload?["contract_fingerprint"] as? String == ModeContract.lockedContractFingerprint)
+
+        let banner = RunBundleFactory.startupBanner(bundle: out.bundle)
+        #expect(banner.contains("lock=ok"))
     }
 
     @Test("Label change emits event and frame includes sticky label")
@@ -728,6 +978,7 @@ struct TheTubHarnessTests {
             policyVersion: "policy_hash",
             bankManifestVersion: "bank_hash",
             contractVersion: ModeContract.contractVersion,
+            contractFingerprint: ModeContract.lockedContractFingerprint,
             harnessRepoSha: "abc1234",
             modelRepoSha: "def5678"
         )
@@ -807,6 +1058,7 @@ struct TheTubHarnessTests {
             policyVersion: "policy_hash",
             bankManifestVersion: "bank_hash",
             contractVersion: ModeContract.contractVersion,
+            contractFingerprint: ModeContract.lockedContractFingerprint,
             harnessRepoSha: "abc1234",
             modelRepoSha: "def5678"
         )
@@ -885,6 +1137,7 @@ struct TheTubHarnessTests {
             policyVersion: "policy_hash",
             bankManifestVersion: "bank_hash",
             contractVersion: ModeContract.contractVersion,
+            contractFingerprint: ModeContract.lockedContractFingerprint,
             harnessRepoSha: "abc1234",
             modelRepoSha: "def5678"
         )
@@ -1112,6 +1365,111 @@ struct TheTubHarnessTests {
         #expect(clock.stepSamples(gridDiv: "1/8", sampleRate: sampleRate) == Int(sampleRate / 2))
     }
 
+    @Test("Mode 1 sample-hold planner stays grid-quantized in lock and fallback")
+    func mode1SampleHoldPlannerQuantization() {
+        let sampleRate: Float = 48_000
+
+        var lockedClock = Mode1ClockState()
+        lockedClock.configure(sampleRate: sampleRate)
+        for _ in 0..<10 {
+            lockedClock.advance(samples: 24_000)
+            lockedClock.noteOnset(intervalSamples: 24_000, sampleRate: sampleRate)
+        }
+        let lockedGrid = lockedClock.stepSamples(gridDiv: "1/8", sampleRate: sampleRate)
+        let lockedPlan = Mode1SampleHoldPlanner.plan(
+            gridSamples: lockedGrid,
+            sampleRate: sampleRate,
+            stutterNorm: 0.10,
+            gateNorm: 0.70,
+            repeatProb: 0.66,
+            feedbackNorm: 0.32,
+            repeatStyleId: "stutter_a"
+        )
+        #expect(lockedPlan.outputHoldSamples > 0 && lockedPlan.outputHoldSamples <= lockedGrid)
+        #expect(lockedPlan.feedbackHoldSamples > 0 && lockedPlan.feedbackHoldSamples <= lockedGrid)
+        let lockedOutRatio = Float(lockedPlan.outputHoldSamples) / Float(lockedGrid)
+        let lockedFbRatio = Float(lockedPlan.feedbackHoldSamples) / Float(lockedGrid)
+
+        var fallbackClock = Mode1ClockState()
+        fallbackClock.configure(sampleRate: sampleRate)
+        fallbackClock.advance(samples: Int(sampleRate * 8))
+        for _ in 0..<64 {
+            fallbackClock.confidenceDecay()
+        }
+        let fallbackGrid = fallbackClock.stepSamples(gridDiv: "1/8", sampleRate: sampleRate)
+        let fallbackPlan = Mode1SampleHoldPlanner.plan(
+            gridSamples: fallbackGrid,
+            sampleRate: sampleRate,
+            stutterNorm: 0.10,
+            gateNorm: 0.70,
+            repeatProb: 0.66,
+            feedbackNorm: 0.32,
+            repeatStyleId: "stutter_a"
+        )
+        #expect(fallbackGrid == Int(sampleRate / 2))
+        #expect(fallbackPlan.outputHoldSamples > 0 && fallbackPlan.outputHoldSamples <= fallbackGrid)
+        #expect(fallbackPlan.feedbackHoldSamples > 0 && fallbackPlan.feedbackHoldSamples <= fallbackGrid)
+        let fallbackOutRatio = Float(fallbackPlan.outputHoldSamples) / Float(fallbackGrid)
+        let fallbackFbRatio = Float(fallbackPlan.feedbackHoldSamples) / Float(fallbackGrid)
+        #expect(abs(fallbackOutRatio - lockedOutRatio) < 0.02)
+        #expect(abs(fallbackFbRatio - lockedFbRatio) < 0.02)
+        #expect(fallbackPlan.outputHoldSamples >= lockedPlan.outputHoldSamples)
+        #expect(fallbackPlan.feedbackHoldSamples >= lockedPlan.feedbackHoldSamples)
+    }
+
+    @Test("Mode 1 sample-hold stutter_b is more aggressive than stutter_a")
+    func mode1SampleHoldStyleSplitAggression() {
+        let sampleRate: Float = 48_000
+        let grid = 12_000
+        let aPlan = Mode1SampleHoldPlanner.plan(
+            gridSamples: grid,
+            sampleRate: sampleRate,
+            stutterNorm: 0.10,
+            gateNorm: 0.70,
+            repeatProb: 0.66,
+            feedbackNorm: 0.32,
+            repeatStyleId: "stutter_a"
+        )
+        let bPlan = Mode1SampleHoldPlanner.plan(
+            gridSamples: grid,
+            sampleRate: sampleRate,
+            stutterNorm: 0.10,
+            gateNorm: 0.70,
+            repeatProb: 0.66,
+            feedbackNorm: 0.32,
+            repeatStyleId: "stutter_b"
+        )
+        #expect(bPlan.outputDepth > aPlan.outputDepth)
+        #expect(bPlan.feedbackDepth > aPlan.feedbackDepth)
+        #expect(bPlan.outputHoldSamples >= aPlan.outputHoldSamples)
+        #expect(bPlan.feedbackHoldSamples >= aPlan.feedbackHoldSamples)
+    }
+
+    @Test("Mode 1 feedback parameter increases sample-hold feedback severity")
+    func mode1SampleHoldFeedbackSeverity() {
+        let sampleRate: Float = 48_000
+        let grid = 12_000
+        let low = Mode1SampleHoldPlanner.plan(
+            gridSamples: grid,
+            sampleRate: sampleRate,
+            stutterNorm: 0.10,
+            gateNorm: 0.70,
+            repeatProb: 0.66,
+            feedbackNorm: 0.10,
+            repeatStyleId: "stutter_a"
+        )
+        let high = Mode1SampleHoldPlanner.plan(
+            gridSamples: grid,
+            sampleRate: sampleRate,
+            stutterNorm: 0.10,
+            gateNorm: 0.70,
+            repeatProb: 0.66,
+            feedbackNorm: 0.90,
+            repeatStyleId: "stutter_a"
+        )
+        #expect(high.feedbackDepth > low.feedbackDepth)
+    }
+
     @Test("Mode 2 freeze scene bounds and pitch spread mapping")
     func mode2FreezeAndPitchSpreadMapping() {
         var state = Mode2GranulatorState()
@@ -1303,6 +1661,186 @@ struct TheTubHarnessTests {
             bestRel = min(bestRel, rel)
         }
         #expect(bestRel < 0.16)
+    }
+
+    @Test("Output routing profile clamps mapping and calibration bounds")
+    func outputRoutingProfileSanitize() {
+        var profile = OutputRoutingProfile.defaultProfile(for: "dev_A", hardwareChannels: 4)
+        profile.channels[0].hardwareOutput = 99
+        profile.channels[1].hardwareOutput = -7
+        profile.channels[2].gainDb = 99
+        profile.channels[3].gainDb = -99
+        profile.channels[4].delayMs = 999
+        profile.channels[5].delayMs = -20
+        profile.masterGainDb = 99
+        profile.testLevelDb = -99
+
+        profile.sanitize(for: 4)
+
+        #expect(profile.channels[0].hardwareOutput == 4)
+        #expect(profile.channels[1].hardwareOutput == 1)
+        #expect(profile.channels[2].gainDb == OutputRoutingProfile.maxGainDb)
+        #expect(profile.channels[3].gainDb == OutputRoutingProfile.minGainDb)
+        #expect(profile.channels[4].delayMs == OutputRoutingProfile.maxDelayMs)
+        #expect(profile.channels[5].delayMs == OutputRoutingProfile.minDelayMs)
+        #expect(profile.masterGainDb == OutputRoutingProfile.maxMasterGainDb)
+        #expect(profile.testLevelDb == OutputRoutingProfile.minTestLevelDb)
+    }
+
+    @Test("Output route planner falls back when 6ch lock is unavailable")
+    func outputRoutePlannerFallback() {
+        let failBind = OutputRoutePlanner.decide(preferredMode: .gallery6Locked, hardwareChannels: 6, bindSucceeded: false)
+        #expect(failBind.mode == .stereoFallback)
+        #expect(failBind.warning == "output_bind_failed")
+
+        let short = OutputRoutePlanner.decide(preferredMode: .gallery6Locked, hardwareChannels: 2, bindSucceeded: true)
+        #expect(short.mode == .stereoFallback)
+        #expect(short.warning == "output_channel_shortfall_2")
+
+        let ok = OutputRoutePlanner.decide(preferredMode: .gallery6Locked, hardwareChannels: 8, bindSucceeded: true)
+        #expect(ok.mode == .gallery6Locked)
+        #expect(ok.locked)
+        #expect(ok.warning == nil)
+    }
+
+    @Test("Output routing persistence round-trips per-device profiles")
+    func outputRoutingPersistenceRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tub-output-routing-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("output_routing.json")
+
+        var pA = OutputRoutingProfile.defaultProfile(for: "dev_A", hardwareChannels: 8)
+        pA.channels[0].hardwareOutput = 6
+        pA.channels[0].gainDb = -3
+        pA.preferredMode = .gallery6Locked
+
+        var pB = OutputRoutingProfile.defaultProfile(for: "dev_B", hardwareChannels: 2)
+        pB.preferredMode = .stereoFallback
+        pB.channels[1].solo = true
+
+        let state = OutputRoutingStore(
+            selectedOutputUID: "dev_A",
+            profilesByUID: [
+                "dev_A": pA,
+                "dev_B": pB
+            ]
+        )
+
+        OutputRoutingPersistence.saveState(state, fileURL: url)
+        let loaded = OutputRoutingPersistence.loadState(fileURL: url)
+        #expect(loaded.selectedOutputUID == "dev_A")
+        #expect(loaded.profilesByUID["dev_A"]?.channels[0].hardwareOutput == 6)
+        #expect(loaded.profilesByUID["dev_B"]?.preferredMode == .stereoFallback)
+        #expect(loaded.profilesByUID["dev_B"]?.channels[1].solo == true)
+    }
+
+    @Test("Input routing profile preserves locked primary and clamps channel count")
+    func inputRoutingProfileSanitize() {
+        var profile = InputRoutingProfile(
+            deviceUID: "dev_in",
+            activeChannels: [false, true, true, true, true],
+            channelGainDb: [36, 1, -3, -40, 12]
+        )
+        let warning = profile.sanitize(for: 3)
+
+        #expect(warning == "input_channel_shortfall_3")
+        #expect(profile.activeChannels.count == 3)
+        #expect(profile.channelGainDb.count == 3)
+        #expect(profile.activeChannels[0] == true)
+        #expect(profile.activeChannels[1] == true)
+        #expect(profile.activeChannels[2] == true)
+        #expect(profile.channelGainDb[0] == InputRoutingProfile.maxChannelGainDb)
+        #expect(profile.channelGainDb[1] == 1)
+        #expect(profile.channelGainDb[2] == -3)
+    }
+
+    @Test("Input routing persistence round-trips per-device active paths")
+    func inputRoutingPersistenceRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tub-input-routing-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("input_routing.json")
+
+        var pA = InputRoutingProfile.defaultProfile(for: "dev_A", inputChannels: 4)
+        pA.activeChannels = [true, true, false, true]
+        pA.channelGainDb = [0, 6, -3, 1.5]
+        var pB = InputRoutingProfile.defaultProfile(for: "dev_B", inputChannels: 2)
+        pB.activeChannels = [true, false]
+        pB.channelGainDb = [0, -12]
+
+        let state = InputRoutingStore(
+            selectedInputUID: "dev_A",
+            profilesByUID: [
+                "dev_A": pA,
+                "dev_B": pB
+            ]
+        )
+
+        InputRoutingPersistence.saveState(state, fileURL: url)
+        let loaded = InputRoutingPersistence.loadState(fileURL: url)
+        #expect(loaded.selectedInputUID == "dev_A")
+        #expect(loaded.profilesByUID["dev_A"]?.activeChannels == [true, true, false, true])
+        #expect(loaded.profilesByUID["dev_A"]?.channelGainDb == [0, 6, -3, 1.5])
+        #expect(loaded.profilesByUID["dev_B"]?.activeChannels == [true, false])
+        #expect(loaded.profilesByUID["dev_B"]?.channelGainDb == [0, -12])
+    }
+
+    @Test("Input channel router mixes only active channels, applies gain, and keeps primary hot")
+    func inputChannelRouterMixesActiveChannels() {
+        let channels: [[Float]] = [
+            [1.0, 1.0, 1.0],
+            [0.0, 2.0, 4.0],
+            [6.0, 6.0, 6.0]
+        ]
+
+        let mixedPrimaryOnly = InputChannelRouter.mixChannels(channels, activeMask: [false, false, false])
+        #expect(mixedPrimaryOnly == [1.0, 1.0, 1.0])
+
+        let mixedPrimaryPlusSecond = InputChannelRouter.mixChannels(channels, activeMask: [true, true, false])
+        #expect(mixedPrimaryPlusSecond[0] == 0.5)
+        #expect(mixedPrimaryPlusSecond[1] == 1.5)
+        #expect(mixedPrimaryPlusSecond[2] == 2.5)
+
+        let mixedWithGain = InputChannelRouter.mixChannels(
+            channels,
+            activeMask: [true, true, false],
+            channelGainDb: [0, 6, 0]
+        )
+        #expect(mixedWithGain[0] > mixedPrimaryPlusSecond[0])
+        #expect(mixedWithGain[1] > mixedPrimaryPlusSecond[1])
+        #expect(mixedWithGain[2] > mixedPrimaryPlusSecond[2])
+    }
+
+    @Test("Input resampler preserves equal-rate live buffers")
+    func inputResamplerEqualRate() {
+        var state = InputResampleState()
+        let samples: [Float] = [0.0, 0.5, -0.25, 1.0, -1.0]
+        let out = InputResampler.resample(
+            samples: samples,
+            sourceSampleRate: 48_000,
+            outputSampleRate: 48_000,
+            state: &state
+        )
+
+        #expect(out.count == samples.count)
+        for idx in samples.indices {
+            #expect(abs(out[idx] - samples[idx]) < 0.0001)
+        }
+    }
+
+    @Test("Input resampler expands slower input toward faster output rate")
+    func inputResamplerUpsamples() {
+        var state = InputResampleState()
+        let samples: [Float] = [0.0, 1.0, 0.0, -1.0]
+        let out = InputResampler.resample(
+            samples: samples,
+            sourceSampleRate: 24_000,
+            outputSampleRate: 48_000,
+            state: &state
+        )
+
+        #expect(out.count >= 7)
+        #expect(abs(out.first! - samples.first!) < 0.0001)
+        #expect(abs(out.last! - samples.last!) < 0.0001)
     }
 
     private func writeTinyCAF(url: URL, sampleRate: Double, channels: AVAudioChannelCount) throws {

@@ -7,6 +7,7 @@
 
 import Foundation
 import AVFoundation
+import AudioToolbox
 import simd
 import Combine
 
@@ -209,14 +210,16 @@ private final class AudioRecorder {
 
 private final class ReplayAudioInput {
     private let engine: AVAudioEngine
+    private let destinationMixer: AVAudioMixerNode
     private let player = AVAudioPlayerNode()
     private let mixer = AVAudioMixerNode()
     private let onBuffer: (AVAudioPCMBuffer, AVAudioTime?) -> Void
     private var audioFile: AVAudioFile?
     private var seekOffsetSeconds: Double = 0
 
-    init(engine: AVAudioEngine, onBuffer: @escaping (AVAudioPCMBuffer, AVAudioTime?) -> Void) {
+    init(engine: AVAudioEngine, destinationMixer: AVAudioMixerNode, onBuffer: @escaping (AVAudioPCMBuffer, AVAudioTime?) -> Void) {
         self.engine = engine
+        self.destinationMixer = destinationMixer
         self.onBuffer = onBuffer
     }
 
@@ -258,7 +261,7 @@ private final class ReplayAudioInput {
         engine.disconnectNodeInput(mixer)
         engine.disconnectNodeOutput(mixer)
         engine.connect(player, to: mixer, format: file.processingFormat)
-        engine.connect(mixer, to: engine.mainMixerNode, format: file.processingFormat)
+        engine.connect(mixer, to: destinationMixer, format: file.processingFormat)
 
         player.removeTap(onBus: 0)
         player.installTap(onBus: 0, bufferSize: 1024, format: file.processingFormat) { [weak self] buffer, time in
@@ -319,53 +322,395 @@ private final class ReplayAudioInput {
     }
 }
 
+struct OutputRouteInfo: Equatable {
+    var outputUID: String
+    var outputName: String
+    var hardwareChannels: Int
+    var activeMode: OutputRouteMode
+    var routeLocked: Bool
+    var warning: String?
+    var mappingSummary: String
+}
+
+struct OutputRenderDiagnostics: Equatable {
+    var callbackActive: Bool = false
+    var frameCount: Int = 0
+    var bufferCount: Int = 0
+    var slotCount: Int = 0
+    var configuredHardwareChannels: Int = 0
+    var preRoutePeak: Float = 0
+    var postRoutePeak: Float = 0
+}
+
+private struct OutputRenderDiagnosticsSnapshot {
+    var callbackCounter: UInt64 = 0
+    var frameCount: Int = 0
+    var bufferCount: Int = 0
+    var slotCount: Int = 0
+    var configuredHardwareChannels: Int = 0
+    var preRoutePeak: Float = 0
+    var postRoutePeak: Float = 0
+}
+
+private final class CoreAudioLiveOutputDriver {
+    typealias RenderBlock = (AVAudioFrameCount, UnsafeMutablePointer<AudioBufferList>) -> Void
+
+    private var audioUnit: AudioUnit?
+    private var renderBlock: RenderBlock?
+
+    deinit {
+        stop()
+    }
+
+    func start(
+        outputUID: String,
+        sampleRate: Double,
+        channels: Int,
+        renderBlock: @escaping RenderBlock
+    ) throws {
+        stop()
+
+        var description = AudioComponentDescription(
+            componentType: kAudioUnitType_Output,
+            componentSubType: kAudioUnitSubType_HALOutput,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+        guard let component = AudioComponentFindNext(nil, &description) else {
+            throw NSError(domain: "AudioOutputDriver", code: 1, userInfo: [NSLocalizedDescriptionKey: "HAL output component unavailable"])
+        }
+
+        var maybeUnit: AudioUnit?
+        var status = AudioComponentInstanceNew(component, &maybeUnit)
+        guard status == noErr, let unit = maybeUnit else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to create HAL output unit (OSStatus \(status))"])
+        }
+
+        self.audioUnit = unit
+        self.renderBlock = renderBlock
+
+        var enableOutput: UInt32 = 1
+        status = AudioUnitSetProperty(
+            unit,
+            kAudioOutputUnitProperty_EnableIO,
+            kAudioUnitScope_Output,
+            0,
+            &enableOutput,
+            UInt32(MemoryLayout<UInt32>.size)
+        )
+        guard status == noErr else {
+            stop()
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to enable HAL output (OSStatus \(status))"])
+        }
+
+        if !outputUID.isEmpty {
+            guard let deviceID = CoreAudioOutputCatalog.deviceID(forUID: outputUID) else {
+                stop()
+                throw NSError(domain: "AudioOutputDriver", code: 2, userInfo: [NSLocalizedDescriptionKey: "Output device not found"])
+            }
+            var selected = deviceID
+            status = AudioUnitSetProperty(
+                unit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &selected,
+                UInt32(MemoryLayout<AudioDeviceID>.size)
+            )
+            guard status == noErr else {
+                stop()
+                throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to bind HAL output device (OSStatus \(status))"])
+            }
+        }
+
+        var streamFormat = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian,
+            mBytesPerPacket: 4 * UInt32(max(1, channels)),
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4 * UInt32(max(1, channels)),
+            mChannelsPerFrame: UInt32(max(1, channels)),
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+        status = AudioUnitSetProperty(
+            unit,
+            kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Input,
+            0,
+            &streamFormat,
+            UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        )
+        guard status == noErr else {
+            stop()
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to set HAL stream format (OSStatus \(status))"])
+        }
+
+        var callback = AURenderCallbackStruct(
+            inputProc: coreAudioLiveOutputRenderCallback,
+            inputProcRefCon: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        )
+        status = AudioUnitSetProperty(
+            unit,
+            kAudioUnitProperty_SetRenderCallback,
+            kAudioUnitScope_Input,
+            0,
+            &callback,
+            UInt32(MemoryLayout<AURenderCallbackStruct>.size)
+        )
+        guard status == noErr else {
+            stop()
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to install HAL render callback (OSStatus \(status))"])
+        }
+
+        status = AudioUnitInitialize(unit)
+        guard status == noErr else {
+            stop()
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to initialize HAL output unit (OSStatus \(status))"])
+        }
+
+        status = AudioOutputUnitStart(unit)
+        guard status == noErr else {
+            stop()
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to start HAL output unit (OSStatus \(status))"])
+        }
+    }
+
+    func stop() {
+        guard let unit = audioUnit else { return }
+        AudioOutputUnitStop(unit)
+        AudioUnitUninitialize(unit)
+        AudioComponentInstanceDispose(unit)
+        audioUnit = nil
+        renderBlock = nil
+    }
+
+    fileprivate func render(frameCount: UInt32, ioData: UnsafeMutablePointer<AudioBufferList>?) -> OSStatus {
+        guard let ioData else { return noErr }
+        renderBlock?(frameCount, ioData)
+        return noErr
+    }
+}
+
+private let coreAudioLiveOutputRenderCallback: AURenderCallback = { refCon, actionFlags, timeStamp, busNumber, frameCount, ioData in
+    let driver = Unmanaged<CoreAudioLiveOutputDriver>.fromOpaque(refCon).takeUnretainedValue()
+    return driver.render(frameCount: frameCount, ioData: ioData)
+}
+
 final class AudioEngineController: ObservableObject {
     private let engine = AVAudioEngine()
+    private let outputMixer = AVAudioMixerNode()
+    private let liveOutputDriver = CoreAudioLiveOutputDriver()
     private var sourceNode: AVAudioSourceNode?
     private let renderState = MasterRenderState()
     private var preferredInputUID: String?
+    private var preferredOutputUID: String?
+    private var outputProfilesByUID: [String: OutputRoutingProfile] = [:]
+    private var inputProfilesByUID: [String: InputRoutingProfile] = [:]
+    private var activeOutputRoute = OutputRouteInfo(
+        outputUID: "",
+        outputName: "System Default",
+        hardwareChannels: 2,
+        activeMode: .stereoFallback,
+        routeLocked: false,
+        warning: "output_uninitialized",
+        mappingSummary: "1->1,2->2,3->1,4->2,5->1,6->2"
+    )
+    private var activeInputRoute = InputRouteInfo(
+        inputUID: "",
+        inputName: "System Default",
+        inputChannels: 0,
+        activeCount: 0,
+        activeSummary: "none",
+        warning: "input_route_uninitialized"
+    )
     private var recorder: AudioRecorder?
     private var replayInput: ReplayAudioInput?
     private var inputSource: FrameInputSource = .live
+    private var replayRestoreLiveInputOnStop: Bool = false
+    private let liveInputInfoLock = NSLock()
+    private var liveInputSampleRate: Double = 48_000
+    private var liveInputChannels: Int = 1
+    private var usesEngineLiveInputTap: Bool = false
 
     @Published var isAudioRunning: Bool = false
     @Published var audioError: String?
+    @Published private(set) var outputDevices: [AudioOutputDevice] = []
+    @Published private(set) var selectedOutputUID: String = ""
+    @Published private(set) var activeOutputName: String = "System Default"
+    @Published private(set) var activeOutputChannels: Int = 2
+    @Published private(set) var outputRouteMode: OutputRouteMode = .stereoFallback
+    @Published private(set) var outputRouteWarning: String?
+    @Published private(set) var outputRouteLocked: Bool = false
+    @Published private(set) var isOutputTestRunning: Bool = false
+    @Published private(set) var outputHardwareLevels: [Float] = Array(repeating: 0, count: OutputRoutingProfile.virtualChannelCount)
+    @Published private(set) var outputProfile: OutputRoutingProfile = OutputRoutingProfile.defaultProfile(for: "default", hardwareChannels: 2)
+    @Published private(set) var outputRenderDiagnostics: OutputRenderDiagnostics = OutputRenderDiagnostics()
+    @Published private(set) var inputRouteWarning: String?
+    @Published private(set) var inputRouteProfile: InputRoutingProfile = InputRoutingProfile.defaultProfile(for: "default", inputChannels: 1)
+
+    private var outputMeterPollTimer: DispatchSourceTimer?
+    private var lastObservedOutputRenderCallbackCount: UInt64 = 0
 
     var onInputRecordingAlignment: ((InputAudioAlignment) -> Void)?
+    var onLiveInputBufferCaptured: ((AVAudioPCMBuffer, AVAudioTime?) -> Void)?
 
-    func start() {
+    init() {
+        let store = OutputRoutingPersistence.loadState()
+        preferredOutputUID = store.selectedOutputUID
+        outputProfilesByUID = store.profilesByUID
+
+        let inputStore = InputRoutingPersistence.loadState()
+        preferredInputUID = inputStore.selectedInputUID
+        inputProfilesByUID = inputStore.profilesByUID
+        engine.attach(outputMixer)
+        refreshOutputDevices()
+        refreshInputRouteState()
+        startOutputMeterPolling()
+    }
+
+    deinit {
+        outputMeterPollTimer?.cancel()
+        liveOutputDriver.stop()
+    }
+
+    func start(useEngineLiveInputTap: Bool = false) {
+        start(useLiveInputSource: true, useEngineLiveInputTap: useEngineLiveInputTap)
+    }
+
+    func startReplayEngineIfNeeded() {
+        if isAudioRunning {
+            inputSource = .replayFile
+            return
+        }
+        start(useLiveInputSource: false, useEngineLiveInputTap: false)
+    }
+
+    private func start(useLiveInputSource: Bool, useEngineLiveInputTap: Bool) {
         if isAudioRunning { return }
 
-        let outFormat = engine.outputNode.outputFormat(forBus: 0)
-        let sampleRate = max(8_000.0, outFormat.sampleRate)
-        let outputChannels = Int(max(1, outFormat.channelCount))
-        let renderFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: outFormat.channelCount == 0 ? 2 : outFormat.channelCount)!
-        renderState.configure(sampleRate: Float(sampleRate), outputChannels: outputChannels)
-
-        if let sourceNode {
-            engine.disconnectNodeInput(sourceNode)
-            engine.disconnectNodeOutput(sourceNode)
-            engine.detach(sourceNode)
-            self.sourceNode = nil
+        let targetUID = preferredOutputUID ?? CoreAudioOutputCatalog.defaultOutputUID() ?? ""
+        var bindSucceeded = true
+        if !useLiveInputSource && !targetUID.isEmpty {
+            do {
+                try CoreAudioOutputCatalog.setCurrentOutputDevice(on: engine.outputNode, uid: targetUID)
+            } catch {
+                bindSucceeded = false
+                audioError = "output select failed: \(error.localizedDescription)"
+            }
         }
 
-        let src = AVAudioSourceNode(format: renderFormat) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            self?.renderState.render(frameCount: frameCount, audioBufferList: audioBufferList)
-            return noErr
-        }
-        self.sourceNode = src
-        engine.attach(src)
-        engine.connect(src, to: engine.mainMixerNode, format: renderFormat)
-
-        configureLiveInputTap()
-
-        do {
-            try engine.start()
-            isAudioRunning = true
-            audioError = nil
-        } catch {
+        let activeUID = !targetUID.isEmpty ? targetUID : (CoreAudioOutputCatalog.defaultOutputUID() ?? "")
+        let activeName = CoreAudioOutputCatalog.deviceName(forUID: activeUID) ?? CoreAudioOutputCatalog.defaultOutputName() ?? "System Default"
+        let catalogChannels = max(1, CoreAudioOutputCatalog.outputChannels(forUID: activeUID) ?? CoreAudioOutputCatalog.defaultOutputChannelCount())
+        let sampleRate = CoreAudioOutputCatalog.nominalSampleRate(forUID: activeUID) ?? 48_000.0
+        let outputChannels = max(1, catalogChannels)
+        guard let renderFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: AVAudioChannelCount(outputChannels),
+            interleaved: false
+        ) else {
             isAudioRunning = false
-            audioError = "engine start error: \(error)"
+            audioError = "engine start error: could not create render format for output \(activeName) (\(outputChannels)ch @ \(Int(sampleRate)) Hz)"
+            return
+        }
+
+        var profile = profileForOutputUID(activeUID, hardwareChannels: outputChannels)
+        profile.sanitize(for: outputChannels)
+        outputProfilesByUID[activeUID] = profile
+        let routeDecision = OutputRoutePlanner.decide(
+            preferredMode: profile.preferredMode,
+            hardwareChannels: outputChannels,
+            bindSucceeded: bindSucceeded
+        )
+
+        renderState.configure(sampleRate: Float(sampleRate), outputChannels: outputChannels)
+        renderState.setOutputRouting(
+            profile: profile,
+            hardwareChannels: outputChannels,
+            activeMode: routeDecision.mode,
+            outputUID: activeUID,
+            outputName: activeName,
+            warning: routeDecision.warning
+        )
+        let routeInfo = OutputRouteInfo(
+            outputUID: activeUID,
+            outputName: activeName,
+            hardwareChannels: outputChannels,
+            activeMode: routeDecision.mode,
+            routeLocked: routeDecision.locked,
+            warning: routeDecision.warning,
+            mappingSummary: profile.mappingSummary()
+        )
+        activeOutputRoute = routeInfo
+
+        inputSource = useLiveInputSource ? .live : .replayFile
+        if useLiveInputSource {
+            usesEngineLiveInputTap = false
+            do {
+                try liveOutputDriver.start(
+                    outputUID: activeUID,
+                    sampleRate: sampleRate,
+                    channels: outputChannels
+                ) { [weak self] frameCount, audioBufferList in
+                    self?.renderState.render(frameCount: frameCount, audioBufferList: audioBufferList)
+                }
+                isAudioRunning = true
+                audioError = nil
+            } catch {
+                isAudioRunning = false
+                audioError = "output driver start error: \(error.localizedDescription)"
+            }
+        } else {
+            if let sourceNode {
+                engine.disconnectNodeInput(sourceNode)
+                engine.disconnectNodeOutput(sourceNode)
+                engine.detach(sourceNode)
+                self.sourceNode = nil
+            }
+
+            let src = AVAudioSourceNode(format: renderFormat) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
+                self?.renderState.render(frameCount: frameCount, audioBufferList: audioBufferList)
+                return noErr
+            }
+            self.sourceNode = src
+            engine.attach(src)
+            engine.disconnectNodeInput(outputMixer)
+            engine.disconnectNodeOutput(outputMixer)
+            engine.connect(src, to: outputMixer, format: renderFormat)
+            engine.connect(outputMixer, to: engine.outputNode, format: renderFormat)
+            outputMixer.outputVolume = 1.0
+
+            self.usesEngineLiveInputTap = useEngineLiveInputTap
+            if useEngineLiveInputTap {
+                configureLiveInputTap()
+            }
+
+            do {
+                engine.prepare()
+                try engine.start()
+                isAudioRunning = true
+                audioError = nil
+            } catch {
+                isAudioRunning = false
+                audioError = "engine start error: \(error)"
+            }
+        }
+
+        preferredOutputUID = activeUID.isEmpty ? preferredOutputUID : activeUID
+        persistOutputRoutingStore()
+        DispatchQueue.main.async {
+            self.selectedOutputUID = activeUID
+            self.activeOutputName = activeName
+            self.activeOutputChannels = outputChannels
+            self.outputRouteMode = routeDecision.mode
+            self.outputRouteLocked = routeDecision.locked
+            self.outputRouteWarning = routeDecision.warning
+            self.outputProfile = profile
+            self.outputDevices = CoreAudioOutputCatalog.listOutputDevices()
         }
     }
 
@@ -373,19 +718,317 @@ final class AudioEngineController: ObservableObject {
         if !isAudioRunning { return }
         _ = stopInputRecording()
         stopReplayInput(restoreLiveInput: false)
-        engine.inputNode.removeTap(onBus: 0)
+        stopOutputTest()
+        liveOutputDriver.stop()
+        if usesEngineLiveInputTap {
+            engine.inputNode.removeTap(onBus: 0)
+        }
         engine.stop()
         isAudioRunning = false
         inputSource = .live
+        usesEngineLiveInputTap = false
     }
 
     func selectInputDevice(uid: String) {
         guard !uid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         preferredInputUID = uid
         renderState.noteInputRoute(uid: uid)
+        applyInputRouteForUID(uid, overrideChannelCount: nil)
+        persistInputRoutingStore()
+    }
+
+    func refreshInputRouting() {
+        refreshInputRouteState()
+    }
+
+    func setInputChannelActive(channelIndex index: Int, active: Bool) {
+        let uid = preferredInputUID ?? CoreAudioInputCatalog.defaultInputUID() ?? ""
+        guard !uid.isEmpty else { return }
+        let channels = max(0, CoreAudioInputCatalog.inputChannels(forUID: uid) ?? activeInputRoute.inputChannels)
+        guard index >= 0, index < channels else { return }
+
+        var profile = profileForInputUID(uid, inputChannels: channels)
+        if index == InputRoutingProfile.primaryChannelIndex {
+            profile.activeChannels[index] = true
+        } else {
+            profile.activeChannels[index] = active
+        }
+        let warning = profile.sanitize(for: channels)
+        inputProfilesByUID[uid] = profile
+        applyInputRoutingToRender(profile: profile, uid: uid, name: CoreAudioInputCatalog.deviceName(forUID: uid) ?? CoreAudioInputCatalog.defaultInputName() ?? "System Default", channelCount: channels, warning: warning)
+        persistInputRoutingStore()
+    }
+
+    func updateInputChannelGain(channelIndex index: Int, gainDb: Double) {
+        let uid = preferredInputUID ?? CoreAudioInputCatalog.defaultInputUID() ?? ""
+        guard !uid.isEmpty else { return }
+        let channels = max(0, CoreAudioInputCatalog.inputChannels(forUID: uid) ?? activeInputRoute.inputChannels)
+        guard index >= 0, index < channels else { return }
+
+        var profile = profileForInputUID(uid, inputChannels: channels)
+        if index >= profile.channelGainDb.count {
+            profile.channelGainDb.append(contentsOf: Array(repeating: 0, count: index - profile.channelGainDb.count + 1))
+        }
+        profile.channelGainDb[index] = gainDb
+        let warning = profile.sanitize(for: channels)
+        inputProfilesByUID[uid] = profile
+        applyInputRoutingToRender(
+            profile: profile,
+            uid: uid,
+            name: CoreAudioInputCatalog.deviceName(forUID: uid) ?? CoreAudioInputCatalog.defaultInputName() ?? "System Default",
+            channelCount: channels,
+            warning: warning
+        )
+        persistInputRoutingStore()
+    }
+
+    func resetInputRouteProfileToDefault() {
+        let uid = preferredInputUID ?? CoreAudioInputCatalog.defaultInputUID() ?? ""
+        guard !uid.isEmpty else { return }
+        let channels = max(0, CoreAudioInputCatalog.inputChannels(forUID: uid) ?? activeInputRoute.inputChannels)
+        var profile = InputRoutingProfile.defaultProfile(for: uid, inputChannels: channels)
+        let warning = profile.sanitize(for: channels)
+        inputProfilesByUID[uid] = profile
+        applyInputRoutingToRender(profile: profile, uid: uid, name: CoreAudioInputCatalog.deviceName(forUID: uid) ?? CoreAudioInputCatalog.defaultInputName() ?? "System Default", channelCount: channels, warning: warning)
+        persistInputRoutingStore()
+    }
+
+    func currentInputRouteInfo() -> InputRouteInfo {
+        activeInputRoute
+    }
+
+    func refreshOutputDevices() {
+        let devices = CoreAudioOutputCatalog.listOutputDevices()
+        let selected = preferredOutputUID ?? CoreAudioOutputCatalog.defaultOutputUID() ?? devices.first?.uid ?? ""
+        if let existing = devices.first(where: { $0.uid == selected }) {
+            preferredOutputUID = existing.uid
+        } else if let first = devices.first {
+            preferredOutputUID = first.uid
+        } else {
+            preferredOutputUID = nil
+        }
+
+        let uiSelected = preferredOutputUID ?? selected
+        let uiName = devices.first(where: { $0.uid == uiSelected })?.name ?? CoreAudioOutputCatalog.defaultOutputName() ?? "System Default"
+        let uiChannels = devices.first(where: { $0.uid == uiSelected })?.outputChannels ?? CoreAudioOutputCatalog.defaultOutputChannelCount()
+
+        DispatchQueue.main.async {
+            self.outputDevices = devices
+            self.selectedOutputUID = uiSelected
+            self.activeOutputName = uiName
+            self.activeOutputChannels = max(1, uiChannels)
+            self.outputProfile = self.profileForOutputUID(uiSelected, hardwareChannels: max(1, uiChannels))
+        }
+        persistOutputRoutingStore()
+    }
+
+    func selectOutputDevice(uid: String) {
+        guard !uid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        preferredOutputUID = uid
+        refreshOutputDevices()
         if isAudioRunning {
+            let useLiveInputTap = inputSource == .live
+            let restartWithEngineTap = usesEngineLiveInputTap
             stop()
-            start()
+            start(useLiveInputSource: useLiveInputTap, useEngineLiveInputTap: restartWithEngineTap && useLiveInputTap)
+        }
+    }
+
+    func setOutputRouteMode(_ mode: OutputRouteMode) {
+        let uid = preferredOutputUID ?? selectedOutputUID
+        guard !uid.isEmpty else { return }
+        var profile = profileForOutputUID(uid, hardwareChannels: max(1, activeOutputChannels))
+        profile.preferredMode = mode
+        profile.sanitize(for: max(1, activeOutputChannels))
+        outputProfilesByUID[uid] = profile
+        outputProfile = profile
+        persistOutputRoutingStore()
+        applyOutputRoutingProfileToRender()
+    }
+
+    func resetOutputProfileToDefault() {
+        let uid = preferredOutputUID ?? selectedOutputUID
+        guard !uid.isEmpty else { return }
+        let hw = max(1, activeOutputChannels)
+        let profile = OutputRoutingProfile.defaultProfile(for: uid, hardwareChannels: hw)
+        outputProfilesByUID[uid] = profile
+        outputProfile = profile
+        persistOutputRoutingStore()
+        applyOutputRoutingProfileToRender()
+    }
+
+    func updateOutputProfile(_ mutate: (inout OutputRoutingProfile) -> Void) {
+        let uid = preferredOutputUID ?? selectedOutputUID
+        guard !uid.isEmpty else { return }
+        var profile = profileForOutputUID(uid, hardwareChannels: max(1, activeOutputChannels))
+        mutate(&profile)
+        profile.sanitize(for: max(1, activeOutputChannels))
+        outputProfilesByUID[uid] = profile
+        outputProfile = profile
+        persistOutputRoutingStore()
+        applyOutputRoutingProfileToRender()
+    }
+
+    func startOutputPinkNoiseTest(channel: Int?, scanAll: Bool) {
+        let target = max(0, min(5, channel ?? 0))
+        renderState.setOutputTest(
+            active: true,
+            channelIndex: target,
+            scanAll: scanAll,
+            levelDb: outputProfile.testLevelDb
+        )
+        DispatchQueue.main.async {
+            self.isOutputTestRunning = true
+        }
+    }
+
+    func stopOutputTest() {
+        renderState.setOutputTest(active: false, channelIndex: 0, scanAll: false, levelDb: outputProfile.testLevelDb)
+        DispatchQueue.main.async {
+            self.isOutputTestRunning = false
+        }
+    }
+
+    func currentOutputRouteInfo() -> OutputRouteInfo {
+        activeOutputRoute
+    }
+
+    private func refreshInputRouteState() {
+        let uid = preferredInputUID ?? CoreAudioInputCatalog.defaultInputUID() ?? ""
+        applyInputRouteForUID(uid, overrideChannelCount: nil)
+        persistInputRoutingStore()
+    }
+
+    private func applyInputRouteForUID(_ uid: String, overrideChannelCount: Int?) {
+        let normalizedUID = uid.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedUID = normalizedUID.isEmpty ? (CoreAudioInputCatalog.defaultInputUID() ?? "") : normalizedUID
+        let channelCount = max(0, overrideChannelCount ?? CoreAudioInputCatalog.inputChannels(forUID: resolvedUID) ?? 0)
+        let inputName = CoreAudioInputCatalog.deviceName(forUID: resolvedUID) ?? CoreAudioInputCatalog.defaultInputName() ?? "System Default"
+        var profile = profileForInputUID(resolvedUID, inputChannels: channelCount)
+        let warning = profile.sanitize(for: channelCount)
+        inputProfilesByUID[profile.deviceUID] = profile
+        applyInputRoutingToRender(profile: profile, uid: resolvedUID, name: inputName, channelCount: channelCount, warning: warning)
+    }
+
+    private func profileForInputUID(_ uid: String, inputChannels: Int) -> InputRoutingProfile {
+        let normalizedUID = uid.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = normalizedUID.isEmpty ? "default" : normalizedUID
+        var profile = inputProfilesByUID[key] ?? InputRoutingProfile.defaultProfile(for: key, inputChannels: inputChannels)
+        profile.deviceUID = key
+        _ = profile.sanitize(for: inputChannels)
+        inputProfilesByUID[key] = profile
+        return profile
+    }
+
+    private func applyInputRoutingToRender(profile: InputRoutingProfile, uid: String, name: String, channelCount: Int, warning: String?) {
+        renderState.setInputRouting(
+            profile: profile,
+            inputUID: uid,
+            inputName: name,
+            channelCount: channelCount,
+            warning: warning
+        )
+        let info = InputRouteInfo(
+            inputUID: uid,
+            inputName: name,
+            inputChannels: channelCount,
+            activeCount: profile.activeCount,
+            activeSummary: profile.activeSummary(),
+            warning: warning
+        )
+        activeInputRoute = info
+        DispatchQueue.main.async {
+            self.inputRouteProfile = profile
+            self.inputRouteWarning = warning
+        }
+    }
+
+    private func persistInputRoutingStore() {
+        let selected = preferredInputUID ?? activeInputRoute.inputUID
+        InputRoutingPersistence.saveState(
+            InputRoutingStore(
+                selectedInputUID: selected.isEmpty ? nil : selected,
+                profilesByUID: inputProfilesByUID
+            )
+        )
+    }
+
+    private func profileForOutputUID(_ uid: String, hardwareChannels: Int) -> OutputRoutingProfile {
+        let normalizedUID = uid.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = normalizedUID.isEmpty ? "default" : normalizedUID
+        var profile = outputProfilesByUID[key] ?? OutputRoutingProfile.defaultProfile(for: key, hardwareChannels: hardwareChannels)
+        profile.deviceUID = key
+        profile.sanitize(for: hardwareChannels)
+        outputProfilesByUID[key] = profile
+        return profile
+    }
+
+    private func persistOutputRoutingStore() {
+        let selected = preferredOutputUID ?? selectedOutputUID
+        OutputRoutingPersistence.saveState(
+            OutputRoutingStore(
+                selectedOutputUID: selected.isEmpty ? nil : selected,
+                profilesByUID: outputProfilesByUID
+            )
+        )
+    }
+
+    private func startOutputMeterPolling() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + .milliseconds(120), repeating: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.outputHardwareLevels = self.renderState.consumeOutputHardwareMeterLevels()
+            let snapshot = self.renderState.consumeOutputRenderDiagnostics()
+            let diagnostics = OutputRenderDiagnostics(
+                callbackActive: snapshot.callbackCounter != self.lastObservedOutputRenderCallbackCount,
+                frameCount: snapshot.frameCount,
+                bufferCount: snapshot.bufferCount,
+                slotCount: snapshot.slotCount,
+                configuredHardwareChannels: snapshot.configuredHardwareChannels,
+                preRoutePeak: snapshot.preRoutePeak,
+                postRoutePeak: snapshot.postRoutePeak
+            )
+            self.lastObservedOutputRenderCallbackCount = snapshot.callbackCounter
+            self.outputRenderDiagnostics = diagnostics
+        }
+        outputMeterPollTimer = timer
+        timer.resume()
+    }
+
+    private func applyOutputRoutingProfileToRender() {
+        let uid = preferredOutputUID ?? selectedOutputUID
+        guard !uid.isEmpty else { return }
+        let channels = max(1, activeOutputChannels)
+        let profile = profileForOutputUID(uid, hardwareChannels: channels)
+        let decision = OutputRoutePlanner.decide(
+            preferredMode: profile.preferredMode,
+            hardwareChannels: channels,
+            bindSucceeded: true
+        )
+        renderState.setOutputRouting(
+            profile: profile,
+            hardwareChannels: channels,
+            activeMode: decision.mode,
+            outputUID: uid,
+            outputName: activeOutputName,
+            warning: decision.warning
+        )
+        let routeInfo = OutputRouteInfo(
+            outputUID: uid,
+            outputName: activeOutputName,
+            hardwareChannels: channels,
+            activeMode: decision.mode,
+            routeLocked: decision.locked,
+            warning: decision.warning,
+            mappingSummary: profile.mappingSummary()
+        )
+        activeOutputRoute = routeInfo
+        DispatchQueue.main.async {
+            self.outputProfile = profile
+            self.outputRouteMode = decision.mode
+            self.outputRouteLocked = decision.locked
+            self.outputRouteWarning = decision.warning
         }
     }
 
@@ -423,6 +1066,23 @@ final class AudioEngineController: ObservableObject {
 
     func snapshotSafetyInterventions() -> [String] {
         var interventions = renderState.snapshotInterventions()
+        interventions.append("input_uid:\(activeInputRoute.inputUID.isEmpty ? "default" : activeInputRoute.inputUID)")
+        interventions.append("input_name:\(activeInputRoute.inputName)")
+        interventions.append("input_channels:\(activeInputRoute.inputChannels)")
+        interventions.append("input_active:\(activeInputRoute.activeSummary)")
+        if let warning = activeInputRoute.warning, !warning.isEmpty {
+            interventions.append(warning)
+        }
+        interventions.append("output_uid:\(activeOutputRoute.outputUID.isEmpty ? "default" : activeOutputRoute.outputUID)")
+        interventions.append("output_name:\(activeOutputRoute.outputName)")
+        interventions.append("output_channels:\(activeOutputRoute.hardwareChannels)")
+        interventions.append("output_mode:\(activeOutputRoute.activeMode.rawValue)")
+        if activeOutputRoute.routeLocked {
+            interventions.append("output_route_locked")
+        }
+        if let warning = activeOutputRoute.warning, !warning.isEmpty {
+            interventions.append(warning)
+        }
         if recorder?.consumeDropFlag() == true {
             interventions.append("audio_record_drop")
         }
@@ -437,8 +1097,28 @@ final class AudioEngineController: ObservableObject {
         if inputSource == .replayFile, let replayInput {
             return (sampleRate: replayInput.sampleRate, channels: replayInput.channels, format: "caf")
         }
-        let format = engine.inputNode.outputFormat(forBus: 0)
-        return (sampleRate: format.sampleRate, channels: Int(format.channelCount), format: "caf")
+        liveInputInfoLock.lock()
+        let sampleRate = max(8_000, liveInputSampleRate)
+        let channels = max(1, liveInputChannels > 0 ? liveInputChannels : activeInputRoute.inputChannels)
+        liveInputInfoLock.unlock()
+        return (sampleRate: sampleRate, channels: channels, format: "caf")
+    }
+
+    func updateLiveInputCaptureInfo(sampleRate: Double, channels: Int) {
+        liveInputInfoLock.lock()
+        liveInputSampleRate = max(8_000, sampleRate)
+        liveInputChannels = max(1, channels)
+        liveInputInfoLock.unlock()
+    }
+
+    func ingestLiveInputBuffer(_ buffer: AVAudioPCMBuffer, time: AVAudioTime?) {
+        guard inputSource == .live else { return }
+        updateLiveInputCaptureInfo(
+            sampleRate: buffer.format.sampleRate,
+            channels: Int(buffer.format.channelCount)
+        )
+        renderState.ingestInput(buffer: buffer)
+        recorder?.append(buffer: buffer, time: time)
     }
 
     func startInputRecording(to url: URL, fileFormat: String = "caf") throws -> (sampleRate: Double, channels: Int, format: String) {
@@ -450,7 +1130,16 @@ final class AudioEngineController: ObservableObject {
         }
         _ = stopInputRecording()
 
-        let format = engine.inputNode.outputFormat(forBus: 0)
+        let capture = currentInputCaptureInfo()
+        guard capture.sampleRate > 0, capture.channels > 0 else {
+            throw NSError(domain: "AudioEngineController", code: 23, userInfo: [NSLocalizedDescriptionKey: "live input format unavailable"])
+        }
+        guard let format = AVAudioFormat(
+            standardFormatWithSampleRate: capture.sampleRate,
+            channels: AVAudioChannelCount(capture.channels)
+        ) else {
+            throw NSError(domain: "AudioEngineController", code: 24, userInfo: [NSLocalizedDescriptionKey: "invalid live input format"])
+        }
         let recorder = AudioRecorder(outputURL: url, streamFormat: format, fileFormat: fileFormat)
         recorder.onAlignment = { [weak self] alignment in
             self?.onInputRecordingAlignment?(alignment)
@@ -467,16 +1156,17 @@ final class AudioEngineController: ObservableObject {
     }
 
     func startReplayInput(from audioURL: URL) throws {
+        let hadLiveInput = isAudioRunning && inputSource == .live
         if !isAudioRunning {
-            start()
+            startReplayEngineIfNeeded()
         }
         _ = stopInputRecording()
+        replayRestoreLiveInputOnStop = hadLiveInput
 
         inputSource = .replayFile
-        engine.inputNode.removeTap(onBus: 0)
 
         if replayInput == nil {
-            replayInput = ReplayAudioInput(engine: engine) { [weak self] buffer, _ in
+            replayInput = ReplayAudioInput(engine: engine, destinationMixer: outputMixer) { [weak self] buffer, _ in
                 self?.renderState.ingestInput(buffer: buffer)
             }
         }
@@ -484,22 +1174,24 @@ final class AudioEngineController: ObservableObject {
     }
 
     func enableSilentReplayInputFallback() {
+        let hadLiveInput = isAudioRunning && inputSource == .live
         if !isAudioRunning {
-            start()
+            startReplayEngineIfNeeded()
         }
         _ = stopInputRecording()
         replayInput?.stop()
-        engine.inputNode.removeTap(onBus: 0)
         inputSource = .replayFile
+        replayRestoreLiveInputOnStop = hadLiveInput
     }
 
     func stopReplayInput(restoreLiveInput: Bool = true) {
         replayInput?.stop()
-        if restoreLiveInput {
+        let shouldRestore = restoreLiveInput && replayRestoreLiveInputOnStop
+        replayRestoreLiveInputOnStop = false
+        if shouldRestore {
             inputSource = .live
-            if isAudioRunning {
-                configureLiveInputTap()
-            }
+        } else {
+            inputSource = .replayFile
         }
     }
 
@@ -525,24 +1217,22 @@ final class AudioEngineController: ObservableObject {
     private func configureLiveInputTap() {
         inputSource = .live
         let input = engine.inputNode
-        if let preferredInputUID, !preferredInputUID.isEmpty {
+        let routeUID = preferredInputUID ?? CoreAudioInputCatalog.defaultInputUID() ?? ""
+        if !routeUID.isEmpty {
             do {
-                try CoreAudioInputCatalog.setCurrentInputDevice(on: input, uid: preferredInputUID)
+                try CoreAudioInputCatalog.setCurrentInputDevice(on: input, uid: routeUID)
             } catch {
                 audioError = "input select failed: \(error.localizedDescription)"
             }
         }
 
         let format = input.outputFormat(forBus: 0)
-        guard format.channelCount > 0 else {
-            audioError = "no input channels available"
-            return
-        }
-
         input.removeTap(onBus: 0)
+        guard format.channelCount > 0 else { return }
+        updateLiveInputCaptureInfo(sampleRate: format.sampleRate, channels: Int(format.channelCount))
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, time in
-            self?.renderState.ingestInput(buffer: buffer)
-            self?.recorder?.append(buffer: buffer, time: time)
+            self?.ingestLiveInputBuffer(buffer, time: time)
+            self?.onLiveInputBufferCaptured?(buffer, time)
         }
     }
 }
@@ -799,7 +1489,9 @@ struct Mode1ClockState {
 
 private struct Mode1RepeatScheduler {
     var pendingTrigger: Bool = false
+    var pendingTriggerStrength: Float = 0.52
     var active: Bool = false
+    var transportActive: Bool = false
     var repeatStart: Int = 0
     var repeatLength: Int = 0
     var repeatPos: Int = 0
@@ -816,6 +1508,194 @@ private struct Mode1RepeatScheduler {
     var barStepCounter: Int = 0
     var repeatGain: Float = 0
     var sliceJumpIndex: Int = 0
+    var lastTriggerSource: String = "none"
+    var hasValidCapture: Bool = false
+    var lastValidRepeatStart: Int = 0
+    var lastValidRepeatLength: Int = 0
+}
+
+struct Mode1SampleHoldPlan {
+    var outputHoldSamples: Int
+    var feedbackHoldSamples: Int
+    var outputJitterSamples: Int
+    var feedbackJitterSamples: Int
+    var outputDepth: Float
+    var feedbackDepth: Float
+    var outputSmoothAlpha: Float
+    var feedbackSmoothAlpha: Float
+    var profileId: String
+}
+
+struct Mode1SampleHoldPlanner {
+    static func plan(
+        gridSamples: Int,
+        sampleRate: Float,
+        stutterNorm: Float,
+        gateNorm: Float,
+        repeatProb: Float,
+        feedbackNorm: Float,
+        repeatStyleId: String
+    ) -> Mode1SampleHoldPlan {
+        let grid = max(1, gridSamples)
+        let styleAgg: Float = repeatStyleId == "stutter_b" ? 1.0 : 0.0
+        let stutter = clamp01(stutterNorm)
+        let gate = clamp01(gateNorm)
+        let repeats = clamp01(repeatProb)
+        let feedback = clamp01(feedbackNorm)
+
+        let divA = 8 + Int((1.0 - stutter) * 10.0) // tighter/cleaner
+        let divB = 4 + Int((1.0 - stutter) * 6.0)  // longer/rougher
+        let outputDiv = styleAgg > 0.5 ? divB : divA
+        let outputHold = max(1, grid / max(2, outputDiv))
+
+        let feedbackDivA = 6 + Int((1.0 - stutter) * 8.0)
+        let feedbackDivB = 3 + Int((1.0 - stutter) * 4.0)
+        let feedbackDiv = styleAgg > 0.5 ? feedbackDivB : feedbackDivA
+        let feedbackHold = max(1, grid / max(2, feedbackDiv))
+
+        let outputJitter = Int(Float(outputHold) * (0.02 + 0.16 * gate + 0.08 * styleAgg))
+        let feedbackJitter = Int(Float(feedbackHold) * (0.02 + 0.14 * gate + 0.12 * styleAgg))
+
+        // Keep S&H as clear rhythmic coloration, not full-rate collapse.
+        let outputDepth = min(0.68, 0.18 + 0.26 * repeats + 0.10 * stutter + 0.14 * styleAgg)
+        let feedbackDepth = min(0.62, 0.06 + 0.34 * feedback + 0.08 * gate + 0.12 * styleAgg)
+
+        let outputSmoothMs = max(0.30, min(6.0, (3.0 - 0.85 * styleAgg) * (0.48 + 0.52 * gate)))
+        let feedbackSmoothMs = max(0.24, min(5.0, (2.5 - 0.75 * styleAgg) * (0.44 + 0.50 * gate)))
+
+        return Mode1SampleHoldPlan(
+            outputHoldSamples: outputHold,
+            feedbackHoldSamples: feedbackHold,
+            outputJitterSamples: outputJitter,
+            feedbackJitterSamples: feedbackJitter,
+            outputDepth: outputDepth,
+            feedbackDepth: feedbackDepth,
+            outputSmoothAlpha: smoothAlpha(ms: outputSmoothMs, sampleRate: sampleRate),
+            feedbackSmoothAlpha: smoothAlpha(ms: feedbackSmoothMs, sampleRate: sampleRate),
+            profileId: styleAgg > 0.5 ? "stutter_b_aggro" : "stutter_a_clean"
+        )
+    }
+
+    private static func clamp01(_ x: Float) -> Float {
+        min(max(x, 0), 1)
+    }
+
+    private static func smoothAlpha(ms: Float, sampleRate: Float) -> Float {
+        let samples = max(1.0, (ms / 1_000.0) * max(8_000.0, sampleRate))
+        return 1.0 - expf(-1.0 / samples)
+    }
+}
+
+private struct Mode1SampleHoldLaneState {
+    var holdSamplesRemaining: Int = 0
+    var heldValue: Float = 0
+    var smoothValue: Float = 0
+    var rng: UInt64 = 0xA511_E9B3_C0DE_D00D
+    var lastHoldSamples: Int = 1
+
+    mutating func reset(seed: UInt64) {
+        holdSamplesRemaining = 0
+        heldValue = 0
+        smoothValue = 0
+        lastHoldSamples = 1
+        rng = seed
+    }
+
+    mutating func nextUnit() -> Float {
+        rng &+= 0x9E3779B97F4A7C15
+        var z = rng
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        z ^= (z >> 31)
+        return Float(Double(z & 0xFFFF_FFFF) / Double(UInt32.max))
+    }
+}
+
+private struct Mode1SampleHoldState {
+    var outputLane = Mode1SampleHoldLaneState(rng: 0xA511_E9B3_C0DE_D00D)
+    var feedbackLane = Mode1SampleHoldLaneState(rng: 0xB71D_2C4F_F00D_BAAD)
+    var outputHoldSamples: Int = 0
+    var feedbackHoldSamples: Int = 0
+    var outputJitterSamples: Int = 0
+    var feedbackJitterSamples: Int = 0
+    var outputDepth: Float = 0
+    var feedbackDepth: Float = 0
+    var outputSmoothAlpha: Float = 0.05
+    var feedbackSmoothAlpha: Float = 0.05
+    var profileId: String = "stutter_a_clean"
+    var planRefreshCountdown: Int = 0
+    var lastGridSamples: Int = -1
+    var lastStutterBucket: Int = -1
+    var lastGateBucket: Int = -1
+    var lastRepeatBucket: Int = -1
+    var lastFeedbackBucket: Int = -1
+    var lastStyleBucket: Int = -1
+
+    mutating func reset() {
+        outputLane.reset(seed: 0xA511_E9B3_C0DE_D00D)
+        feedbackLane.reset(seed: 0xB71D_2C4F_F00D_BAAD)
+        outputHoldSamples = 0
+        feedbackHoldSamples = 0
+        outputJitterSamples = 0
+        feedbackJitterSamples = 0
+        outputDepth = 0
+        feedbackDepth = 0
+        outputSmoothAlpha = 0.05
+        feedbackSmoothAlpha = 0.05
+        profileId = "stutter_a_clean"
+        planRefreshCountdown = 0
+        lastGridSamples = -1
+        lastStutterBucket = -1
+        lastGateBucket = -1
+        lastRepeatBucket = -1
+        lastFeedbackBucket = -1
+        lastStyleBucket = -1
+    }
+}
+
+private enum Mode1GlitchState: String {
+    case live
+    case hold
+    case fade
+    case mute
+}
+
+private struct Mode1SceneVoice {
+    var active: Bool = false
+    var start: Int = 0
+    var end: Int = 0
+    var position: Float = 0
+    var rate: Float = 1
+    var gain: Float = 0
+    var age: Int = 0
+    var length: Int = 0
+    var fadeInSamples: Int = 24
+    var fadeOutSamples: Int = 80
+    var lanePan: Float = 0
+
+    mutating func reset(
+        start: Int,
+        end: Int,
+        reverse: Bool,
+        rate: Float,
+        gain: Float,
+        length: Int,
+        fadeInSamples: Int,
+        fadeOutSamples: Int,
+        lanePan: Float
+    ) {
+        self.active = true
+        self.start = min(start, end)
+        self.end = max(start, end)
+        self.rate = reverse ? -abs(rate) : abs(rate)
+        self.position = reverse ? Float(self.end - 1) : Float(self.start)
+        self.gain = gain
+        self.age = 0
+        self.length = max(1, length)
+        self.fadeInSamples = max(1, fadeInSamples)
+        self.fadeOutSamples = max(1, fadeOutSamples)
+        self.lanePan = lanePan
+    }
 }
 
 struct Mode2GranulatorState {
@@ -839,6 +1719,31 @@ struct Mode2GranulatorState {
         freezeSamplesRemaining = max(1, Int(sampleRate * Float(bounded)))
         freezeCooldownSamples = max(1, Int(sampleRate * 0.45))
     }
+}
+
+private struct Mode3InharmonicState {
+    var carrierPhase: Float = 0
+    var modPhaseA: Float = 0
+    var modPhaseB: Float = 0
+    var ringPhase: Float = 0
+    var shimmerPhase: Float = 0
+    var env: Float = 0
+    var prevInput: Float = 0
+    var strikeEnv: Float = 0
+    var strikeHz: Float = 176.0
+    var strikeCooldown: Int = 0
+    var strikeIndex: Int = 0
+    var triggerSmoothed: Float = 0
+    var glitchHoldCounter: Int = 0
+    var glitchHoldValue: Float = 0
+    var holdCounter: Int = 0
+    var holdSample: Float = 0
+    var holdSmoothed: Float = 0
+    var hfClampY: Float = 0
+    var deEssEnv: Float = 0
+    var lowMidLP: Float = 0
+    var dcPrevX: Float = 0
+    var dcPrevY: Float = 0
 }
 
 private struct Mode7Biquad {
@@ -1271,29 +2176,78 @@ struct Mode7SceneBuilder {
     }
 }
 
+private struct Mode4ClipAnalysis {
+    let rms: Float
+    let peak: Float
+    let brightness: Float
+    let lowBandRatio: Float
+    let onsetCandidates: [Int]
+    let safeCutPoints: [Int]
+}
+
+private struct Mode4SampleClip {
+    let id: String
+    let category: String
+    let gain: Float
+    let sampleRate: Float
+    let samples: [Float]
+    let analysis: Mode4ClipAnalysis
+}
+
+private struct Mode4LiveFeatures {
+    let onsetNoisy: Float
+    let brightness: Float
+    let lowBand: Float
+}
+
 private struct Mode4GestureVoice {
     var active: Bool = false
-    var source: Int = 0 // 0 = sample table, 1 = resynth
-    var index: Int = 0
-    var position: Float = 0
-    var increment: Float = 1
+    var clipIndex: Int = 0
+    var startFrame: Int = 0
+    var endFrame: Int = 1
+    var playhead: Float = 0
+    var playbackStep: Float = 1
+    var reverse: Bool = false
     var age: Int = 0
-    var length: Int = 0
+    var length: Int = 1
     var gain: Float = 0
     var panX: Float = 0
     var panY: Float = 0
+    var fadeInSamples: Int = 1
+    var fadeOutSamples: Int = 1
+    var category: String = "general"
+    var clipId: String = "unknown"
 
-    mutating func reset(source: Int, index: Int, length: Int, gain: Float, panX: Float, panY: Float, increment: Float) {
+    mutating func reset(
+        clipIndex: Int,
+        clipId: String,
+        category: String,
+        startFrame: Int,
+        endFrame: Int,
+        reverse: Bool,
+        playbackStep: Float,
+        length: Int,
+        gain: Float,
+        panX: Float,
+        panY: Float
+    ) {
         self.active = true
-        self.source = source
-        self.index = index
-        self.position = 0
-        self.increment = increment
+        self.clipIndex = max(0, clipIndex)
+        self.clipId = clipId
+        self.category = category
+        self.startFrame = max(0, startFrame)
+        self.endFrame = max(self.startFrame + 1, endFrame)
+        self.reverse = reverse
+        self.playbackStep = max(0.05, playbackStep)
+        self.playhead = reverse ? Float(self.endFrame - 1) : Float(self.startFrame)
         self.age = 0
         self.length = max(1, length)
         self.gain = gain
         self.panX = panX
         self.panY = panY
+        let fade = max(12, min(240, self.length / 6))
+        self.fadeInSamples = fade
+        self.fadeOutSamples = fade
     }
 }
 
@@ -1302,6 +2256,10 @@ private struct ResonVoice {
     var midiNote: Int = 60
     var freqHz: Float = 261.63
     var phase: Float = 0
+    var instrumentId: String = "inst_A"
+    var sampleZoneIndex: Int = -1
+    var samplePosition: Float = 0
+    var sampleStep: Float = 1
     var age: Int = 0
     var sustainSamples: Int = 0
     var releaseSamples: Int = 0
@@ -1314,6 +2272,10 @@ private struct ResonVoice {
     mutating func reset(
         midiNote: Int,
         freqHz: Float,
+        instrumentId: String,
+        sampleZoneIndex: Int,
+        samplePosition: Float,
+        sampleStep: Float,
         sustainSamples: Int,
         releaseSamples: Int,
         velocity: Float,
@@ -1326,6 +2288,10 @@ private struct ResonVoice {
         self.midiNote = midiNote
         self.freqHz = max(30, min(4_000, freqHz))
         self.phase = 0
+        self.instrumentId = instrumentId
+        self.sampleZoneIndex = sampleZoneIndex
+        self.samplePosition = samplePosition
+        self.sampleStep = sampleStep
         self.age = 0
         self.sustainSamples = max(1, sustainSamples)
         self.releaseSamples = max(1, releaseSamples)
@@ -1337,12 +2303,27 @@ private struct ResonVoice {
     }
 }
 
+private struct ResonSampleZone {
+    let rootMidi: Int
+    let lowMidi: Int
+    let highMidi: Int
+    let sampleRate: Float
+    let samples: [Float]
+    let gain: Float
+    let startFrame: Int
+    let endFrame: Int
+    let peak: Float
+}
+
 private struct ResonInstrument {
     let id: String
     let wavetable: [Float]
     let gain: Float
     let brightness: Float
     let polyphonyHint: Int
+    let sampleZones: [ResonSampleZone]
+    let sourceKind: String
+    let sourceRef: String
 
     static func fallback(id: String) -> ResonInstrument {
         let tableCount = 2_048
@@ -1351,7 +2332,55 @@ private struct ResonInstrument {
             let ph = 2.0 * Float.pi * Float(i) / Float(tableCount)
             table[i] = (sinf(ph) * 0.72) + (sinf(ph * 2.0) * 0.18) + (sinf(ph * 3.0) * 0.10)
         }
-        return ResonInstrument(id: id, wavetable: table, gain: 1.0, brightness: 0.5, polyphonyHint: 8)
+        return ResonInstrument(
+            id: id,
+            wavetable: table,
+            gain: 1.0,
+            brightness: 0.5,
+            polyphonyHint: 8,
+            sampleZones: [],
+            sourceKind: "fallback_wavetable",
+            sourceRef: "fallback_wavetable"
+        )
+    }
+
+}
+
+private struct OutputChannelSlot {
+    let base: UnsafeMutablePointer<Float>
+    let stride: Int
+
+    func write(frameIndex: Int, sample: Float) {
+        base[frameIndex * stride] = sample
+    }
+}
+
+private struct OutputChannelBinding {
+    let slots: [OutputChannelSlot]
+
+    init(audioBuffers: UnsafeMutableAudioBufferListPointer) {
+        var built: [OutputChannelSlot] = []
+        built.reserveCapacity(audioBuffers.reduce(0) { $0 + max(1, Int($1.mNumberChannels)) })
+        for buffer in audioBuffers {
+            guard let mData = buffer.mData else { continue }
+            let base = mData.assumingMemoryBound(to: Float.self)
+            let channelCount = max(1, Int(buffer.mNumberChannels))
+            if channelCount == 1 {
+                built.append(OutputChannelSlot(base: base, stride: 1))
+            } else {
+                for channel in 0..<channelCount {
+                    built.append(OutputChannelSlot(base: base.advanced(by: channel), stride: channelCount))
+                }
+            }
+        }
+        slots = built
+    }
+
+    var channelCount: Int { slots.count }
+
+    func write(channelIndex: Int, frameIndex: Int, sample: Float) {
+        guard channelIndex >= 0, channelIndex < slots.count else { return }
+        slots[channelIndex].write(frameIndex: frameIndex, sample: sample)
     }
 }
 
@@ -1482,20 +2511,131 @@ private struct DualReverbCore {
     }
 }
 
+struct InputResampleState {
+    var sourceSampleRate: Float = 48_000
+    var nextOutputSourcePosition: Double = 1.0
+    var previousSample: Float = 0
+    var hasPreviousSample: Bool = false
+
+    mutating func reset(sourceSampleRate: Float) {
+        self.sourceSampleRate = max(8_000, sourceSampleRate)
+        nextOutputSourcePosition = 1.0
+        previousSample = 0
+        hasPreviousSample = false
+    }
+}
+
+enum InputResampler {
+    static func resample(
+        samples: [Float],
+        sourceSampleRate: Float,
+        outputSampleRate: Float,
+        correction: Float = 0,
+        state: inout InputResampleState
+    ) -> [Float] {
+        guard !samples.isEmpty else { return [] }
+
+        let srcRate = max(8_000, sourceSampleRate)
+        let dstRate = max(8_000, outputSampleRate)
+        let boundedCorrection = max(-0.08, min(0.08, correction))
+        let effectiveDstRate = dstRate * max(0.25, 1.0 + boundedCorrection)
+
+        if !state.hasPreviousSample || abs(state.sourceSampleRate - srcRate) > 0.5 {
+            state.reset(sourceSampleRate: srcRate)
+            state.previousSample = samples[0]
+            state.hasPreviousSample = true
+        } else {
+            state.sourceSampleRate = srcRate
+        }
+
+        let step = Double(srcRate / effectiveDstRate)
+        let lastIndex = Double(samples.count)
+        let estimatedCount = max(1, Int(ceil(Double(samples.count) * Double(effectiveDstRate / srcRate))) + 2)
+        var out: [Float] = []
+        out.reserveCapacity(estimatedCount)
+
+        func extendedSample(at index: Int) -> Float {
+            if index <= 0 {
+                return state.previousSample
+            }
+            let sampleIndex = min(samples.count - 1, index - 1)
+            return samples[sampleIndex]
+        }
+
+        var position = state.nextOutputSourcePosition
+        while position <= lastIndex {
+            let lower = max(0, min(samples.count, Int(floor(position))))
+            let upper = max(0, min(samples.count, lower + 1))
+            let frac = Float(position - Double(lower))
+            let a = extendedSample(at: lower)
+            let b = extendedSample(at: upper)
+            out.append(a + ((b - a) * frac))
+            position += step
+        }
+
+        state.nextOutputSourcePosition = max(0.0, position - Double(samples.count))
+        state.previousSample = samples[samples.count - 1]
+        state.hasPreviousSample = true
+        return out
+    }
+}
+
 private final class MasterRenderState {
     private let ringLock = NSLock()
     private let stateLock = NSLock()
 
     private var sampleRate: Float = 48_000
     private var outputChannels: Int = 2
+    private var outputHardwareChannels: Int = 2
+    private var outputRouteMode: OutputRouteMode = .stereoFallback
+    private var outputRouteUID: String = "default"
+    private var outputRouteName: String = "System Default"
+    private var outputRouteWarning: String? = "output_uninitialized"
+    private var outputProfile: OutputRoutingProfile = OutputRoutingProfile.defaultProfile(for: "default", hardwareChannels: 2)
+    private var outputHasSolo: Bool = false
+    private var outputDelayBuffers: [[Float]] = Array(repeating: [Float](repeating: 0, count: 1), count: OutputRoutingProfile.virtualChannelCount)
+    private var outputDelayWrite: [Int] = Array(repeating: 0, count: OutputRoutingProfile.virtualChannelCount)
+    private var outputDelayCapacity: Int = 1
+    private var outputPhysicalScratch: [Float] = Array(repeating: 0, count: 8)
+    private var outputHardwareMeterPeaks: [Float] = Array(repeating: 0, count: OutputRoutingProfile.virtualChannelCount)
+    private var outputHardwareMeterDisplay: [Float] = Array(repeating: 0, count: OutputRoutingProfile.virtualChannelCount)
+    private var outputRenderCallbackCounter: UInt64 = 0
+    private var outputRenderBufferCount: Int = 0
+    private var outputRenderSlotCount: Int = 0
+    private var outputRenderFrameCount: Int = 0
+    private var outputRenderPreRoutePeak: Float = 0
+    private var outputRenderPostRoutePeak: Float = 0
+    private var outputRenderPreRouteDisplay: Float = 0
+    private var outputRenderPostRouteDisplay: Float = 0
+    private var outputTestActive: Bool = false
+    private var outputTestScanAll: Bool = false
+    private var outputTestChannelIndex: Int = 0
+    private var outputTestBurstSamples: Int = 0
+    private var outputTestGapSamples: Int = 0
+    private var outputTestBurstRemaining: Int = 0
+    private var outputTestGapRemaining: Int = 0
+    private var outputTestCurrentChannel: Int = 0
+    private var outputTestLevelLinear: Float = 0.125
+    private var outputTestRng: UInt64 = 0x9E37_DA73_DA73_1001
+    private var outputTestPinkA: Float = 0
+    private var outputTestPinkB: Float = 0
     private var controlTarget = AudioControl()
     private var controlCurrent = AudioControl()
     private var reverb = DualReverbCore()
+    private var inputRouteUID: String = "default"
+    private var inputRouteName: String = "System Default"
+    private var inputRouteChannels: Int = 0
+    private var inputRouteWarning: String? = "input_route_uninitialized"
+    private var inputRouteProfile: InputRoutingProfile = InputRoutingProfile.defaultProfile(for: "default", inputChannels: 1)
 
     private var inputRing: [Float] = Array(repeating: 0, count: 262_144)
     private var ringWrite: Int = 0
     private var ringRead: Int = 0
     private var inputScratch: [Float] = Array(repeating: 0, count: 4_096)
+    private var maxInputLagSamples: Int = 4_320
+    private var targetInputLagSamples: Int = 2_048
+    private var pendingInputFlush: Bool = false
+    private var inputResampleState = InputResampleState()
 
     private var motionPhase: Float = 0
     private var bandMotionPhase: Float = 0
@@ -1522,10 +2662,7 @@ private final class MasterRenderState {
     private var grainRng: UInt64 = 0x9E3779B97F4A7C15
     private var mode2State = Mode2GranulatorState()
 
-    private var resonY1 = [Float](repeating: 0, count: 6)
-    private var resonY2 = [Float](repeating: 0, count: 6)
-    private var downsampleCounter: Int = 0
-    private var downsampleHold: Float = 0
+    private var mode3State = Mode3InharmonicState()
 
     private var lowLP: Float = 0
     private var highHP: Float = 0
@@ -1534,7 +2671,7 @@ private final class MasterRenderState {
     private var wetClampY: Float = 0
 
     // Mode 1 repeat engine state.
-    private var mode1Buffer = [Float](repeating: 0, count: 196_608) // ~4s @48k
+    private var mode1Buffer = [Float](repeating: 0, count: 786_432) // ~16s @48k
     private var mode1Write: Int = 0
     private var mode1PrevInput: Float = 0
     private var mode1Env: Float = 0
@@ -1546,25 +2683,93 @@ private final class MasterRenderState {
     private var mode1LastOnsetSample: Int64 = -1
     private var mode1SpatialX: Float = 0
     private var mode1SpatialY: Float = 0
+    private var mode1SampleHold = Mode1SampleHoldState()
+    private var mode1CaptureValid: Bool = false
+    private var mode1CaptureEnergy: Float = 0
+    private var mode1WetFloorState: Float = 0
+    private var mode1DryDuckState: Float = 1.0
+    private var mode1GateSmoothed: Float = 1.0
+    private var mode1WetSmoothed: Float = 0
+    private var mode1WetEnergyAccum: Float = 0
+    private var mode1WetMeterSamples: Int = 0
+    private var mode1WetRMS: Float = 0
+    private var mode1State: Mode1GlitchState = .mute
+    private var mode1SceneId: String = "razor_gate"
+    private var mode1SceneCursor: Int = 0
+    private var mode1BoundaryStep: Int = -1
+    private var mode1SilenceSamples: Int = 0
+    private var mode1HoldSamplesRemaining: Int = 0
+    private var mode1FadeSamplesRemaining: Int = 0
+    private var mode1FadeGain: Float = 0
+    private var mode1LastTriggerSource: String = "none"
+    private var mode1MacroFracture: Float = 0.58
+    private var mode1MacroMutation: Float = 0.42
+    private var mode1MacroPitchLock: Float = 0.68
+    private var mode1HoldTargetSamples: Int = 0
+    private var mode1TailFadeTargetSamples: Int = 0
+    private var mode1SceneEventAccumulator: Float = 0
+    private var mode1JoltBoost: Float = 0
+    private var mode1LastValidSliceStart: Int = 0
+    private var mode1LastValidSliceLength: Int = 0
+    private var mode1HasValidSlice: Bool = false
+    private var mode1CaptureSliceBuffer: [Float] = []
+    private var mode1ShardVoices = Array(repeating: Mode1SceneVoice(), count: 12)
+    private var mode1PitchVoices = Array(repeating: Mode1SceneVoice(), count: 6)
+    private var mode1MutationHoldSamplesRemaining: Int = 0
+    private var mode1MutationFeedbackHoldSamplesRemaining: Int = 0
+    private var mode1MutationHeld: Float = 0
+    private var mode1MutationFeedbackHeld: Float = 0
+    private var mode1MutationSmooth: Float = 0
+    private var mode1MutationFeedbackSmooth: Float = 0
+    private var mode1MutationLP: Float = 0
+    private var mode1MutationHP: Float = 0
+    private var mode1MutationPrev: Float = 0
+    private var mode1MutationRingPhase: Float = 0
+    private var mode1SpectralLP1: Float = 0
+    private var mode1SpectralLP2: Float = 0
+    private var mode1SpectralLP3: Float = 0
+    private var mode1SpectralFeedback: Float = 0
+    private var mode1SpectralHoldRemaining: [Int] = Array(repeating: 0, count: 4)
+    private var mode1SpectralHeldBands: [Float] = Array(repeating: 0, count: 4)
+    private var mode1SpectralSmoothBands: [Float] = Array(repeating: 0, count: 4)
+    private var mode1SpectralCarrierPhase: [Float] = Array(repeating: 0, count: 4)
+    private var mode1PitchZeroCrossCount: Int = 0
+    private var mode1PitchLastCross: Int = 0
+    private var mode1PitchPrevInput: Float = 0
+    private var mode1PitchHz: Float = 220
+    private var mode1PitchConf: Float = 0
+    private var mode1PrevClearRequest: Bool = false
+    private var mode1PrevJoltRequest: Bool = false
 
     // Mode 4 clean + gesture state.
-    private var mode4Voices = Array(repeating: Mode4GestureVoice(), count: 3)
+    private var mode4Voices = Array(repeating: Mode4GestureVoice(), count: 12)
     private var mode4LastTriggerSamplesAgo: Int = 100_000
     private var mode4SessionId: String = "session_boot"
     private var mode4RouteUID: String = "default"
     private var mode4RouteChangedAtMs: Int = 0
     private var mode4LastSessionResetMs: Int = 0
     private var mode4MemoryDecay: Float = 1
-    private var mode4SampleTables: [[Float]] = Array(repeating: Array(repeating: 0, count: 2048), count: 6)
-    private var mode4SampleTableIds: [String] = []
+    private var mode4SampleLibrary: [Mode4SampleClip] = []
+    private var mode4CategoryToIndices: [String: [Int]] = [:]
+    private var mode4LibraryBankId: String = "samples_A"
+    private var mode4LoadInterventions: [String] = []
+    private var mode4NoSamplesDryOnly: Bool = false
+    private var mode4RecentClipIndices: [Int] = []
+    private var mode4TriggerAccumulator: Float = 0
     private var mode4ActiveVoices: Int = 0
     private var mode4PrevInput: Float = 0
+    private var mode4InputEnv: Float = 0
+    private var mode4LowTrack: Float = 0
+    private var mode4LowEnv: Float = 0
+    private var mode4HighEnv: Float = 0
+    private var mode4Noisiness: Float = 0
 
     // Modes 5/6 resonifier state.
     private var resonVoices = Array(repeating: ResonVoice(), count: 8)
     private var resonInstrumentCache: [String: ResonInstrument] = [:]
     private var resonCurrentInstrument: ResonInstrument = ResonInstrument.fallback(id: "inst_A")
     private var resonSwapInstrument: ResonInstrument = ResonInstrument.fallback(id: "inst_A")
+    private var mode56LoadInterventions: [String] = []
     private var resonSwapMix: Float = 1.0
     private var resonSwapStep: Float = 0.0
     private var resonSwapRemaining: Int = 0
@@ -1580,6 +2785,17 @@ private final class MasterRenderState {
     private var resonPitchHz: Float = 220
     private var resonPitchConf: Float = 0
     private var resonNoteAccumulator: Float = 0
+    private var resonReactiveGateSamples: Int = 0
+    private var resonNoiseFloor: Float = 0.001
+    private var resonSilenceSamples: Int = 0
+    private var resonIsSilent: Bool = true
+    private var resonInputLevel: Float = 0
+    private var resonLastMidi: Int = -1
+    private var resonDesiredVoices: Int = 0
+    private var resonSpawnCount: Int = 0
+    private var resonOutputEnergyAccum: Float = 0
+    private var resonOutputMeterSamples: Int = 0
+    private var resonLastOutputRMS: Float = 0
     private var resonDebugCounter: Int = 0
 
     // Mode 7 true redistribution state.
@@ -1604,13 +2820,98 @@ private final class MasterRenderState {
         stateLock.withLock {
             self.sampleRate = max(8_000, sampleRate)
             self.outputChannels = max(1, outputChannels)
+            self.outputHardwareChannels = self.outputChannels
+            self.outputProfile.sanitize(for: self.outputHardwareChannels)
+            self.outputHasSolo = self.outputProfile.channels.contains(where: { $0.solo })
+            self.outputTestBurstSamples = max(1, Int(self.sampleRate * 0.30))
+            self.outputTestGapSamples = max(1, Int(self.sampleRate * 0.22))
+            self.outputTestBurstRemaining = 0
+            self.outputTestGapRemaining = 0
+            self.outputTestCurrentChannel = self.outputTestChannelIndex
+            self.outputTestPinkA = 0
+            self.outputTestPinkB = 0
+            self.outputHardwareMeterPeaks = Array(repeating: 0, count: OutputRoutingProfile.virtualChannelCount)
+            self.outputHardwareMeterDisplay = Array(repeating: 0, count: OutputRoutingProfile.virtualChannelCount)
+            self.outputRenderCallbackCounter = 0
+            self.outputRenderBufferCount = 0
+            self.outputRenderSlotCount = 0
+            self.outputRenderFrameCount = 0
+            self.outputRenderPreRoutePeak = 0
+            self.outputRenderPostRoutePeak = 0
+            self.outputRenderPreRouteDisplay = 0
+            self.outputRenderPostRouteDisplay = 0
+            self.rebuildOutputDelayBuffers()
+            self.maxInputLagSamples = max(512, Int(self.sampleRate * 0.090))
+            self.targetInputLagSamples = min(self.maxInputLagSamples - 32, max(256, Int(self.sampleRate * 0.040)))
+            self.inputResampleState.reset(sourceSampleRate: self.sampleRate)
             self.hpAlpha = hpfAlpha(fc: 100.0, sampleRate: self.sampleRate)
             self.reverb.configure(sampleRate: self.sampleRate)
             self.reverb.setTarget(controlCurrent.reverb)
             self.mode1Clock.configure(sampleRate: self.sampleRate)
+            self.mode1SampleHold.reset()
+            self.mode1Scheduler = Mode1RepeatScheduler()
+            self.mode1CaptureValid = false
+            self.mode1CaptureEnergy = 0
+            self.mode1WetFloorState = 0
+            self.mode1DryDuckState = 1.0
+            self.mode1GateSmoothed = 1.0
+            self.mode1WetSmoothed = 0
+            self.mode1WetEnergyAccum = 0
+            self.mode1WetMeterSamples = 0
+            self.mode1WetRMS = 0
+            self.mode1State = .mute
+            self.mode1SceneId = "razor_gate"
+            self.mode1SceneCursor = 0
+            self.mode1BoundaryStep = -1
+            self.mode1SilenceSamples = 0
+            self.mode1HoldSamplesRemaining = 0
+            self.mode1FadeSamplesRemaining = 0
+            self.mode1FadeGain = 0
+            self.mode1LastTriggerSource = "none"
+            self.mode1MacroFracture = 0.58
+            self.mode1MacroMutation = 0.42
+            self.mode1MacroPitchLock = 0.68
+            self.mode1HoldTargetSamples = Int(self.sampleRate * 8.0)
+            self.mode1TailFadeTargetSamples = Int(self.sampleRate * 0.48)
+            self.mode1SceneEventAccumulator = 0
+            self.mode1JoltBoost = 0
+            self.mode1LastValidSliceStart = 0
+            self.mode1LastValidSliceLength = 0
+            self.mode1HasValidSlice = false
+            self.mode1CaptureSliceBuffer.removeAll(keepingCapacity: false)
+            for i in self.mode1ShardVoices.indices { self.mode1ShardVoices[i].active = false }
+            for i in self.mode1PitchVoices.indices { self.mode1PitchVoices[i].active = false }
+            self.mode1MutationHoldSamplesRemaining = 0
+            self.mode1MutationFeedbackHoldSamplesRemaining = 0
+            self.mode1MutationHeld = 0
+            self.mode1MutationFeedbackHeld = 0
+            self.mode1MutationSmooth = 0
+            self.mode1MutationFeedbackSmooth = 0
+            self.mode1MutationLP = 0
+            self.mode1MutationHP = 0
+            self.mode1MutationPrev = 0
+            self.mode1MutationRingPhase = 0
+            self.mode1SpectralLP1 = 0
+            self.mode1SpectralLP2 = 0
+            self.mode1SpectralLP3 = 0
+            self.mode1SpectralFeedback = 0
+            for i in self.mode1SpectralHoldRemaining.indices {
+                self.mode1SpectralHoldRemaining[i] = 0
+                self.mode1SpectralHeldBands[i] = 0
+                self.mode1SpectralSmoothBands[i] = 0
+                self.mode1SpectralCarrierPhase[i] = 0
+            }
+            self.mode1PitchZeroCrossCount = 0
+            self.mode1PitchLastCross = 0
+            self.mode1PitchPrevInput = 0
+            self.mode1PitchHz = 220
+            self.mode1PitchConf = 0
+            self.mode1PrevClearRequest = false
+            self.mode1PrevJoltRequest = false
             self.mode2State = Mode2GranulatorState()
+            self.mode3State = Mode3InharmonicState()
             self.mode7State.configure(sampleRate: self.sampleRate)
-            seedMode4Tables()
+            reloadMode4SampleLibrary(bankId: controlCurrent.bankId ?? "samples_A")
             preloadResonifierDefaults()
             setMode7TargetMatrix(mappingId: "swap_pairs", mappingFamily: "bucket_swap", bias: 0.5, varianceAmt: 0.2, seed: 7)
             mode4SessionId = "session_\(Int(Date().timeIntervalSince1970))"
@@ -1630,11 +2931,45 @@ private final class MasterRenderState {
                 clamped.wetLevel = min(max(clamped.wetLevel, 0), 0.60)
             }
 
+            let mode4ActiveOrPending = controlCurrent.mode == 4 || controlTarget.mode == 4 || pendingControl?.mode == 4
+            let mode56ActiveOrPending = controlCurrent.mode == 5
+                || controlCurrent.mode == 6
+                || controlTarget.mode == 5
+                || controlTarget.mode == 6
+                || pendingControl?.mode == 5
+                || pendingControl?.mode == 6
+            if clamped.mode == 4 {
+                let requestedBankId = clamped.bankId ?? "samples_A"
+                if !mode4ActiveOrPending || requestedBankId != mode4LibraryBankId {
+                    reloadMode4SampleLibrary(bankId: requestedBankId)
+                    pendingInputFlush = true
+                }
+            }
+            if clamped.mode == 5 || clamped.mode == 6 {
+                if !mode56ActiveOrPending {
+                    reloadResonifierLibrary(activeInstrumentId: clamped.midiInstId)
+                    pendingInputFlush = true
+                }
+            }
+
             if clamped.mode != controlTarget.mode {
-                pendingControl = clamped
-                pendingSwitchSamples = pendingGestureSamples(outgoingMode: controlTarget.mode)
+                if let pending = pendingControl, pending.mode == clamped.mode {
+                    // Refresh target parameters without extending switch deferral.
+                    pendingControl = clamped
+                } else {
+                    pendingControl = clamped
+                    pendingSwitchSamples = pendingGestureSamples(
+                        outgoingMode: controlCurrent.mode,
+                        incomingMode: clamped.mode
+                    )
+                }
+                if isLowLatencyIncomingMode(clamped.mode) {
+                    pendingInputFlush = true
+                }
             } else {
                 controlTarget = clamped
+                pendingControl = nil
+                pendingSwitchSamples = 0
             }
 
             if clamped.mode == 7 {
@@ -1666,24 +3001,159 @@ private final class MasterRenderState {
         }
     }
 
+    func setOutputRouting(
+        profile: OutputRoutingProfile,
+        hardwareChannels: Int,
+        activeMode: OutputRouteMode,
+        outputUID: String,
+        outputName: String,
+        warning: String?
+    ) {
+        stateLock.withLock {
+            var sanitized = profile
+            sanitized.sanitize(for: max(1, hardwareChannels))
+            outputProfile = sanitized
+            outputHardwareChannels = max(1, hardwareChannels)
+            outputChannels = outputHardwareChannels
+            outputRouteMode = activeMode
+            outputRouteUID = outputUID
+            outputRouteName = outputName
+            outputRouteWarning = warning
+            outputHasSolo = sanitized.channels.contains(where: { $0.solo })
+            rebuildOutputDelayBuffers()
+        }
+    }
+
+    func setInputRouting(
+        profile: InputRoutingProfile,
+        inputUID: String,
+        inputName: String,
+        channelCount: Int,
+        warning: String?
+    ) {
+        stateLock.withLock {
+            var sanitized = profile
+            _ = sanitized.sanitize(for: max(0, channelCount))
+            inputRouteProfile = sanitized
+            inputRouteUID = inputUID
+            inputRouteName = inputName
+            inputRouteChannels = max(0, channelCount)
+            inputRouteWarning = warning
+        }
+    }
+
+    func setOutputTest(active: Bool, channelIndex: Int, scanAll: Bool, levelDb: Double) {
+        stateLock.withLock {
+            outputTestActive = active
+            outputTestChannelIndex = max(0, min(OutputRoutingProfile.virtualChannelCount - 1, channelIndex))
+            outputTestScanAll = scanAll
+            outputTestCurrentChannel = outputTestChannelIndex
+            outputTestBurstRemaining = 0
+            outputTestGapRemaining = 0
+            outputTestPinkA = 0
+            outputTestPinkB = 0
+            let clamped = max(OutputRoutingProfile.minTestLevelDb, min(OutputRoutingProfile.maxTestLevelDb, levelDb))
+            outputTestLevelLinear = powf(10.0, Float(clamped) / 20.0)
+        }
+    }
+
+    func consumeOutputHardwareMeterLevels() -> [Float] {
+        stateLock.withLock {
+            for idx in 0..<OutputRoutingProfile.virtualChannelCount {
+                let held = outputHardwareMeterDisplay[idx] * 0.80
+                let next = max(outputHardwareMeterPeaks[idx], held)
+                outputHardwareMeterDisplay[idx] = next < 0.0006 ? 0 : next
+                outputHardwareMeterPeaks[idx] = 0
+            }
+            return outputHardwareMeterDisplay
+        }
+    }
+
+    func consumeOutputRenderDiagnostics() -> OutputRenderDiagnosticsSnapshot {
+        stateLock.withLock {
+            outputRenderPreRouteDisplay = max(outputRenderPreRoutePeak, outputRenderPreRouteDisplay * 0.80)
+            outputRenderPostRouteDisplay = max(outputRenderPostRoutePeak, outputRenderPostRouteDisplay * 0.80)
+            if outputRenderPreRouteDisplay < 0.0006 { outputRenderPreRouteDisplay = 0 }
+            if outputRenderPostRouteDisplay < 0.0006 { outputRenderPostRouteDisplay = 0 }
+            let snapshot = OutputRenderDiagnosticsSnapshot(
+                callbackCounter: outputRenderCallbackCounter,
+                frameCount: outputRenderFrameCount,
+                bufferCount: outputRenderBufferCount,
+                slotCount: outputRenderSlotCount,
+                configuredHardwareChannels: outputHardwareChannels,
+                preRoutePeak: outputRenderPreRouteDisplay,
+                postRoutePeak: outputRenderPostRouteDisplay
+            )
+            outputRenderPreRoutePeak = 0
+            outputRenderPostRoutePeak = 0
+            return snapshot
+        }
+    }
+
     func snapshotInterventions() -> [String] {
         stateLock.withLock {
             var out = lastInterventions.names()
+            out.append("render_mode:\(controlCurrent.mode)")
+            out.append("input_backlog_ms:\(String(format: "%.1f", inputBacklogMs()))")
+            out.append("input_uid:\(inputRouteUID.isEmpty ? "default" : inputRouteUID)")
+            out.append("input_name:\(inputRouteName)")
+            out.append("input_channels:\(inputRouteChannels)")
+            out.append("input_active:\(inputRouteProfile.activeSummary())")
+            if let inputRouteWarning, !inputRouteWarning.isEmpty {
+                out.append(inputRouteWarning)
+            }
+            out.append("output_uid:\(outputRouteUID.isEmpty ? "default" : outputRouteUID)")
+            out.append("output_name:\(outputRouteName)")
+            out.append("output_channels:\(outputHardwareChannels)")
+            out.append("output_mode:\(outputRouteMode.rawValue)")
+            out.append("output_mapping:\(outputProfile.mappingSummary())")
+            if let outputRouteWarning, !outputRouteWarning.isEmpty {
+                out.append(outputRouteWarning)
+            }
             if controlCurrent.mode == 1 {
                 out.append("mode1_grid_div:\(controlCurrent.gridDiv)")
                 out.append("mode1_repeat_style:\(controlCurrent.repeatStyleId)")
-                out.append("mode1_clock_conf:\(String(format: "%.2f", mode1Clock.confidence))")
-                out.append("mode1_beat_samples:\(mode1Clock.effectiveBeatSamples(sampleRate: sampleRate))")
+                out.append("mode1_scene:\(mode1SceneId)")
+                out.append("mode1_state:\(mode1State.rawValue)")
+                let holdRemainingMs = Int((Float(mode1HoldSamplesRemaining) * 1000.0) / max(1.0, sampleRate))
+                out.append("mode1_hold_remaining_ms:\(max(0, holdRemainingMs))")
+                out.append("mode1_trigger_src:\(mode1LastTriggerSource)")
+                out.append("mode1_macro_fracture:\(String(format: "%.2f", mode1MacroFracture))")
+                out.append("mode1_macro_mutation:\(String(format: "%.2f", mode1MacroMutation))")
+                out.append("mode1_macro_pitch_lock:\(String(format: "%.2f", mode1MacroPitchLock))")
+                out.append("mode1_wet_rms:\(String(format: "%.4f", mode1WetRMS))")
             } else if controlCurrent.mode == 2 {
                 out.append("mode2_freeze:\(mode2State.freezeSamplesRemaining > 0 ? 1 : 0)")
                 out.append("mode2_voices:\(mode2State.grains.filter { $0.active }.count)")
             } else if controlCurrent.mode == 4 {
                 out.append("performer_session_id:\(mode4SessionId)")
                 out.append("mode4_gesture_type:\(controlCurrent.gestureTypeId)")
+                out.append("mode4_bank:\(mode4LibraryBankId)")
+                out.append("mode4_samples_loaded:\(mode4SampleLibrary.count)")
+                out.append("mode4_active_voices:\(mode4ActiveVoices)")
+                if mode4NoSamplesDryOnly {
+                    out.append("mode4_no_samples_dry_only")
+                }
+                if !mode4LoadInterventions.isEmpty {
+                    out.append(contentsOf: mode4LoadInterventions.prefix(6))
+                }
             } else if controlCurrent.mode == 5 || controlCurrent.mode == 6 {
                 out.append("mode\(controlCurrent.mode)_inst:\(controlCurrent.midiInstId)")
                 out.append("mode\(controlCurrent.mode)_chord:\(controlCurrent.chordSetId)")
                 out.append("mode\(controlCurrent.mode)_voices:\(resonVoices.filter { $0.active }.count)")
+                out.append("mode\(controlCurrent.mode)_inst_source:\(resonCurrentInstrument.sourceKind)")
+                out.append("mode\(controlCurrent.mode)_sample_zones:\(resonCurrentInstrument.sampleZones.count)")
+                out.append("mode\(controlCurrent.mode)_source_ref:\(resonCurrentInstrument.sourceRef)")
+                out.append("mode\(controlCurrent.mode)_spawns:\(resonSpawnCount)")
+                out.append("mode\(controlCurrent.mode)_rms:\(String(format: "%.4f", resonLastOutputRMS))")
+                out.append("mode\(controlCurrent.mode)_reactive_gate:\(resonReactiveGateSamples > 0 ? 1 : 0)")
+                out.append("mode\(controlCurrent.mode)_input_level:\(String(format: "%.3f", resonInputLevel))")
+                out.append("mode\(controlCurrent.mode)_silent:\(resonIsSilent ? 1 : 0)")
+                out.append("mode\(controlCurrent.mode)_desired_voices:\(resonDesiredVoices)")
+                out.append("mode\(controlCurrent.mode)_last_midi:\(resonLastMidi)")
+                if !mode56LoadInterventions.isEmpty {
+                    out.append(contentsOf: mode56LoadInterventions.suffix(6))
+                }
             } else if controlCurrent.mode == 7 {
                 out.append("mode7_mapping_id:\(controlCurrent.mappingId)")
                 out.append("mode7_wet:\(String(format: "%.3f", controlCurrent.wetLevel))")
@@ -1723,23 +3193,39 @@ private final class MasterRenderState {
         mode4MemoryDecay = max(0.35, 1.0 - (ageMin / 18.0))
     }
 
-    private func pendingGestureSamples(outgoingMode: Int) -> Int {
+    private func isLowLatencyIncomingMode(_ mode: Int) -> Bool {
+        mode == 1 || mode == 2 || mode == 3
+    }
+
+    private func pendingGestureSamples(outgoingMode: Int, incomingMode: Int) -> Int {
+        var base: Int
         switch outgoingMode {
         case 1:
-            if mode1Scheduler.active {
-                let remainingInSlice = max(0, mode1Scheduler.sliceLength - mode1Scheduler.slicePos)
-                return min(max(remainingInSlice, Int(sampleRate * 0.08)), Int(sampleRate * 0.60))
+            switch mode1State {
+            case .live:
+                base = Int(sampleRate * 0.09)
+            case .hold:
+                base = min(max(mode1HoldSamplesRemaining, Int(sampleRate * 0.06)), Int(sampleRate * 0.35))
+            case .fade:
+                base = min(max(mode1FadeSamplesRemaining, Int(sampleRate * 0.04)), Int(sampleRate * 0.28))
+            case .mute:
+                base = Int(sampleRate * 0.04)
             }
-            return Int(sampleRate * 0.06)
+            if mode1ShardVoices.contains(where: { $0.active }) || mode1PitchVoices.contains(where: { $0.active }) {
+                base = max(base, Int(sampleRate * 0.08))
+            } else {
+                base = min(base, Int(sampleRate * 0.06))
+            }
         case 4:
             if mode4ActiveVoices > 0 {
                 var maxRemaining = 0
                 for v in mode4Voices where v.active {
                     maxRemaining = max(maxRemaining, max(0, v.length - v.age))
                 }
-                return min(max(maxRemaining, Int(sampleRate * 0.10)), Int(sampleRate * 0.50))
+                base = min(max(maxRemaining, Int(sampleRate * 0.10)), Int(sampleRate * 0.50))
+            } else {
+                base = Int(sampleRate * 0.08)
             }
-            return Int(sampleRate * 0.08)
         case 5, 6:
             var maxRemaining = 0
             for v in resonVoices where v.active {
@@ -1747,14 +3233,19 @@ private final class MasterRenderState {
                 maxRemaining = max(maxRemaining, max(0, left))
             }
             if maxRemaining > 0 {
-                return min(max(maxRemaining, Int(sampleRate * 0.08)), Int(sampleRate * 0.45))
+                base = min(max(maxRemaining, Int(sampleRate * 0.08)), Int(sampleRate * 0.45))
+            } else {
+                base = Int(sampleRate * 0.07)
             }
-            return Int(sampleRate * 0.07)
         case 7:
-            return Int(sampleRate * 0.18)
+            base = Int(sampleRate * 0.18)
         default:
-            return Int(sampleRate * 0.05)
+            base = Int(sampleRate * 0.05)
         }
+        if isLowLatencyIncomingMode(incomingMode) {
+            return min(base, Int(sampleRate * 0.055))
+        }
+        return base
     }
 
     private func handlePendingModeSwitch() {
@@ -1768,7 +3259,7 @@ private final class MasterRenderState {
         let outgoing = controlCurrent.mode
         controlTarget = next
         modeFade = 0.0
-        let fadeSec: Float
+        var fadeSec: Float
         switch outgoing {
         case 4, 7:
             fadeSec = 0.22
@@ -1776,6 +3267,9 @@ private final class MasterRenderState {
             fadeSec = 0.14
         default:
             fadeSec = 0.08
+        }
+        if isLowLatencyIncomingMode(next.mode) {
+            fadeSec = min(fadeSec, 0.055)
         }
         modeFadeStep = 1.0 / max(1.0, sampleRate * fadeSec)
         transitionSafetySamples = Int(sampleRate * fadeSec)
@@ -1787,28 +3281,50 @@ private final class MasterRenderState {
         let frames = Int(buffer.frameLength)
         let channels = Int(buffer.format.channelCount)
         guard frames > 0, channels > 0 else { return }
+        let inputSampleRate = max(8_000, Float(buffer.format.sampleRate))
+        let routeProfile = stateLock.withLock { inputRouteProfile }
+        let activeMask = InputChannelRouter.sanitizedMask(routeProfile.activeChannels, channelCount: channels)
+        var mono = [Float](repeating: 0, count: frames)
+        for i in 0..<frames {
+            mono[i] = InputChannelRouter.mixedSample(
+                channelCount: channels,
+                activeMask: activeMask,
+                channelGainDb: routeProfile.channelGainDb
+            ) { ch in
+                channelData[ch][i]
+            }
+        }
+
+        ringLock.lock()
+        let backlog = ringDistanceSamples(read: ringRead, write: ringWrite, capacity: inputRing.count)
+        ringLock.unlock()
+
+        let backlogError = targetInputLagSamples - backlog
+        let correction = max(-0.03, min(0.03, Float(backlogError) / Float(max(1, targetInputLagSamples)) * 0.03))
+        let resampled = InputResampler.resample(
+            samples: mono,
+            sourceSampleRate: inputSampleRate,
+            outputSampleRate: sampleRate,
+            correction: correction,
+            state: &inputResampleState
+        )
 
         ringLock.lock()
         let cap = inputRing.count
         var write = ringWrite
         var read = ringRead
-        for i in 0..<frames {
-            var mono: Float = 0
-            if channels == 1 {
-                mono = channelData[0][i]
-            } else {
-                for ch in 0..<channels {
-                    mono += channelData[ch][i]
-                }
-                mono /= Float(channels)
-            }
-            inputRing[write] = mono
+        for sample in resampled {
+            inputRing[write] = sample
             write += 1
             if write >= cap { write = 0 }
             if write == read {
                 read += 1
                 if read >= cap { read = 0 }
             }
+        }
+        let lagSamples = ringDistanceSamples(read: read, write: write, capacity: cap)
+        if lagSamples > maxInputLagSamples {
+            read = advanceRingIndex(read, by: lagSamples - maxInputLagSamples, capacity: cap)
         }
         ringWrite = write
         ringRead = read
@@ -1823,20 +3339,27 @@ private final class MasterRenderState {
         if inputScratch.count < frames {
             inputScratch = Array(repeating: 0, count: max(frames, inputScratch.count * 2))
         }
-        copyInputFrames(into: &inputScratch, frames: frames)
+        stateLock.withLock {
+            if pendingInputFlush {
+                flushInputRingToLive()
+                pendingInputFlush = false
+            }
+            // Keep render-time lock order consistent with live input ingest:
+            // stateLock -> ringLock. The previous ringLock -> stateLock path
+            // could deadlock the hardware callback before diagnostics updated.
+            copyInputFrames(into: &inputScratch, frames: frames)
+        }
 
         let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
         guard !abl.isEmpty else { return }
-        let outChannelCount = min(outputChannels, abl.count)
-        var outPtrs: [UnsafeMutablePointer<Float>] = []
-        outPtrs.reserveCapacity(outChannelCount)
-        for ch in 0..<outChannelCount {
-            guard let mData = abl[ch].mData else { continue }
-            outPtrs.append(mData.assumingMemoryBound(to: Float.self))
-        }
-        guard !outPtrs.isEmpty else { return }
+        let outputBinding = OutputChannelBinding(audioBuffers: abl)
+        guard outputBinding.channelCount > 0 else { return }
 
         stateLock.withLock {
+            outputRenderCallbackCounter &+= 1
+            outputRenderBufferCount = abl.count
+            outputRenderSlotCount = outputBinding.channelCount
+            outputRenderFrameCount = frames
             // Default control-stream smoothing: 500 ms ramp.
             let controlSlew: Float = max(0.000_001, min(1.0, 1.0 / max(1.0, sampleRate * 0.5)))
             var interventions: SafetyInterventions = []
@@ -1882,12 +3405,25 @@ private final class MasterRenderState {
 
                 switch mode {
                 case 1:
-                    let repeatOut = processMode1(input: hp, interventions: &interventions)
-                    let dryBoost = 1.0 + 0.22 * mode1DryAttackBoost
-                    let wetDuck = max(0.45, 1.0 - 0.52 * mode1TransientDuck)
-                    dryMono = hp * Float(controlCurrent.dryLevel) * dryBoost
-                    fxMono = repeatOut * Float(controlCurrent.wetLevel) * wetDuck
-                    reverbSend = (dryMono * 0.08) + (fxMono * 0.20)
+                    let glitchOut = processMode1(input: input, analysisInput: hp, interventions: &interventions)
+                    let mode1IsActiveTarget: Float = mode1State == .mute ? 0.0 : 1.0
+                    mode1WetFloorState += 0.028 * (mode1IsActiveTarget - mode1WetFloorState)
+                    let liveDryTarget: Float = mode1State == .live ? 1.0 : 0.0
+                    mode1DryDuckState += 0.015 * (liveDryTarget - mode1DryDuckState)
+                    let stateWetFloor: Float
+                    switch mode1State {
+                    case .live: stateWetFloor = 0.76
+                    case .hold: stateWetFloor = 0.84
+                    case .fade: stateWetFloor = 0.68
+                    case .mute: stateWetFloor = 0.0
+                    }
+                    let dryAnchor = (0.010 + 0.055 * mode1DryDuckState) * (mode1State == .mute ? 0.0 : 1.0)
+                    let dryBoost = 0.88 + 0.05 * mode1DryAttackBoost
+                    let wetLevelEff = min(1.0, max(Float(controlCurrent.wetLevel), stateWetFloor * mode1WetFloorState))
+                    let spectralLift = 1.55 + (0.80 * mode1MacroMutation) + (0.25 * mode1MacroFracture)
+                    dryMono = hp * Float(controlCurrent.dryLevel) * dryAnchor * dryBoost
+                    fxMono = glitchOut * wetLevelEff * spectralLift
+                    reverbSend = (dryMono * 0.02) + (fxMono * 0.42)
                     placeMode1Object(
                         sample: dryMono + fxMono,
                         spread: Float(controlCurrent.spread),
@@ -1913,12 +3449,11 @@ private final class MasterRenderState {
                     )
 
                 case 3:
-                    let reson = processResonator(input: hp)
-                    var wet = processBitReduction(input: reson * 0.72)
-                    wet = processWetHFClamp(input: wet)
-                    dryMono = hp * Float(max(controlCurrent.dryLevel, 0.55))
-                    fxMono = wet * Float(min(controlCurrent.wetLevel, 0.30))
-                    reverbSend = (fxMono * 0.18) + (dryMono * 0.06)
+                    let wet = processMode3(input: hp)
+                    // Mode 3 should be effect-forward; keep only a light dry anchor.
+                    dryMono = hp * Float(min(0.22, max(0.0, controlCurrent.dryLevel * 0.35)))
+                    fxMono = wet * Float(min(1.0, max(0.55, controlCurrent.wetLevel * 1.80)))
+                    reverbSend = (fxMono * 0.03) + (dryMono * 0.02)
                     placeMainObject(
                         sample: dryMono + fxMono,
                         spread: Float(controlCurrent.spread),
@@ -1931,6 +3466,7 @@ private final class MasterRenderState {
                 case 4:
                     processMode4(
                         input: hp,
+                        interventions: &interventions,
                         &ch0, &ch1, &ch2, &ch3, &ch4, &ch5,
                         reverbSend: &reverbSend
                     )
@@ -1954,10 +3490,13 @@ private final class MasterRenderState {
                         &ch0, &ch1, &ch2, &ch3, &ch4, &ch5,
                         reverbSend: &reverbSend
                     )
-                    let dry = hp * Float(max(0.40, controlCurrent.dryLevel))
-                    ch1 += dry * 0.5
-                    ch4 += dry * 0.5
-                    reverbSend += dry * 0.10
+                    // Keep mode 6 centered on pitched instrument output, not input-bed texture.
+                    let hasResonVoices = resonVoices.contains(where: { $0.active })
+                    if hasResonVoices {
+                        let dry = hp * Float(controlCurrent.dryLevel) * 0.15
+                        ch1 += dry * 0.5
+                        ch4 += dry * 0.5
+                    }
 
                 case 7:
                     let swapped = processMode7(input: hp)
@@ -2007,7 +3546,7 @@ private final class MasterRenderState {
 
                 var reverbWet = reverb.process(reverbSend) * activeCpu.wetScale * feedbackWetScale
                 if controlCurrent.mode == 3 {
-                    reverbWet = processWetHFClamp(input: reverbWet)
+                    reverbWet = processMode3ReverbClamp(input: reverbWet)
                 } else if controlCurrent.mode == 7 {
                     // Keep Mode 7 character dominated by redistribution, not room wash.
                     reverbWet *= 0.16
@@ -2039,26 +3578,16 @@ private final class MasterRenderState {
                 ch0 = hardClip(ch0); ch1 = hardClip(ch1); ch2 = hardClip(ch2)
                 ch3 = hardClip(ch3); ch4 = hardClip(ch4); ch5 = hardClip(ch5)
 
-                if outPtrs.count >= 6 {
-                    outPtrs[0][n] = ch0
-                    outPtrs[1][n] = ch1
-                    outPtrs[2][n] = ch2
-                    outPtrs[3][n] = ch3
-                    outPtrs[4][n] = ch4
-                    outPtrs[5][n] = ch5
-                    if outPtrs.count > 6 {
-                        for ch in 6..<outPtrs.count {
-                            outPtrs[ch][n] = 0
-                        }
-                    }
-                } else if outPtrs.count == 2 {
-                    let stereo = GridSpatializer.downmixStereo(from6: [ch0, ch1, ch2, ch3, ch4, ch5])
-                    outPtrs[0][n] = stereo.left
-                    outPtrs[1][n] = stereo.right
-                } else {
-                    let mono = (ch0 + ch1 + ch2 + ch3 + ch4 + ch5) / 6.0
-                    outPtrs[0][n] = mono
-                }
+                let preRoutePeak = max6(abs(ch0), abs(ch1), abs(ch2), abs(ch3), abs(ch4), abs(ch5))
+                outputRenderPreRoutePeak = max(outputRenderPreRoutePeak, preRoutePeak)
+
+                let postRoutePeak = routeAndWriteOutputs(
+                    virtual0: ch0, virtual1: ch1, virtual2: ch2,
+                    virtual3: ch3, virtual4: ch4, virtual5: ch5,
+                    frameIndex: n,
+                    outputBinding: outputBinding
+                )
+                outputRenderPostRoutePeak = max(outputRenderPostRoutePeak, postRoutePeak)
 
                 peak = 0
                 sampleCounter += 1
@@ -2075,11 +3604,184 @@ private final class MasterRenderState {
         }
     }
 
+    private func rebuildOutputDelayBuffers() {
+        let maxDelaySamples = max(0, Int((OutputRoutingProfile.maxDelayMs / 1000.0) * Double(sampleRate)))
+        outputDelayCapacity = max(1, maxDelaySamples + 2)
+        outputDelayBuffers = Array(
+            repeating: Array(repeating: 0, count: outputDelayCapacity),
+            count: OutputRoutingProfile.virtualChannelCount
+        )
+        outputDelayWrite = Array(repeating: 0, count: OutputRoutingProfile.virtualChannelCount)
+        if outputPhysicalScratch.count < max(1, outputHardwareChannels) {
+            outputPhysicalScratch = Array(repeating: 0, count: max(1, outputHardwareChannels))
+        }
+    }
+
+    private func routeAndWriteOutputs(
+        virtual0: Float,
+        virtual1: Float,
+        virtual2: Float,
+        virtual3: Float,
+        virtual4: Float,
+        virtual5: Float,
+        frameIndex: Int,
+        outputBinding: OutputChannelBinding
+    ) -> Float {
+        let hardwareChannelCount = max(1, outputBinding.channelCount)
+        if outputPhysicalScratch.count < hardwareChannelCount {
+            outputPhysicalScratch = Array(repeating: 0, count: hardwareChannelCount)
+        }
+        for idx in 0..<hardwareChannelCount {
+            outputPhysicalScratch[idx] = 0
+        }
+
+        var v0 = virtual0
+        var v1 = virtual1
+        var v2 = virtual2
+        var v3 = virtual3
+        var v4 = virtual4
+        var v5 = virtual5
+
+        if outputTestActive {
+            v0 = 0; v1 = 0; v2 = 0; v3 = 0; v4 = 0; v5 = 0
+            let sample = nextOutputTestSample()
+            switch outputTestCurrentChannel {
+            case 0: v0 = sample
+            case 1: v1 = sample
+            case 2: v2 = sample
+            case 3: v3 = sample
+            case 4: v4 = sample
+            default: v5 = sample
+            }
+        }
+
+        let c0 = calibratedVirtualSample(v0, virtualIndex: 0)
+        let c1 = calibratedVirtualSample(v1, virtualIndex: 1)
+        let c2 = calibratedVirtualSample(v2, virtualIndex: 2)
+        let c3 = calibratedVirtualSample(v3, virtualIndex: 3)
+        let c4 = calibratedVirtualSample(v4, virtualIndex: 4)
+        let c5 = calibratedVirtualSample(v5, virtualIndex: 5)
+
+        let master = powf(10.0, Float(outputProfile.masterGainDb) / 20.0)
+        var postPeak: Float = 0
+        if outputRouteMode == .gallery6Locked {
+            mixVirtualToPhysical(c0, virtualIndex: 0, outCount: hardwareChannelCount)
+            mixVirtualToPhysical(c1, virtualIndex: 1, outCount: hardwareChannelCount)
+            mixVirtualToPhysical(c2, virtualIndex: 2, outCount: hardwareChannelCount)
+            mixVirtualToPhysical(c3, virtualIndex: 3, outCount: hardwareChannelCount)
+            mixVirtualToPhysical(c4, virtualIndex: 4, outCount: hardwareChannelCount)
+            mixVirtualToPhysical(c5, virtualIndex: 5, outCount: hardwareChannelCount)
+            for idx in 0..<hardwareChannelCount {
+                let sample = hardClip(outputPhysicalScratch[idx] * master)
+                outputBinding.write(channelIndex: idx, frameIndex: frameIndex, sample: sample)
+                postPeak = max(postPeak, abs(sample))
+                if idx < OutputRoutingProfile.virtualChannelCount {
+                    outputHardwareMeterPeaks[idx] = max(outputHardwareMeterPeaks[idx], abs(sample))
+                }
+            }
+        } else if hardwareChannelCount >= 2 {
+            let stereo = GridSpatializer.downmixStereo(from6: [c0, c1, c2, c3, c4, c5])
+            let left = hardClip(stereo.left * master)
+            let right = hardClip(stereo.right * master)
+            outputBinding.write(channelIndex: 0, frameIndex: frameIndex, sample: left)
+            outputBinding.write(channelIndex: 1, frameIndex: frameIndex, sample: right)
+            postPeak = max(abs(left), abs(right))
+            outputHardwareMeterPeaks[0] = max(outputHardwareMeterPeaks[0], abs(left))
+            outputHardwareMeterPeaks[1] = max(outputHardwareMeterPeaks[1], abs(right))
+            if hardwareChannelCount > 2 {
+                for idx in 2..<hardwareChannelCount {
+                    outputBinding.write(channelIndex: idx, frameIndex: frameIndex, sample: 0)
+                }
+            }
+        } else {
+            let mono = ((c0 + c1 + c2 + c3 + c4 + c5) / 6.0) * master
+            let sample = hardClip(mono)
+            outputBinding.write(channelIndex: 0, frameIndex: frameIndex, sample: sample)
+            postPeak = abs(sample)
+            outputHardwareMeterPeaks[0] = max(outputHardwareMeterPeaks[0], abs(sample))
+        }
+        return postPeak
+    }
+
+    private func calibratedVirtualSample(_ input: Float, virtualIndex: Int) -> Float {
+        guard virtualIndex >= 0, virtualIndex < outputProfile.channels.count else { return input }
+        let cal = outputProfile.channels[virtualIndex]
+        if outputHasSolo && !cal.solo { return 0 }
+        if cal.muted { return 0 }
+
+        var value = input
+        if cal.polarityInverted {
+            value = -value
+        }
+        value *= powf(10.0, Float(cal.gainDb) / 20.0)
+        let delaySamples = max(0, min(outputDelayCapacity - 1, Int((cal.delayMs / 1000.0) * Double(sampleRate))))
+        return processOutputDelay(value, virtualIndex: virtualIndex, delaySamples: delaySamples)
+    }
+
+    private func processOutputDelay(_ input: Float, virtualIndex: Int, delaySamples: Int) -> Float {
+        guard virtualIndex >= 0, virtualIndex < outputDelayBuffers.count else { return input }
+        guard outputDelayCapacity > 1 else { return input }
+        var write = outputDelayWrite[virtualIndex]
+        outputDelayBuffers[virtualIndex][write] = input
+        var read = write - delaySamples
+        if read < 0 {
+            read += outputDelayCapacity * ((-read / outputDelayCapacity) + 1)
+        }
+        read %= outputDelayCapacity
+        let delayed = outputDelayBuffers[virtualIndex][read]
+        write += 1
+        if write >= outputDelayCapacity {
+            write = 0
+        }
+        outputDelayWrite[virtualIndex] = write
+        return delayed
+    }
+
+    private func mixVirtualToPhysical(_ sample: Float, virtualIndex: Int, outCount: Int) {
+        guard outCount > 0 else { return }
+        guard virtualIndex >= 0, virtualIndex < outputProfile.channels.count else { return }
+        let mapped = outputProfile.channels[virtualIndex].hardwareOutput
+        let hwIndex = max(0, min(outCount - 1, mapped - 1))
+        outputPhysicalScratch[hwIndex] += sample
+    }
+
+    private func nextOutputTestSample() -> Float {
+        guard outputTestActive else { return 0 }
+        if outputTestGapRemaining > 0 {
+            outputTestGapRemaining -= 1
+            return 0
+        }
+        if outputTestBurstRemaining <= 0 {
+            outputTestBurstRemaining = max(1, outputTestBurstSamples)
+        }
+
+        outputTestRng = outputTestRng &* 6364136223846793005 &+ 1442695040888963407
+        let white = (Float((outputTestRng >> 33) & 0xFFFF_FFFF) / Float(UInt32.max)) * 2.0 - 1.0
+        outputTestPinkA = 0.99765 * outputTestPinkA + 0.0990460 * white
+        outputTestPinkB = 0.96300 * outputTestPinkB + 0.2965164 * white
+        let pink = (outputTestPinkA + outputTestPinkB + (0.164 * white)) * 0.35
+
+        outputTestBurstRemaining -= 1
+        if outputTestBurstRemaining <= 0 {
+            outputTestGapRemaining = max(1, outputTestGapSamples)
+            if outputTestScanAll {
+                outputTestCurrentChannel = (outputTestCurrentChannel + 1) % OutputRoutingProfile.virtualChannelCount
+            } else {
+                outputTestCurrentChannel = outputTestChannelIndex
+            }
+        }
+        return pink * outputTestLevelLinear
+    }
+
     private func copyInputFrames(into out: inout [Float], frames: Int) {
         ringLock.lock()
         let cap = inputRing.count
         var read = ringRead
         let write = ringWrite
+        let lagSamples = ringDistanceSamples(read: read, write: write, capacity: cap)
+        if lagSamples > maxInputLagSamples {
+            read = advanceRingIndex(read, by: lagSamples - maxInputLagSamples, capacity: cap)
+        }
         for i in 0..<frames {
             if read == write {
                 out[i] = 0
@@ -2091,6 +3793,35 @@ private final class MasterRenderState {
         }
         ringRead = read
         ringLock.unlock()
+    }
+
+    private func ringDistanceSamples(read: Int, write: Int, capacity: Int) -> Int {
+        if write >= read {
+            return write - read
+        }
+        return (capacity - read) + write
+    }
+
+    private func advanceRingIndex(_ index: Int, by delta: Int, capacity: Int) -> Int {
+        guard capacity > 0 else { return 0 }
+        var out = index + delta
+        if out >= capacity {
+            out %= capacity
+        }
+        return out
+    }
+
+    private func flushInputRingToLive() {
+        ringLock.lock()
+        ringRead = ringWrite
+        ringLock.unlock()
+    }
+
+    private func inputBacklogMs() -> Float {
+        ringLock.lock()
+        let backlog = ringDistanceSamples(read: ringRead, write: ringWrite, capacity: inputRing.count)
+        ringLock.unlock()
+        return (Float(backlog) * 1000.0) / max(1.0, sampleRate)
     }
 
     private func smoothControl(slew: Float) {
@@ -2113,6 +3844,12 @@ private final class MasterRenderState {
         controlCurrent.stutterLenNorm += Double(slew) * (controlTarget.stutterLenNorm - controlCurrent.stutterLenNorm)
         controlCurrent.gateSharpness += Double(slew) * (controlTarget.gateSharpness - controlCurrent.gateSharpness)
         controlCurrent.motionIntensity += Double(slew) * (controlTarget.motionIntensity - controlCurrent.motionIntensity)
+        controlCurrent.mode1Fracture += Double(slew) * (controlTarget.mode1Fracture - controlCurrent.mode1Fracture)
+        controlCurrent.mode1Mutation += Double(slew) * (controlTarget.mode1Mutation - controlCurrent.mode1Mutation)
+        controlCurrent.mode1PitchLock += Double(slew) * (controlTarget.mode1PitchLock - controlCurrent.mode1PitchLock)
+        controlCurrent.mode1HoldLenSec += Double(slew) * (controlTarget.mode1HoldLenSec - controlCurrent.mode1HoldLenSec)
+        controlCurrent.mode1TailFadeMs += Double(slew) * (controlTarget.mode1TailFadeMs - controlCurrent.mode1TailFadeMs)
+        controlCurrent.mode1SceneRateHz += Double(slew) * (controlTarget.mode1SceneRateHz - controlCurrent.mode1SceneRateHz)
         controlCurrent.exciteAmount += Double(slew) * (controlTarget.exciteAmount - controlCurrent.exciteAmount)
         controlCurrent.resonance += Double(slew) * (controlTarget.resonance - controlCurrent.resonance)
         controlCurrent.drive += Double(slew) * (controlTarget.drive - controlCurrent.drive)
@@ -2144,6 +3881,9 @@ private final class MasterRenderState {
         controlCurrent.hfClampWetPath = controlTarget.hfClampWetPath
         controlCurrent.gridDiv = controlTarget.gridDiv
         controlCurrent.repeatStyleId = controlTarget.repeatStyleId
+        controlCurrent.mode1SceneId = controlTarget.mode1SceneId
+        controlCurrent.mode1ClearRequest = controlTarget.mode1ClearRequest
+        controlCurrent.mode1JoltRequest = controlTarget.mode1JoltRequest
         controlCurrent.bankId = controlTarget.bankId
         controlCurrent.categoryId = controlTarget.categoryId
         controlCurrent.gestureTypeId = controlTarget.gestureTypeId
@@ -2164,25 +3904,450 @@ private final class MasterRenderState {
         return y
     }
 
-    private func seedMode4Tables() {
-        let ids = ManifestCatalog.shared.banks["samples_A"]?.assets.map(\.id) ?? ["s000", "s001", "s002", "s003"]
-        mode4SampleTableIds = Array(ids.prefix(mode4SampleTables.count))
-        while mode4SampleTableIds.count < mode4SampleTables.count {
-            mode4SampleTableIds.append("s\(String(format: "%03d", mode4SampleTableIds.count))")
+    private func mode4AssetRoots() -> [URL] {
+        var roots: [URL] = []
+        if let dir = ManifestCatalog.shared.sourceDirectory {
+            roots.append(dir)
+            roots.append(dir.deletingLastPathComponent())
+        }
+        if let resource = Bundle.main.resourceURL {
+            roots.append(resource)
+        }
+        let sourceDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        roots.append(sourceDir)
+        roots.append(sourceDir.deletingLastPathComponent())
+
+        var unique: [URL] = []
+        var seen: Set<String> = []
+        for root in roots {
+            let key = root.standardizedFileURL.path
+            if seen.contains(key) { continue }
+            seen.insert(key)
+            unique.append(root)
+        }
+        return unique
+    }
+
+    private func resolveMode4AssetURL(path: String) -> URL? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let fm = FileManager.default
+        if trimmed.hasPrefix("/") {
+            let absolute = URL(fileURLWithPath: trimmed)
+            return fm.isReadableFile(atPath: absolute.path) ? absolute : nil
         }
 
-        for i in 0..<mode4SampleTables.count {
-            let seed = stableSeed(for: mode4SampleTableIds[i])
-            var x = seed
-            for n in 0..<mode4SampleTables[i].count {
-                x = x &* 2862933555777941757 &+ 3037000493
-                let r = Float((x >> 33) & 0xFFFF) / Float(0xFFFF)
-                let ph = 2.0 * Float.pi * Float(n) / Float(mode4SampleTables[i].count)
-                let tone = sinf(ph * (1.0 + Float((i % 3) + 1)))
-                let overtone = sinf(ph * (2.0 + Float((i % 5) + 1))) * 0.35
-                let noise = (r - 0.5) * 0.18
-                mode4SampleTables[i][n] = (tone * 0.65) + overtone + noise
+        for root in mode4AssetRoots() {
+            let candidate = root.appendingPathComponent(trimmed)
+            if fm.isReadableFile(atPath: candidate.path) {
+                return candidate
             }
+            let basenameCandidate = root.appendingPathComponent((trimmed as NSString).lastPathComponent)
+            if fm.isReadableFile(atPath: basenameCandidate.path) {
+                return basenameCandidate
+            }
+        }
+        return nil
+    }
+
+    private func mode4IsAudioFile(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return ext == "wav" || ext == "aif" || ext == "aiff" || ext == "caf"
+    }
+
+    private func mode4ScanFallbackAudioFiles(relativeDirectories: [String]) -> [URL] {
+        let fm = FileManager.default
+        var out: [URL] = []
+        var seen: Set<String> = []
+        var scanDirs: [URL] = []
+
+        let cleanedDirs = relativeDirectories
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        for dir in cleanedDirs {
+            if dir.hasPrefix("/") {
+                scanDirs.append(URL(fileURLWithPath: dir, isDirectory: true))
+            } else {
+                for root in mode4AssetRoots() {
+                    scanDirs.append(root.appendingPathComponent(dir, isDirectory: true))
+                }
+            }
+        }
+
+        var rootScanned: Set<String> = []
+        for root in mode4AssetRoots() {
+            let key = root.standardizedFileURL.path
+            if rootScanned.contains(key) { continue }
+            rootScanned.insert(key)
+            scanDirs.append(root)
+        }
+
+        for dirURL in scanDirs {
+            var isDir = ObjCBool(false)
+            guard fm.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            guard let entries = try? fm.contentsOfDirectory(
+                at: dirURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for entry in entries {
+                guard mode4IsAudioFile(entry) else { continue }
+                let key = entry.standardizedFileURL.path
+                if seen.contains(key) { continue }
+                seen.insert(key)
+                out.append(entry)
+            }
+        }
+
+        out.sort { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+        return out
+    }
+
+    private func mode4PathBasename(_ path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private func mode4FilenameMatchesAssetId(filename: String, assetId: String) -> Bool {
+        let base = (filename as NSString).deletingPathExtension.lowercased()
+        return base == assetId.lowercased()
+    }
+
+    private func decodeMode4MonoSamples(from url: URL) throws -> (samples: [Float], sampleRate: Float) {
+        let file = try AVAudioFile(forReading: url)
+        let format = file.processingFormat
+        let frameCapacity = AVAudioFrameCount(max(1, file.length))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCapacity) else {
+            throw NSError(domain: "Mode4SampleDecode", code: 1, userInfo: [NSLocalizedDescriptionKey: "buffer allocation failed"])
+        }
+        try file.read(into: buffer)
+
+        let frames = Int(buffer.frameLength)
+        let channels = Int(format.channelCount)
+        guard frames > 0, channels > 0 else {
+            return ([], Float(format.sampleRate))
+        }
+
+        var mono = [Float](repeating: 0, count: frames)
+        switch format.commonFormat {
+        case .pcmFormatFloat32:
+            if format.isInterleaved {
+                let abl = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+                guard let mData = abl.first?.mData else {
+                    throw NSError(domain: "Mode4SampleDecode", code: 2, userInfo: [NSLocalizedDescriptionKey: "interleaved float data missing"])
+                }
+                let src = mData.assumingMemoryBound(to: Float.self)
+                let inv = 1.0 / Float(channels)
+                for n in 0..<frames {
+                    var s: Float = 0
+                    let base = n * channels
+                    for ch in 0..<channels {
+                        s += src[base + ch]
+                    }
+                    mono[n] = s * inv
+                }
+            } else {
+                guard let src = buffer.floatChannelData else {
+                    throw NSError(domain: "Mode4SampleDecode", code: 2, userInfo: [NSLocalizedDescriptionKey: "float channel data missing"])
+                }
+                if channels == 1 {
+                    mono.withUnsafeMutableBufferPointer { dst in
+                        dst.baseAddress?.update(from: src[0], count: frames)
+                    }
+                } else {
+                    let inv = 1.0 / Float(channels)
+                    for n in 0..<frames {
+                        var s: Float = 0
+                        for ch in 0..<channels { s += src[ch][n] }
+                        mono[n] = s * inv
+                    }
+                }
+            }
+
+        case .pcmFormatInt16:
+            let scale = 1.0 / Float(Int16.max)
+            if format.isInterleaved {
+                let abl = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+                guard let mData = abl.first?.mData else {
+                    throw NSError(domain: "Mode4SampleDecode", code: 3, userInfo: [NSLocalizedDescriptionKey: "interleaved int16 data missing"])
+                }
+                let src = mData.assumingMemoryBound(to: Int16.self)
+                let inv = 1.0 / Float(channels)
+                for n in 0..<frames {
+                    var s: Float = 0
+                    let base = n * channels
+                    for ch in 0..<channels {
+                        s += Float(src[base + ch]) * scale
+                    }
+                    mono[n] = s * inv
+                }
+            } else {
+                guard let src = buffer.int16ChannelData else {
+                    throw NSError(domain: "Mode4SampleDecode", code: 3, userInfo: [NSLocalizedDescriptionKey: "int16 channel data missing"])
+                }
+                if channels == 1 {
+                    for n in 0..<frames { mono[n] = Float(src[0][n]) * scale }
+                } else {
+                    let inv = 1.0 / Float(channels)
+                    for n in 0..<frames {
+                        var s: Float = 0
+                        for ch in 0..<channels { s += Float(src[ch][n]) * scale }
+                        mono[n] = s * inv
+                    }
+                }
+            }
+
+        case .pcmFormatInt32:
+            let scale = 1.0 / Float(Int32.max)
+            if format.isInterleaved {
+                let abl = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+                guard let mData = abl.first?.mData else {
+                    throw NSError(domain: "Mode4SampleDecode", code: 4, userInfo: [NSLocalizedDescriptionKey: "interleaved int32 data missing"])
+                }
+                let src = mData.assumingMemoryBound(to: Int32.self)
+                let inv = 1.0 / Float(channels)
+                for n in 0..<frames {
+                    var s: Float = 0
+                    let base = n * channels
+                    for ch in 0..<channels {
+                        s += Float(src[base + ch]) * scale
+                    }
+                    mono[n] = s * inv
+                }
+            } else {
+                guard let src = buffer.int32ChannelData else {
+                    throw NSError(domain: "Mode4SampleDecode", code: 4, userInfo: [NSLocalizedDescriptionKey: "int32 channel data missing"])
+                }
+                if channels == 1 {
+                    for n in 0..<frames { mono[n] = Float(src[0][n]) * scale }
+                } else {
+                    let inv = 1.0 / Float(channels)
+                    for n in 0..<frames {
+                        var s: Float = 0
+                        for ch in 0..<channels { s += Float(src[ch][n]) * scale }
+                        mono[n] = s * inv
+                    }
+                }
+            }
+
+        default:
+            throw NSError(domain: "Mode4SampleDecode", code: 5, userInfo: [NSLocalizedDescriptionKey: "unsupported sample format"])
+        }
+
+        return (mono, Float(format.sampleRate))
+    }
+
+    private func analyzeMode4Clip(samples: [Float], sampleRate: Float) -> Mode4ClipAnalysis {
+        let count = max(1, samples.count)
+        var sumSq: Float = 0
+        var sumAbs: Float = 0
+        var peak: Float = 0
+        var zc: Int = 0
+        var diffAbs: Float = 0
+        var safeCuts: [Int] = [0]
+        safeCuts.reserveCapacity(max(512, count / 8))
+
+        var lp: Float = 0
+        let lowAlpha = min(0.20, max(0.001, (2.0 * Float.pi * 280.0) / max(8_000.0, sampleRate)))
+        var lowSq: Float = 0
+        var totalSq: Float = 0
+
+        var prev = samples.first ?? 0
+        var lastCut = 0
+        for n in 0..<count {
+            let x = samples[n]
+            let ax = abs(x)
+            sumSq += x * x
+            sumAbs += ax
+            peak = max(peak, ax)
+            totalSq += x * x
+            lp += lowAlpha * (x - lp)
+            lowSq += lp * lp
+            if n > 0 {
+                if (prev <= 0 && x > 0) || (prev >= 0 && x < 0) || ax < 0.0015 {
+                    zc += 1
+                    if n - lastCut >= 8 {
+                        safeCuts.append(n)
+                        lastCut = n
+                    }
+                }
+                diffAbs += abs(x - prev)
+            }
+            prev = x
+        }
+        if safeCuts.last != count - 1 {
+            safeCuts.append(count - 1)
+        }
+
+        let rms = sqrtf(sumSq / Float(count))
+        let zcr = Float(zc) / Float(max(1, count - 1))
+        let hfRatio = diffAbs / max(1e-6, sumAbs)
+        let brightness = max(0, min(1, 0.65 * min(1, hfRatio * 0.95) + 0.35 * min(1, zcr * 7.0)))
+        let lowBandRatio = max(0, min(1, sqrtf(lowSq / max(totalSq, 1e-9))))
+
+        let onsetWindow = max(64, min(2_048, Int(sampleRate * 0.018)))
+        var flux: [(Int, Float)] = []
+        flux.reserveCapacity(max(8, count / max(1, onsetWindow)))
+        var prevEnergy: Float = 0
+        var idx = 0
+        while idx < count {
+            let end = min(count, idx + onsetWindow)
+            var e: Float = 0
+            for i in idx..<end {
+                let v = samples[i]
+                e += v * v
+            }
+            e = sqrtf(e / Float(max(1, end - idx)))
+            let f = max(0, e - prevEnergy)
+            flux.append((idx, f))
+            prevEnergy = e
+            idx += onsetWindow
+        }
+
+        var onsetCandidates: [Int] = []
+        if !flux.isEmpty {
+            let sorted = flux.map(\.1).sorted()
+            let p75 = sorted[Int(Float(sorted.count - 1) * 0.75)]
+            let threshold = max(0.004, p75)
+            for (frame, f) in flux where f >= threshold {
+                onsetCandidates.append(frame)
+            }
+        }
+        if onsetCandidates.isEmpty {
+            let step = max(96, min(2_048, Int(sampleRate * 0.06)))
+            var frame = 0
+            while frame < count {
+                onsetCandidates.append(frame)
+                frame += step
+            }
+        }
+
+        return Mode4ClipAnalysis(
+            rms: rms,
+            peak: peak,
+            brightness: brightness,
+            lowBandRatio: lowBandRatio,
+            onsetCandidates: onsetCandidates,
+            safeCutPoints: safeCuts
+        )
+    }
+
+    private func normalizeMode4Category(_ raw: String?) -> String {
+        guard let raw else { return "general" }
+        let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return cleaned.isEmpty ? "general" : cleaned
+    }
+
+    private func reloadMode4SampleLibrary(bankId: String) {
+        mode4LibraryBankId = bankId
+        mode4SampleLibrary.removeAll(keepingCapacity: true)
+        mode4CategoryToIndices.removeAll(keepingCapacity: true)
+        mode4LoadInterventions.removeAll(keepingCapacity: true)
+        mode4NoSamplesDryOnly = false
+        mode4RecentClipIndices.removeAll(keepingCapacity: true)
+        mode4TriggerAccumulator = 0
+        mode4PrevInput = 0
+        mode4InputEnv = 0
+        mode4LowTrack = 0
+        mode4LowEnv = 0
+        mode4HighEnv = 0
+        mode4Noisiness = 0
+        mode4LastTriggerSamplesAgo = 100_000
+
+        for i in mode4Voices.indices {
+            mode4Voices[i].active = false
+        }
+        mode4ActiveVoices = 0
+
+        guard let bank = ManifestCatalog.shared.banks[bankId], bank.type == .samples else {
+            mode4NoSamplesDryOnly = true
+            mode4LoadInterventions.append("mode4_no_samples_dry_only")
+            mode4LoadInterventions.append("mode4_invalid_bank:\(bankId)")
+            return
+        }
+
+        var loaded: [Mode4SampleClip] = []
+        loaded.reserveCapacity(bank.assets.count)
+        let fallbackDirs = Array(
+            Set(
+                bank.assets.map { asset in
+                    (asset.path as NSString).deletingLastPathComponent
+                }
+            )
+        )
+        let fallbackPool = mode4ScanFallbackAudioFiles(relativeDirectories: fallbackDirs)
+        var fallbackCursor = 0
+        var consumedFallback: Set<String> = []
+
+        for asset in bank.assets {
+            var resolvedURL = resolveMode4AssetURL(path: asset.path)
+            var usedFallback = false
+            if resolvedURL == nil {
+                let desiredBasename = mode4PathBasename(asset.path).lowercased()
+                if let matched = fallbackPool.first(where: { candidate in
+                    let key = candidate.standardizedFileURL.path
+                    if consumedFallback.contains(key) { return false }
+                    let candidateName = candidate.lastPathComponent.lowercased()
+                    return candidateName == desiredBasename || mode4FilenameMatchesAssetId(filename: candidate.lastPathComponent, assetId: asset.id)
+                }) {
+                    resolvedURL = matched
+                    consumedFallback.insert(matched.standardizedFileURL.path)
+                }
+            }
+            if resolvedURL == nil {
+                while fallbackCursor < fallbackPool.count {
+                    let candidate = fallbackPool[fallbackCursor]
+                    fallbackCursor += 1
+                    let key = candidate.standardizedFileURL.path
+                    if consumedFallback.contains(key) { continue }
+                    consumedFallback.insert(key)
+                    resolvedURL = candidate
+                    usedFallback = true
+                    mode4LoadInterventions.append("mode4_pick_fallback:\(asset.id)->\(candidate.lastPathComponent)")
+                    break
+                }
+            }
+            guard let url = resolvedURL else {
+                mode4LoadInterventions.append("mode4_sample_missing:\(asset.id)")
+                continue
+            }
+            do {
+                let decoded = try decodeMode4MonoSamples(from: url)
+                if decoded.samples.count < 64 {
+                    mode4LoadInterventions.append("mode4_sample_too_short:\(asset.id)")
+                    continue
+                }
+                let category = normalizeMode4Category(asset.category)
+                let analysis = analyzeMode4Clip(samples: decoded.samples, sampleRate: decoded.sampleRate)
+                let clip = Mode4SampleClip(
+                    id: asset.id,
+                    category: category,
+                    gain: Float(asset.gain ?? 1.0),
+                    sampleRate: max(8_000, decoded.sampleRate),
+                    samples: decoded.samples,
+                    analysis: analysis
+                )
+                loaded.append(clip)
+                if !usedFallback {
+                    consumedFallback.insert(url.standardizedFileURL.path)
+                }
+            } catch {
+                mode4LoadInterventions.append("mode4_sample_unreadable:\(asset.id)")
+            }
+        }
+
+        mode4SampleLibrary = loaded
+        for i in loaded.indices {
+            mode4CategoryToIndices[loaded[i].category, default: []].append(i)
+        }
+
+        if mode4SampleLibrary.isEmpty {
+            mode4NoSamplesDryOnly = true
+            mode4LoadInterventions.append("mode4_no_samples_dry_only")
+        }
+        if mode4LoadInterventions.count > 16 {
+            mode4LoadInterventions = Array(mode4LoadInterventions.prefix(16))
         }
     }
 
@@ -2195,12 +4360,19 @@ private final class MasterRenderState {
         return h
     }
 
-    private func mode1GridSamples() -> Int {
-        mode1Clock.stepSamples(gridDiv: controlCurrent.gridDiv, sampleRate: sampleRate)
+    private struct Mode1SceneProfile {
+        let id: String
+        let shardBias: Float
+        let pitchBias: Float
+        let mutationBias: Float
+        let reverseBias: Float
+        let dropoutBias: Float
+        let ratchetPattern: [Int]
+        let sizePatternMs: [Float]
     }
 
-    private func mode1StepsPerBar() -> Int {
-        controlCurrent.gridDiv == "1/16" ? 16 : 8
+    private func mode1GridSamples() -> Int {
+        mode1Clock.stepSamples(gridDiv: controlCurrent.gridDiv, sampleRate: sampleRate)
     }
 
     private func mode1WrappedIndex(_ index: Int) -> Int {
@@ -2217,60 +4389,600 @@ private final class MasterRenderState {
         return s0 + (s1 - s0) * frac
     }
 
-    private func resetMode1SliceReadHead(gridSamples: Int) {
-        let gate = Float(controlCurrent.gateSharpness)
-        let jitterDepth = Float(gridSamples) * (0.10 + 0.22 * gate)
-        let jitter = Int((randomUnit() * 2.0 - 1.0) * jitterDepth)
-        let base = mode1Scheduler.repeatStart + mode1Scheduler.repeatPos + jitter
-        mode1Scheduler.sliceReadHead = Float(mode1WrappedIndex(base))
-
-        let speedVariance = (randomUnit() * 2.0 - 1.0) * (0.05 + 0.16 * gate)
-        var step: Float
-        if controlCurrent.repeatStyleId == "stutter_b" {
-            let rateSet: [Float] = [1.0, -1.0, 0.5, 1.4, -0.72, 1.2]
-            step = rateSet[mode1Scheduler.sliceJumpIndex % rateSet.count] + speedVariance
-        } else {
-            let rateSet: [Float] = [1.0, 0.5, 1.0, 1.33]
-            step = rateSet[mode1Scheduler.sliceJumpIndex % rateSet.count] + speedVariance
-        }
-        mode1Scheduler.sliceStep = step
+    private func mode1CaptureSampleLinear(_ position: Float) -> Float {
+        guard !mode1CaptureSliceBuffer.isEmpty else { return 0 }
+        let count = mode1CaptureSliceBuffer.count
+        let wrappedPos: Float = {
+            if count == 1 { return 0 }
+            let p = position.truncatingRemainder(dividingBy: Float(count))
+            return p < 0 ? p + Float(count) : p
+        }()
+        let i0 = Int(floorf(wrappedPos))
+        let frac = wrappedPos - Float(i0)
+        let i1 = (i0 + 1) % count
+        let s0 = mode1CaptureSliceBuffer[i0]
+        let s1 = mode1CaptureSliceBuffer[i1]
+        return s0 + (s1 - s0) * frac
     }
 
-    private func startMode1Repeat(gridSamples: Int, triggerStrength: Float) {
-        let feedbackAmount = min(max(Float(controlCurrent.thresholdBias), 0), 1)
-        let beatSamples = mode1Clock.effectiveBeatSamples(sampleRate: sampleRate)
-        let phraseBeats = 1.0 + (3.0 * Float(controlCurrent.windowNorm))
-        var windowSamples = Int(Float(beatSamples) * phraseBeats)
-        windowSamples = max(gridSamples, min(windowSamples, Int(2.0 * sampleRate)))
-        windowSamples = max(gridSamples, (windowSamples / gridSamples) * gridSamples)
-
-        let start = mode1Write - windowSamples
-        mode1Scheduler.repeatStart = start >= 0 ? start : (start + mode1Buffer.count)
-        mode1Scheduler.repeatLength = max(gridSamples, windowSamples)
-        mode1Scheduler.repeatPos = 0
-
-        let baseSliceMs = 30.0 + (420.0 * Float(controlCurrent.stutterLenNorm))
-        let baseSlice = Int((baseSliceMs / 1000.0) * sampleRate)
-        let quantum = max(16, gridSamples / 4)
-        var slice = max(quantum, (baseSlice / quantum) * quantum)
-        if controlCurrent.stutterLenNorm < 0.20 {
-            slice = max(quantum, gridSamples / 4)
-        } else if controlCurrent.stutterLenNorm < 0.55 {
-            slice = max(quantum, gridSamples / 2)
-        } else {
-            slice = max(quantum, gridSamples)
+    private func mode1CaptureWindowEnergy(start: Int, length: Int) -> Float {
+        let count = max(1, length)
+        let stride = max(1, count / 2_048)
+        var idx = start
+        var sumAbs: Float = 0
+        var n = 0
+        while n < count {
+            let wrapped = mode1WrappedIndex(idx)
+            sumAbs += abs(mode1Buffer[wrapped])
+            idx += stride
+            n += stride
         }
-        mode1Scheduler.sliceLength = max(quantum, min(mode1Scheduler.repeatLength, slice))
-        mode1Scheduler.slicePos = 0
+        let samples = max(1, n / stride)
+        return sumAbs / Float(samples)
+    }
 
-        let baseDurSec = 0.55 + 5.5 * Float(controlCurrent.repeatProb)
-        mode1Scheduler.repeatSamplesRemaining = Int(baseDurSec * sampleRate)
-        mode1Scheduler.active = true
-        mode1Scheduler.pendingTrigger = false
-        mode1Scheduler.lastSliceTailSample = triggerStrength * 0.06
-        mode1Scheduler.repeatGain = min(1.12, (0.58 + 0.34 * feedbackAmount) * (0.86 + 0.24 * triggerStrength))
-        mode1Scheduler.sliceJumpIndex = 0
-        resetMode1SliceReadHead(gridSamples: gridSamples)
+    private func mode1NearestZeroCross(_ index: Int, radius: Int) -> Int {
+        let r = max(1, radius)
+        var best = mode1WrappedIndex(index)
+        var bestAbs = abs(mode1Buffer[best])
+        for d in 1...r {
+            let left = mode1WrappedIndex(index - d)
+            let right = mode1WrappedIndex(index + d)
+            let leftAbs = abs(mode1Buffer[left])
+            let rightAbs = abs(mode1Buffer[right])
+            if leftAbs < bestAbs {
+                bestAbs = leftAbs
+                best = left
+            }
+            if rightAbs < bestAbs {
+                bestAbs = rightAbs
+                best = right
+            }
+            if bestAbs < 0.0008 { break }
+        }
+        return best
+    }
+
+    private func mode1CaptureNearestZeroCross(_ index: Int, radius: Int) -> Int {
+        guard !mode1CaptureSliceBuffer.isEmpty else { return 0 }
+        let maxIdx = mode1CaptureSliceBuffer.count - 1
+        let center = max(0, min(maxIdx, index))
+        let r = max(1, radius)
+        var best = center
+        var bestAbs = abs(mode1CaptureSliceBuffer[center])
+        for d in 1...r {
+            let left = max(0, center - d)
+            let right = min(maxIdx, center + d)
+            let leftAbs = abs(mode1CaptureSliceBuffer[left])
+            let rightAbs = abs(mode1CaptureSliceBuffer[right])
+            if leftAbs < bestAbs {
+                bestAbs = leftAbs
+                best = left
+            }
+            if rightAbs < bestAbs {
+                bestAbs = rightAbs
+                best = right
+            }
+            if bestAbs < 0.0008 { break }
+        }
+        return best
+    }
+
+    private func mode1SceneFamily(repeatStyleId: String) -> [String] {
+        if repeatStyleId.lowercased() == "stutter_b" {
+            return ["databend", "spectral_melt", "void_strobe"]
+        }
+        return ["razor_gate", "arp_shred", "reverse_flock"]
+    }
+
+    private func mode1ResolveSceneId(baseSceneId: String, repeatStyleId: String) -> String {
+        let normalized = baseSceneId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let allowed: Set<String> = ["razor_gate", "databend", "arp_shred", "reverse_flock", "spectral_melt", "void_strobe"]
+        if allowed.contains(normalized) {
+            return normalized
+        }
+        return mode1SceneFamily(repeatStyleId: repeatStyleId).first ?? "razor_gate"
+    }
+
+    private func mode1AdvanceScene(repeatStyleId: String) {
+        let family = mode1SceneFamily(repeatStyleId: repeatStyleId)
+        guard !family.isEmpty else { return }
+        if let current = family.firstIndex(of: mode1SceneId) {
+            mode1SceneId = family[(current + 1) % family.count]
+        } else {
+            mode1SceneId = family[0]
+        }
+    }
+
+    private func mode1SceneProfile(for id: String) -> Mode1SceneProfile {
+        switch id {
+        case "databend":
+            return Mode1SceneProfile(
+                id: id,
+                shardBias: 0.95,
+                pitchBias: 0.36,
+                mutationBias: 0.82,
+                reverseBias: 0.48,
+                dropoutBias: 0.26,
+                ratchetPattern: [1, 2, 1, 3, 2, 1, 4, 2],
+                sizePatternMs: [36, 54, 72, 98, 140, 84]
+            )
+        case "arp_shred":
+            return Mode1SceneProfile(
+                id: id,
+                shardBias: 0.74,
+                pitchBias: 0.88,
+                mutationBias: 0.40,
+                reverseBias: 0.18,
+                dropoutBias: 0.18,
+                ratchetPattern: [1, 1, 2, 1, 2, 3, 1, 2],
+                sizePatternMs: [52, 78, 108, 144, 180, 96]
+            )
+        case "reverse_flock":
+            return Mode1SceneProfile(
+                id: id,
+                shardBias: 0.88,
+                pitchBias: 0.52,
+                mutationBias: 0.50,
+                reverseBias: 0.62,
+                dropoutBias: 0.16,
+                ratchetPattern: [1, 2, 1, 2, 1, 3, 1, 2],
+                sizePatternMs: [44, 66, 88, 132, 176, 116]
+            )
+        case "spectral_melt":
+            return Mode1SceneProfile(
+                id: id,
+                shardBias: 0.58,
+                pitchBias: 0.66,
+                mutationBias: 0.94,
+                reverseBias: 0.30,
+                dropoutBias: 0.20,
+                ratchetPattern: [1, 1, 1, 2, 1, 2, 1, 3],
+                sizePatternMs: [86, 112, 148, 220, 320, 164]
+            )
+        case "void_strobe":
+            return Mode1SceneProfile(
+                id: id,
+                shardBias: 0.98,
+                pitchBias: 0.20,
+                mutationBias: 0.72,
+                reverseBias: 0.74,
+                dropoutBias: 0.42,
+                ratchetPattern: [1, 3, 1, 4, 2, 1, 3, 2],
+                sizePatternMs: [28, 34, 48, 60, 74, 92]
+            )
+        default:
+            return Mode1SceneProfile(
+                id: "razor_gate",
+                shardBias: 0.86,
+                pitchBias: 0.44,
+                mutationBias: 0.56,
+                reverseBias: 0.26,
+                dropoutBias: 0.16,
+                ratchetPattern: [1, 2, 1, 1, 2, 1, 3, 1],
+                sizePatternMs: [34, 48, 64, 96, 120, 76]
+            )
+        }
+    }
+
+    private func mode1UpdatePitchTracker(_ input: Float) {
+        mode1PitchZeroCrossCount += 1
+        if mode1PitchPrevInput <= 0, input > 0 {
+            let interval = mode1PitchZeroCrossCount
+            mode1PitchZeroCrossCount = 0
+            let minI = Int(sampleRate / 800.0)
+            let maxI = Int(sampleRate / 70.0)
+            if interval >= minI, interval <= maxI {
+                let hz = sampleRate / Float(interval)
+                let jitter = abs(Float(interval - mode1PitchLastCross))
+                let confTarget = max(0, min(1, 1.0 - (jitter / max(1, Float(interval)))))
+                mode1PitchHz += 0.18 * (hz - mode1PitchHz)
+                mode1PitchConf += 0.18 * (confTarget - mode1PitchConf)
+                mode1PitchLastCross = interval
+            } else {
+                mode1PitchConf *= 0.93
+            }
+        } else {
+            mode1PitchConf *= 0.999
+        }
+        mode1PitchPrevInput = input
+    }
+
+    private func mode1CaptureRecentSlice(gridSamples: Int, energyFloor: Float) {
+        let desired = max(gridSamples, min(Int(sampleRate * 1.2), gridSamples * 3))
+        let start = mode1Write - desired
+        let energy = mode1CaptureWindowEnergy(start: start, length: desired)
+        mode1CaptureEnergy = energy
+        if energy < energyFloor {
+            mode1CaptureValid = mode1HasValidSlice
+            return
+        }
+        var slice = [Float](repeating: 0, count: desired)
+        for i in 0..<desired {
+            slice[i] = mode1Buffer[mode1WrappedIndex(start + i)]
+        }
+        mode1CaptureSliceBuffer = slice
+        mode1LastValidSliceStart = 0
+        mode1LastValidSliceLength = desired
+        mode1HasValidSlice = !slice.isEmpty
+        mode1CaptureValid = mode1HasValidSlice
+    }
+
+    private func mode1RenderSceneVoice(_ voice: inout Mode1SceneVoice) -> Float {
+        guard voice.active, !mode1CaptureSliceBuffer.isEmpty else {
+            voice.active = false
+            return 0
+        }
+        let raw = mode1CaptureSampleLinear(voice.position)
+        let fadeIn = min(1.0, Float(voice.age) / Float(max(1, voice.fadeInSamples)))
+        let remaining = max(0, voice.length - voice.age)
+        let fadeOut = min(1.0, Float(remaining) / Float(max(1, voice.fadeOutSamples)))
+        let env = min(fadeIn, fadeOut)
+        let out = raw * env * voice.gain
+
+        voice.position += voice.rate
+        let countF = Float(mode1CaptureSliceBuffer.count)
+        if countF > 1 {
+            if voice.position < 0 {
+                voice.position += countF
+            } else if voice.position >= countF {
+                voice.position -= countF
+            }
+        } else {
+            voice.position = 0
+        }
+        voice.age += 1
+        if voice.age >= voice.length {
+            voice.active = false
+        }
+        return out
+    }
+
+    private func mode1SceneIntervals(sceneId: String) -> [Int] {
+        switch sceneId {
+        case "arp_shred": return [0, 4, 7, 12]
+        case "spectral_melt": return [0, 3, 7, 10]
+        case "databend": return [0, 1, 4, 7, 11]
+        case "void_strobe": return [0, 7, 10]
+        default: return [0, 2, 5, 7, 10]
+        }
+    }
+
+    private func mode1SpawnShardVoice(
+        profile: Mode1SceneProfile,
+        cursor: Int,
+        gridSamples: Int,
+        activityNorm: Float,
+        onsetNorm: Float,
+        ratchetIndex: Int,
+        interventions: inout SafetyInterventions
+    ) {
+        guard mode1HasValidSlice, !mode1CaptureSliceBuffer.isEmpty else { return }
+        let fracture = max(0, min(1, mode1MacroFracture + (0.30 * mode1JoltBoost)))
+        let voiceCap = max(2, min(mode1ShardVoices.count, Int(3 + floor(fracture * 7.0))))
+        let activeCount = mode1ShardVoices.reduce(into: 0) { $0 += ($1.active ? 1 : 0) }
+        guard activeCount < voiceCap, let slot = mode1ShardVoices.firstIndex(where: { !$0.active }) else {
+            interventions.insert(.voiceCap)
+            return
+        }
+
+        let patternMs = profile.sizePatternMs[(cursor + ratchetIndex) % profile.sizePatternMs.count]
+        let ratchetScale: Float = ratchetIndex == 0 ? 1.0 : max(0.30, 0.72 - 0.16 * Float(ratchetIndex))
+        let sizeMs = max(68.0, patternMs * (0.90 + (0.50 * (1.0 - fracture))) * ratchetScale)
+        let sliceFrames = max(24, min(mode1CaptureSliceBuffer.count - 1, Int((sizeMs / 1_000.0) * sampleRate)))
+        guard sliceFrames > 12 else { return }
+
+        let maxOffset = max(1, mode1CaptureSliceBuffer.count - sliceFrames - 1)
+        let shaped = 0.5 + 0.5 * sinf(Float(cursor + 1) * 1.618_033_9)
+        var start = Int(Float(maxOffset) * shaped)
+        let jitterSpan = Int(Float(max(8, sliceFrames / 3)) * (0.15 + 0.85 * fracture))
+        start += Int((randomUnit() * 2.0 - 1.0) * Float(jitterSpan))
+        start = max(0, min(maxOffset, start))
+        start = mode1CaptureNearestZeroCross(start, radius: max(8, sliceFrames / 4))
+        var end = start + sliceFrames
+        end = max(start + 12, min(mode1CaptureSliceBuffer.count - 1, end))
+        end = mode1CaptureNearestZeroCross(end, radius: max(8, sliceFrames / 4))
+        if end <= start + 8 {
+            end = min(mode1CaptureSliceBuffer.count - 1, start + max(12, sliceFrames / 2))
+        }
+
+        let reverseProb = min(0.55, profile.reverseBias * 0.70 + (0.24 * fracture) + (0.10 * onsetNorm))
+        let reverse = randomUnit() < reverseProb
+        var rate = (0.94 + 0.12 * randomUnit()) + ((randomUnit() * 2.0 - 1.0) * (0.05 + 0.26 * fracture))
+        rate = max(0.55, min(1.85, rate))
+        let rawLength = Int(Float(max(16, end - start)) / max(0.25, abs(rate)))
+        let length = max(56, min(Int(sampleRate * 0.9), rawLength))
+        let gainBase = 0.08 + (0.26 * activityNorm) + (0.15 * fracture)
+        let gain = max(0.03, min(0.96, gainBase * (0.82 + 0.24 * randomUnit()) * ratchetScale))
+
+        mode1ShardVoices[slot].reset(
+            start: start,
+            end: end,
+            reverse: reverse,
+            rate: rate,
+            gain: gain,
+            length: length,
+            fadeInSamples: max(20, min(120, sliceFrames / 2)),
+            fadeOutSamples: max(28, min(180, sliceFrames / 2)),
+            lanePan: -0.35 + (0.70 * randomUnit())
+        )
+    }
+
+    private func mode1SpawnPitchVoice(
+        profile: Mode1SceneProfile,
+        cursor: Int,
+        gridSamples: Int,
+        activityNorm: Float,
+        interventions: inout SafetyInterventions
+    ) {
+        guard mode1HasValidSlice, !mode1CaptureSliceBuffer.isEmpty else { return }
+        let pitchLock = max(0, min(1, mode1MacroPitchLock))
+        let voiceCap = max(1, min(mode1PitchVoices.count, Int(1 + floor(pitchLock * 4.0))))
+        let activeCount = mode1PitchVoices.reduce(into: 0) { $0 += ($1.active ? 1 : 0) }
+        guard activeCount < voiceCap, let slot = mode1PitchVoices.firstIndex(where: { !$0.active }) else {
+            interventions.insert(.voiceCap)
+            return
+        }
+
+        let baseMs: Float = 90.0 + (180.0 * (1.0 - mode1MacroFracture))
+        let sliceFrames = max(36, min(mode1CaptureSliceBuffer.count - 1, Int((baseMs / 1_000.0) * sampleRate)))
+        guard sliceFrames > 16 else { return }
+        let maxOffset = max(1, mode1CaptureSliceBuffer.count - sliceFrames - 1)
+        var start = Int((0.5 + 0.5 * cosf(Float(cursor + 3) * 1.143)) * Float(maxOffset))
+        start = max(0, min(maxOffset, start))
+        start = mode1CaptureNearestZeroCross(start, radius: max(12, sliceFrames / 3))
+        var end = max(start + 16, min(mode1CaptureSliceBuffer.count - 1, start + sliceFrames))
+        end = mode1CaptureNearestZeroCross(end, radius: max(12, sliceFrames / 3))
+        if end <= start + 10 {
+            end = min(mode1CaptureSliceBuffer.count - 1, start + max(16, sliceFrames / 2))
+        }
+
+        let pitchTracked = mode1PitchConf > 0.28
+        let detectedMidi = pitchTracked ? (69.0 + (12.0 * log2(max(30.0, mode1PitchHz) / 440.0))) : Float(60 + ((cursor % 12) - 6))
+        let lockStrength = pitchTracked ? pitchLock * max(0, min(1, (mode1PitchConf - 0.24) / 0.76)) : (pitchLock * 0.35)
+        let intervals = mode1SceneIntervals(sceneId: profile.id)
+        let targetMidi = nearestChordMidi(
+            targetMidi: Int(detectedMidi.rounded()),
+            rootMidi: 60,
+            intervals: intervals
+        )
+        let detune = (randomUnit() * 2.0 - 1.0) * (1.0 - lockStrength) * 6.0
+        let semitoneDelta = (Float(targetMidi) - detectedMidi) * lockStrength + detune
+        let rate = max(0.30, min(2.8, powf(2.0, semitoneDelta / 12.0) * (0.92 + 0.20 * randomUnit())))
+        let length = max(32, min(Int(sampleRate * 1.2), Int(Float(max(16, end - start)) / max(0.25, abs(rate)))))
+        let reverse = randomUnit() < (0.04 + 0.18 * profile.reverseBias)
+        let gain = max(0.02, min(0.70, (0.08 + (0.22 * activityNorm) + (0.16 * pitchLock)) * (0.80 + 0.25 * randomUnit())))
+
+        mode1PitchVoices[slot].reset(
+            start: start,
+            end: end,
+            reverse: reverse,
+            rate: rate,
+            gain: gain,
+            length: length,
+            fadeInSamples: max(18, min(120, sliceFrames / 2)),
+            fadeOutSamples: max(24, min(180, sliceFrames / 2)),
+            lanePan: -0.20 + (0.40 * randomUnit())
+        )
+    }
+
+    private func mode1ScheduleSceneEvents(
+        profile: Mode1SceneProfile,
+        gridSamples: Int,
+        activityNorm: Float,
+        onsetNorm: Float,
+        interventions: inout SafetyInterventions
+    ) {
+        guard mode1HasValidSlice else { return }
+        let stepHz = sampleRate / Float(max(1, gridSamples))
+        let sceneRate = Float(max(0.25, min(12.0, controlCurrent.mode1SceneRateHz)))
+        let fracture = max(0, min(1, mode1MacroFracture + (0.30 * mode1JoltBoost)))
+        let eventsPerStep = sceneRate / max(0.25, stepHz)
+        let activityGain = 0.72 + (0.52 * activityNorm) + (0.22 * onsetNorm)
+        mode1SceneEventAccumulator += eventsPerStep * activityGain * (0.48 + (1.02 * fracture)) * profile.shardBias
+        mode1SceneEventAccumulator = min(5.0, mode1SceneEventAccumulator)
+
+        var spawnBudget = Int(mode1SceneEventAccumulator)
+        mode1SceneEventAccumulator -= Float(spawnBudget)
+        spawnBudget = max(0, min(2, spawnBudget))
+        if spawnBudget == 0 && mode1State == .live && (activityNorm > 0.25 || onsetNorm > 0.50) && mode1SceneEventAccumulator > 0.35 {
+            spawnBudget = 1
+        }
+
+        for _ in 0..<spawnBudget {
+            let cursor = mode1SceneCursor
+            mode1SceneCursor += 1
+            let dropoutChance = max(0.0, min(0.90, profile.dropoutBias + (0.26 * (1.0 - activityNorm)) - (0.24 * fracture)))
+            if randomUnit() < dropoutChance {
+                continue
+            }
+            mode1SpawnShardVoice(
+                profile: profile,
+                cursor: cursor,
+                gridSamples: gridSamples,
+                activityNorm: activityNorm,
+                onsetNorm: onsetNorm,
+                ratchetIndex: 0,
+                interventions: &interventions
+            )
+
+            let maxRatchet = mode1MacroFracture > 0.82 ? 3 : 2
+            let ratchet = min(maxRatchet, max(1, profile.ratchetPattern[cursor % profile.ratchetPattern.count]))
+            if ratchet > 1 {
+                for i in 1..<ratchet {
+                    mode1SpawnShardVoice(
+                        profile: profile,
+                        cursor: cursor + i,
+                        gridSamples: gridSamples,
+                        activityNorm: activityNorm,
+                        onsetNorm: onsetNorm,
+                        ratchetIndex: i,
+                        interventions: &interventions
+                    )
+                }
+            }
+
+            let pitchChance = max(0.0, min(0.95, profile.pitchBias * (0.12 + (0.88 * mode1MacroPitchLock))))
+            if randomUnit() < pitchChance {
+                mode1SpawnPitchVoice(
+                    profile: profile,
+                    cursor: cursor,
+                    gridSamples: gridSamples,
+                    activityNorm: activityNorm,
+                    interventions: &interventions
+                )
+            }
+        }
+    }
+
+    private func mode1SpectralCarrierFrequencies(sceneId: String) -> [Float] {
+        switch sceneId {
+        case "databend": return [37, 121, 268, 712]
+        case "arp_shred": return [52, 156, 312, 624]
+        case "reverse_flock": return [29, 98, 246, 534]
+        case "spectral_melt": return [24, 82, 214, 468]
+        case "void_strobe": return [61, 187, 421, 910]
+        default: return [42, 134, 286, 602]
+        }
+    }
+
+    private func mode1ApplyMutation(sample: Float, profile: Mode1SceneProfile, gridSamples: Int, activityNorm: Float) -> Float {
+        var mutation = max(0, min(1, mode1MacroMutation + (0.26 * mode1JoltBoost)))
+        mutation = max(0, min(1, mutation))
+        let fracture = max(0, min(1, mode1MacroFracture + (0.20 * mode1JoltBoost)))
+        if mutation <= 0.0001 {
+            mode1MutationSmooth += 0.08 * (sample - mode1MutationSmooth)
+            mode1MutationFeedbackSmooth += 0.05 * (sample - mode1MutationFeedbackSmooth)
+            return sample
+        }
+
+        let holdBase = max(1, Int(Float(gridSamples) * (0.01 + 0.22 * mutation)))
+        if mode1MutationHoldSamplesRemaining <= 0 {
+            let jitter = Int((randomUnit() * 2.0 - 1.0) * Float(max(1, holdBase / 4)))
+            mode1MutationHoldSamplesRemaining = max(1, holdBase + jitter)
+            mode1MutationHeld = sample
+        } else {
+            mode1MutationHoldSamplesRemaining -= 1
+        }
+        mode1MutationSmooth += (0.05 + 0.24 * mutation) * (mode1MutationHeld - mode1MutationSmooth)
+
+        let fbHoldBase = max(1, Int(Float(gridSamples) * (0.02 + 0.18 * mutation)))
+        if mode1MutationFeedbackHoldSamplesRemaining <= 0 {
+            let jitter = Int((randomUnit() * 2.0 - 1.0) * Float(max(1, fbHoldBase / 5)))
+            mode1MutationFeedbackHoldSamplesRemaining = max(1, fbHoldBase + jitter)
+            mode1MutationFeedbackHeld = mode1MutationSmooth
+        } else {
+            mode1MutationFeedbackHoldSamplesRemaining -= 1
+        }
+        mode1MutationFeedbackSmooth += (0.05 + 0.18 * mutation) * (mode1MutationFeedbackHeld - mode1MutationFeedbackSmooth)
+
+        mode1MutationRingPhase += 0.00028 + (0.0038 * mutation) + (0.0014 * profile.mutationBias)
+        if mode1MutationRingPhase > 1 { mode1MutationRingPhase -= 1 }
+        let ringCarrier = sinf(mode1MutationRingPhase * 2.0 * .pi)
+        let ringed = mode1MutationSmooth * ringCarrier
+
+        let foldDrive = 1.2 + (4.6 * (mutation + (0.4 * profile.mutationBias)))
+        let folded = tanhf(mode1MutationSmooth * foldDrive)
+        let foldedWrap = (2.0 / Float.pi) * asinf(max(-0.999, min(0.999, folded)))
+
+        let lowCut = 220.0 + (180.0 * profile.mutationBias) + (200.0 * fracture)
+        let lowMidCut = 1_000.0 + (1_200.0 * mutation) + (500.0 * profile.shardBias)
+        let highMidCut = 3_400.0 + (2_800.0 * fracture)
+        let lowAlpha = onePoleAlpha(cutoffHz: lowCut, sampleRate: sampleRate)
+        let lowMidAlpha = onePoleAlpha(cutoffHz: lowMidCut, sampleRate: sampleRate)
+        let highMidAlpha = onePoleAlpha(cutoffHz: highMidCut, sampleRate: sampleRate)
+        mode1SpectralLP1 += lowAlpha * (mode1MutationSmooth - mode1SpectralLP1)
+        mode1SpectralLP2 += lowMidAlpha * (mode1MutationSmooth - mode1SpectralLP2)
+        mode1SpectralLP3 += highMidAlpha * (mode1MutationSmooth - mode1SpectralLP3)
+
+        var bands = [Float](repeating: 0, count: 4)
+        bands[0] = mode1SpectralLP1
+        bands[1] = mode1SpectralLP2 - mode1SpectralLP1
+        bands[2] = mode1SpectralLP3 - mode1SpectralLP2
+        bands[3] = mode1MutationSmooth - mode1SpectralLP3
+
+        let baseHold = max(8, Int(Float(gridSamples) * (0.05 + 0.20 * (1.0 - mutation))))
+        let holdDivs: [Float] = [1.0, 0.72, 0.54, 0.36]
+        let baseFreqs = mode1SpectralCarrierFrequencies(sceneId: profile.id)
+        var spectral = Float(0)
+        for i in 0..<4 {
+            if mode1SpectralHoldRemaining[i] <= 0 {
+                let jitter = Int((randomUnit() * 2.0 - 1.0) * Float(max(1, baseHold / 3)))
+                let hold = Int(Float(baseHold) * holdDivs[i])
+                mode1SpectralHoldRemaining[i] = max(1, hold + jitter)
+                mode1SpectralHeldBands[i] = bands[i]
+            } else {
+                mode1SpectralHoldRemaining[i] -= 1
+            }
+
+            let smooth = 0.04 + (0.22 * mutation)
+            mode1SpectralSmoothBands[i] += smooth * (mode1SpectralHeldBands[i] - mode1SpectralSmoothBands[i])
+
+            let carrierHz = baseFreqs[i] * (0.70 + 0.74 * fracture + 0.28 * profile.reverseBias)
+            mode1SpectralCarrierPhase[i] += carrierHz / sampleRate
+            if mode1SpectralCarrierPhase[i] >= 1 {
+                mode1SpectralCarrierPhase[i] -= floorf(mode1SpectralCarrierPhase[i])
+            }
+            let carrier = sinf(mode1SpectralCarrierPhase[i] * 2.0 * .pi)
+            let amBand = mode1SpectralSmoothBands[i] * (0.30 + (0.70 * carrier))
+            let laneMix = max(0.0, min(0.96, 0.34 + (0.54 * mutation) + (0.22 * profile.mutationBias)))
+            var lane = bands[i] * (1.0 - laneMix) + amBand * laneMix
+
+            if i == 0 {
+                lane *= 1.05 - (0.28 * mutation)
+            } else if i == 1 {
+                lane *= 0.94 + (0.18 * (1.0 - activityNorm))
+            } else if i == 2 {
+                lane *= 0.98 + (0.30 * mutation)
+            } else {
+                lane *= 1.08 + (0.74 * mutation) + (0.24 * profile.mutationBias)
+            }
+            spectral += lane
+        }
+
+        mode1SpectralFeedback += 0.08 * ((spectral + (mode1MutationFeedbackSmooth * (0.08 + 0.20 * mutation))) - mode1SpectralFeedback)
+        spectral += mode1SpectralFeedback * (0.14 + 0.36 * mutation)
+
+        let lpAlpha = onePoleAlpha(cutoffHz: max(120.0, 2_800.0 - (2_000.0 * mutation)), sampleRate: sampleRate)
+        mode1MutationLP += lpAlpha * (sample - mode1MutationLP)
+        let hpAlpha = hpfAlpha(fc: 280.0 + (3_200.0 * mutation), sampleRate: sampleRate)
+        mode1MutationHP = hpAlpha * (mode1MutationHP + sample - mode1MutationPrev)
+        mode1MutationPrev = sample
+        let tilt = (mode1MutationLP * (1.0 - mutation)) + (mode1MutationHP * mutation)
+
+        let color = (0.46 * spectral) + (0.26 * foldedWrap) + (0.14 * ringed) + (0.14 * tilt)
+        let mixAmount = max(0.0, min(0.97, 0.54 + (0.36 * mutation) + (0.12 * profile.mutationBias)))
+        var out = (sample * (1.0 - mixAmount)) + (color * mixAmount)
+        out += mode1MutationFeedbackSmooth * (0.05 + 0.16 * mutation)
+        return tanhf(out * (1.0 + 0.75 * mutation))
+    }
+
+    private func mode1SetState(_ next: Mode1GlitchState, source: String) {
+        mode1State = next
+        mode1LastTriggerSource = source
+        switch next {
+        case .live:
+            mode1FadeSamplesRemaining = 0
+            mode1FadeGain = 1
+        case .hold:
+            mode1FadeSamplesRemaining = 0
+            mode1FadeGain = 1
+        case .fade:
+            mode1HoldSamplesRemaining = 0
+        case .mute:
+            mode1HoldSamplesRemaining = 0
+            mode1FadeSamplesRemaining = 0
+            mode1FadeGain = 0
+            for i in mode1ShardVoices.indices { mode1ShardVoices[i].active = false }
+            for i in mode1PitchVoices.indices { mode1PitchVoices[i].active = false }
+            mode1SpectralFeedback = 0
+            for i in mode1SpectralHoldRemaining.indices {
+                mode1SpectralHoldRemaining[i] = 0
+                mode1SpectralHeldBands[i] = 0
+                mode1SpectralSmoothBands[i] = 0
+            }
+            mode1SceneEventAccumulator = 0
+        }
     }
 
     private func updateMode1Spatial(step: Int) {
@@ -2307,152 +5019,175 @@ private final class MasterRenderState {
         }
     }
 
-    private func processMode1(input: Float, interventions: inout SafetyInterventions) -> Float {
-        let feedbackAmount = min(max(Float(controlCurrent.thresholdBias), 0), 1)
-        let feedbackWrite = mode1FeedbackLP * (0.02 + 0.08 * feedbackAmount)
+    private func processMode1(input: Float, analysisInput: Float, interventions: inout SafetyInterventions) -> Float {
+        let gridSamples = max(64, mode1GridSamples())
+        let fractureBase = max(0, min(1, Float(controlCurrent.mode1Fracture)))
+        let mutationBase = max(0, min(1, Float(controlCurrent.mode1Mutation)))
+        let pitchLockBase = max(0, min(1, Float(controlCurrent.mode1PitchLock)))
+        mode1MacroFracture = min(1.0, fractureBase + (0.30 * mode1JoltBoost))
+        mode1MacroMutation = mutationBase
+        mode1MacroPitchLock = pitchLockBase
+        mode1HoldTargetSamples = Int(sampleRate * Float(max(6.0, min(12.0, controlCurrent.mode1HoldLenSec))))
+        mode1TailFadeTargetSamples = max(1, Int((Float(max(150.0, min(1_200.0, controlCurrent.mode1TailFadeMs))) / 1_000.0) * sampleRate))
+        mode1JoltBoost *= 0.998
+
+        let clearEdge = controlCurrent.mode1ClearRequest && !mode1PrevClearRequest
+        let joltEdge = controlCurrent.mode1JoltRequest && !mode1PrevJoltRequest
+        mode1PrevClearRequest = controlCurrent.mode1ClearRequest
+        mode1PrevJoltRequest = controlCurrent.mode1JoltRequest
+
+        if clearEdge {
+            if mode1State != .mute {
+                mode1FadeSamplesRemaining = max(1, mode1TailFadeTargetSamples)
+                mode1FadeGain = 1
+                mode1SetState(.fade, source: "clear")
+            }
+            interventions.insert(.resetVoices)
+        }
+        if joltEdge {
+            mode1JoltBoost = max(mode1JoltBoost, 0.45)
+            mode1AdvanceScene(repeatStyleId: controlCurrent.repeatStyleId)
+            mode1LastTriggerSource = "jolt"
+            mode1SceneCursor += 1
+        }
+
+        let resolvedScene = mode1ResolveSceneId(baseSceneId: controlCurrent.mode1SceneId, repeatStyleId: controlCurrent.repeatStyleId)
+        if resolvedScene != mode1SceneId {
+            mode1SceneId = resolvedScene
+            mode1SceneCursor = 0
+            mode1LastTriggerSource = "scene_select"
+        }
+        let profile = mode1SceneProfile(for: mode1SceneId)
+
+        let feedbackWrite = mode1MutationFeedbackSmooth * (0.02 + 0.10 * mode1MacroMutation)
         mode1Buffer[mode1Write] = input + feedbackWrite
         mode1Write += 1
         if mode1Write >= mode1Buffer.count { mode1Write = 0 }
 
         mode1Clock.advance()
-        mode1TransientDuck *= 0.9962
-        mode1DryAttackBoost *= 0.9930
-        mode1FeedbackLP *= 0.9994
+        mode1TransientDuck *= 0.996
+        mode1DryAttackBoost *= 0.993
+        mode1FeedbackLP *= 0.997
+        mode1UpdatePitchTracker(analysisInput)
 
-        let delta = abs(input - mode1PrevInput)
-        mode1PrevInput = input
-        mode1Env += 0.004 * (abs(input) - mode1Env)
+        let delta = abs(analysisInput - mode1PrevInput)
+        mode1PrevInput = analysisInput
+        mode1Env += 0.0045 * (abs(analysisInput) - mode1Env)
 
-        if mode1Scheduler.cooldownSamples > 0 {
-            mode1Scheduler.cooldownSamples -= 1
-        }
+        let envOpen = 0.010 + (0.038 * mode1MacroFracture)
+        let envClose = envOpen * 0.62
+        let transientOpen = 0.003 + (0.028 * mode1MacroFracture)
+        let transientClose = transientOpen * 0.40
+        let isAttack = (mode1Env >= envOpen) || (delta >= transientOpen)
+        let isSilentSample = (mode1Env < envClose) && (delta < transientClose)
+        let onsetNorm = max(0, min(1, (delta - transientClose) / max(0.0001, transientOpen * 2.1)))
+        let activityNorm = max(0, min(1, (mode1Env - envClose) / max(0.0001, envOpen - envClose)))
 
-        let gridSamples = mode1GridSamples()
-        let step = Int(sampleCounter / Int64(max(1, gridSamples)))
-        if step != mode1Scheduler.boundaryStep {
-            mode1Scheduler.boundaryStep = step
-            mode1Scheduler.patternStep += 1
-            mode1Scheduler.barStepCounter = (mode1Scheduler.barStepCounter + 1) % mode1StepsPerBar()
-            updateMode1Spatial(step: mode1Scheduler.patternStep)
-            if mode1Scheduler.pendingTrigger, mode1Scheduler.cooldownSamples <= 0 {
-                startMode1Repeat(gridSamples: gridSamples, triggerStrength: 1.0)
-            } else if !mode1Scheduler.active, mode1Scheduler.cooldownSamples <= 0 {
-                let repeatsPerBar = 0.8 + (5.2 * Float(controlCurrent.repeatProb))
-                let stepProb = min(0.95, repeatsPerBar / Float(max(1, mode1StepsPerBar())))
-                let loudnessGate = min(1.0, max(0.22, mode1Env * 20.0))
-                if randomUnit() < (stepProb * loudnessGate * 0.10) {
-                    startMode1Repeat(gridSamples: gridSamples, triggerStrength: 0.72)
+        if isAttack {
+            mode1SilenceSamples = 0
+            let minOnsetGap = Int64(sampleRate * 0.055)
+            if mode1LastOnsetSample < 0 || (sampleCounter - mode1LastOnsetSample) >= minOnsetGap {
+                if mode1LastOnsetSample >= 0 {
+                    let interval = Int(sampleCounter - mode1LastOnsetSample)
+                    let minInterval = Int(sampleRate * 0.20)
+                    let maxInterval = Int(sampleRate * 1.8)
+                    if interval >= minInterval && interval <= maxInterval {
+                        mode1Clock.noteOnset(intervalSamples: interval, sampleRate: sampleRate)
+                    } else {
+                        mode1Clock.noteUntrustedOnset()
+                    }
                 }
+                mode1LastOnsetSample = sampleCounter
+                mode1TransientDuck = max(mode1TransientDuck, 0.55 + 0.45 * onsetNorm)
+                mode1DryAttackBoost = max(mode1DryAttackBoost, 0.45 + 0.55 * onsetNorm)
             }
-        }
-
-        let threshold = 0.007 + (0.050 * feedbackAmount) + (0.036 * Float(controlCurrent.gateSharpness))
-        let loudEnough = mode1Env > (0.018 + 0.085 * feedbackAmount)
-        let minOnsetGap = Int64(sampleRate * 0.06)
-        if loudEnough, delta > threshold, (mode1LastOnsetSample < 0 || (sampleCounter - mode1LastOnsetSample) >= minOnsetGap) {
-            if mode1LastOnsetSample >= 0 {
-                let interval = Int(sampleCounter - mode1LastOnsetSample)
-                let minInterval = Int(sampleRate * 0.20)
-                let maxInterval = Int(sampleRate * 1.8)
-                if interval >= minInterval && interval <= maxInterval {
-                    mode1Clock.noteOnset(intervalSamples: interval, sampleRate: sampleRate)
-                } else {
-                    mode1Clock.noteUntrustedOnset()
-                }
-            } else {
-                mode1Clock.confidenceDecay()
-            }
-            mode1LastOnsetSample = sampleCounter
-            let onsetStrength = min(1.0, max(0.0, (delta - threshold) / (threshold * 2.2 + 0.001)))
-            mode1TransientDuck = max(mode1TransientDuck, 0.70 + 0.30 * onsetStrength)
-            mode1DryAttackBoost = max(mode1DryAttackBoost, 0.62 + 0.38 * onsetStrength)
-            let triggerProb = (0.20 + 0.72 * Float(controlCurrent.repeatProb)) * (0.35 + 0.65 * mode1Clock.confidence)
-            if randomUnit() < triggerProb {
-                mode1Scheduler.pendingTrigger = true
+            if mode1State != .live {
+                mode1SetState(.live, source: "attack")
             }
         } else {
             mode1Clock.confidenceDecay()
+            if isSilentSample {
+                mode1SilenceSamples += 1
+            } else {
+                mode1SilenceSamples = max(0, mode1SilenceSamples - 4)
+            }
         }
 
-        var wet: Float = 0
-        if mode1Scheduler.active, mode1Scheduler.repeatLength > 0 {
-            let raw = mode1SampleLinear(mode1Scheduler.sliceReadHead)
-            let phase = Float(mode1Scheduler.slicePos) / Float(max(1, mode1Scheduler.sliceLength))
-            let p = min(max(phase, 0), 1)
-            let hann = 0.5 - 0.5 * cosf(2.0 * .pi * p)
-            let blackman = 0.42 - 0.5 * cosf(2.0 * .pi * p) + 0.08 * cosf(4.0 * .pi * p)
-            var sliceWet = raw * ((0.62 * hann) + (0.38 * blackman))
-            let crossfadeSamples = max(12, min(mode1Scheduler.sliceLength / 8, Int(sampleRate * 0.004)))
-            if mode1Scheduler.slicePos < crossfadeSamples {
-                let t = Float(mode1Scheduler.slicePos) / Float(max(1, crossfadeSamples))
-                sliceWet = (mode1Scheduler.lastSliceTailSample * (1.0 - t)) + (sliceWet * t)
+        let silenceTriggerSamples = Int(sampleRate * 0.09)
+        if mode1State == .live && mode1SilenceSamples >= silenceTriggerSamples {
+            if mode1HasValidSlice {
+                mode1HoldSamplesRemaining = mode1HoldTargetSamples
+                mode1SetState(.hold, source: "silence")
+            } else {
+                mode1SetState(.mute, source: "silence_no_slice")
             }
-            let pulseCount = max(
-                1,
-                Int(1 + round(3.0 * Float(controlCurrent.gateSharpness))) + (controlCurrent.repeatStyleId == "stutter_b" ? 1 : 0)
-            )
-            let pulsePhase = (phase * Float(pulseCount)).truncatingRemainder(dividingBy: 1.0)
-            let pulseDuty: Float = max(0.18, 0.58 - 0.30 * Float(controlCurrent.gateSharpness))
-            let gate: Float = pulsePhase < pulseDuty ? 1.0 : 0.20
-            wet = sliceWet * gate * mode1Scheduler.repeatGain
-
-            mode1Scheduler.slicePos += 1
-            mode1Scheduler.sliceReadHead += mode1Scheduler.sliceStep
-            if mode1Scheduler.sliceReadHead < 0 {
-                mode1Scheduler.sliceReadHead += Float(mode1Buffer.count)
-            } else if mode1Scheduler.sliceReadHead >= Float(mode1Buffer.count) {
-                mode1Scheduler.sliceReadHead -= Float(mode1Buffer.count)
+        }
+        if mode1State == .hold {
+            mode1HoldSamplesRemaining -= 1
+            if mode1HoldSamplesRemaining <= 0 {
+                mode1FadeSamplesRemaining = max(1, mode1TailFadeTargetSamples)
+                mode1FadeGain = 1
+                mode1SetState(.fade, source: "hold_timeout")
             }
-            mode1Scheduler.repeatSamplesRemaining -= 1
-            mode1Scheduler.continuousRepeatSamples += 1
-            let regen = 0.9990 + (0.0008 * feedbackAmount)
-            mode1Scheduler.repeatGain = min(1.12, mode1Scheduler.repeatGain * regen)
-
-            if mode1Scheduler.slicePos >= mode1Scheduler.sliceLength {
-                mode1Scheduler.slicePos = 0
-                mode1Scheduler.lastSliceTailSample = wet
-                let quantum = max(16, mode1Scheduler.sliceLength)
-                let maxSlices = max(1, mode1Scheduler.repeatLength / quantum)
-                let jumpTableA: [Int] = [0, 1, 0, 2, 1, 0, 3, 1, 2, 0, 1, 2, 3, 1, 0, 2]
-                let jumpTableB: [Int] = [0, 2, 4, 1, 5, 3, 6, 2, 7, 4, 1, 6, 3, 7, 2, 5]
-                let table = controlCurrent.repeatStyleId == "stutter_b" ? jumpTableB : jumpTableA
-                let jump = table[mode1Scheduler.sliceJumpIndex % table.count]
-                mode1Scheduler.sliceJumpIndex += 1
-                let jitterSpan = 1 + Int(2.0 * Float(controlCurrent.gateSharpness))
-                let jitter = Int((randomUnit() * 2.0 - 1.0) * Float(jitterSpan))
-                let currentSlice = max(0, mode1Scheduler.repeatPos / quantum)
-                let nextSlice = (currentSlice + jump + jitter + (maxSlices * 8)) % maxSlices
-                mode1Scheduler.repeatPos = nextSlice * quantum
-                if controlCurrent.repeatStyleId == "stutter_b" {
-                    mode1Scheduler.repeatGain *= 0.97 + 0.06 * feedbackAmount
-                } else {
-                    mode1Scheduler.repeatGain *= 0.95 + 0.08 * feedbackAmount
-                }
-                resetMode1SliceReadHead(gridSamples: gridSamples)
+        } else if mode1State == .fade {
+            if mode1FadeSamplesRemaining > 0 {
+                mode1FadeSamplesRemaining -= 1
+                mode1FadeGain = Float(mode1FadeSamplesRemaining) / Float(max(1, mode1TailFadeTargetSamples))
+            } else {
+                mode1SetState(.mute, source: "fade_done")
             }
-
-            if mode1Scheduler.continuousRepeatSamples > Int(sampleRate * 6.0) {
-                mode1Scheduler.active = false
-                mode1Scheduler.continuousRepeatSamples = 0
-                mode1Scheduler.repeatGain = 0
-                mode1Scheduler.cooldownSamples = Int(sampleRate * 2.0)
-                interventions.insert(.densityCap)
-            }
-
-            if mode1Scheduler.repeatSamplesRemaining <= 0 {
-                mode1Scheduler.active = false
-                mode1Scheduler.continuousRepeatSamples = 0
-                mode1Scheduler.repeatGain = 0
-                mode1Scheduler.cooldownSamples = Int(sampleRate * 0.9)
-            }
-        } else {
-            mode1Scheduler.continuousRepeatSamples = max(0, mode1Scheduler.continuousRepeatSamples - 1)
-            mode1Scheduler.pendingTrigger = false
         }
 
-        let feedbackToneAlpha = 0.020 + 0.070 * (1.0 - feedbackAmount)
-        mode1FeedbackLP += feedbackToneAlpha * (wet - mode1FeedbackLP)
-        return tanhf(wet * 1.32)
+        let step = Int(sampleCounter / Int64(max(1, gridSamples)))
+        if step != mode1BoundaryStep {
+            mode1BoundaryStep = step
+            mode1SceneCursor += 1
+            updateMode1Spatial(step: mode1SceneCursor)
+            if mode1State == .live {
+                let captureFloor = 0.0006 + (0.0022 * (1.0 - mode1MacroFracture))
+                mode1CaptureRecentSlice(gridSamples: gridSamples, energyFloor: captureFloor)
+            }
+            if mode1State == .live || mode1State == .hold || mode1State == .fade {
+                mode1ScheduleSceneEvents(
+                    profile: profile,
+                    gridSamples: gridSamples,
+                    activityNorm: activityNorm,
+                    onsetNorm: onsetNorm,
+                    interventions: &interventions
+                )
+            }
+        }
+
+        var shardWet: Float = 0
+        var pitchWet: Float = 0
+        for i in mode1ShardVoices.indices {
+            shardWet += mode1RenderSceneVoice(&mode1ShardVoices[i])
+        }
+        for i in mode1PitchVoices.indices {
+            pitchWet += mode1RenderSceneVoice(&mode1PitchVoices[i])
+        }
+
+        let shardWeight = 0.30 + (0.36 * profile.shardBias)
+        let pitchWeight = 0.20 + (0.44 * mode1MacroPitchLock * profile.pitchBias)
+        var wet = (shardWet * shardWeight) + (pitchWet * pitchWeight)
+        wet = mode1ApplyMutation(sample: wet, profile: profile, gridSamples: gridSamples, activityNorm: activityNorm)
+        if mode1State == .fade {
+            wet *= max(0, min(1, mode1FadeGain))
+        } else if mode1State == .mute {
+            wet = 0
+        }
+
+        mode1WetSmoothed += 0.28 * (wet - mode1WetSmoothed)
+        mode1FeedbackLP += 0.08 * (mode1WetSmoothed - mode1FeedbackLP)
+        mode1WetEnergyAccum += mode1WetSmoothed * mode1WetSmoothed
+        mode1WetMeterSamples += 1
+        let wetWindow = max(256, Int(sampleRate * 0.10))
+        if mode1WetMeterSamples >= wetWindow {
+            mode1WetRMS = sqrtf(mode1WetEnergyAccum / Float(max(1, mode1WetMeterSamples)))
+            mode1WetEnergyAccum = 0
+            mode1WetMeterSamples = 0
+        }
+        return tanhf(mode1WetSmoothed * 2.20)
     }
 
     private func placeMode1Object(
@@ -2471,34 +5206,267 @@ private final class MasterRenderState {
         applyGains(sample, gains: mainGains, &ch0, &ch1, &ch2, &ch3, &ch4, &ch5)
     }
 
-    private func spawnMode4Voice(input: Float) {
-        let maxVoices = max(1, min(3, Int(1 + floor(controlCurrent.interruptiveness * 2.0))))
-        if mode4ActiveVoices >= maxVoices { return }
+    private func mode4PickIndex(from values: [Int]) -> Int? {
+        guard !values.isEmpty else { return nil }
+        let idx = Int(randomUnit() * Float(values.count))
+        return values[max(0, min(values.count - 1, idx))]
+    }
 
-        guard let slot = mode4Voices.firstIndex(where: { !$0.active }) else { return }
-        let tableCount = max(1, mode4SampleTables.count)
-        let sim = Float(controlCurrent.similarityTarget)
-        let mem = max(0.35, mode4MemoryDecay)
-        var idx = Int(round(sim * Float(tableCount - 1)))
-        if controlCurrent.callResponseBias < 0.5 {
-            idx = (tableCount - 1) - idx
+    private func mode4NearestSafeCut(_ clip: Mode4SampleClip, target: Int, lower: Int, upper: Int) -> Int {
+        let lo = max(0, lower)
+        let hi = min(max(lo, upper), clip.samples.count - 1)
+        if lo >= hi { return lo }
+
+        let points = clip.analysis.safeCutPoints
+        if points.isEmpty {
+            return max(lo, min(hi, target))
         }
-        idx = max(0, min(tableCount - 1, idx))
 
-        let useResynth = randomUnit() > Float(controlCurrent.callResponseBias)
-        let source = useResynth ? 1 : 0
-        let baseLen = Int((0.12 + 0.40 * Float(controlCurrent.gestureRate)) * sampleRate)
-        let len = max(Int(sampleRate * 0.06), min(Int(sampleRate * 0.75), baseLen))
-        let gain = (0.20 + 0.70 * Float(controlCurrent.gestureLevel)) * mem
-        let panX = (randomUnit() * 2.0 - 1.0) * 0.75
-        let panY = (randomUnit() * 2.0 - 1.0) * 0.60
-        let inc: Float = useResynth ? (0.5 + 4.0 * max(0.02, abs(input))) : (0.7 + 0.8 * randomUnit())
-        mode4Voices[slot].reset(source: source, index: idx, length: len, gain: gain, panX: panX, panY: panY, increment: inc)
+        let clampedTarget = max(lo, min(hi, target))
+        var l = 0
+        var r = points.count
+        while l < r {
+            let m = (l + r) >> 1
+            if points[m] < clampedTarget {
+                l = m + 1
+            } else {
+                r = m
+            }
+        }
+
+        var best = clampedTarget
+        var bestDist = Int.max
+        for idx in [l - 1, l] where idx >= 0 && idx < points.count {
+            let point = points[idx]
+            if point < lo || point > hi { continue }
+            let dist = abs(point - clampedTarget)
+            if dist < bestDist {
+                bestDist = dist
+                best = point
+            }
+        }
+        return best
+    }
+
+    private func mode4ClipSampleLinear(_ clip: Mode4SampleClip, at frame: Float) -> Float {
+        let maxIdx = max(0, clip.samples.count - 1)
+        let f = max(0, min(Float(maxIdx), frame))
+        let i0 = Int(floorf(f))
+        let i1 = min(maxIdx, i0 + 1)
+        let frac = f - Float(i0)
+        let s0 = clip.samples[i0]
+        let s1 = clip.samples[i1]
+        return s0 + (s1 - s0) * frac
+    }
+
+    private func mode4TargetCategories(liveFeatures: Mode4LiveFeatures) -> [String] {
+        var out: [String] = []
+        if let requested = controlCurrent.categoryId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !requested.isEmpty {
+            out.append(requested)
+        }
+        if liveFeatures.brightness > 0.62 {
+            out.append("transient")
+            out.append("metal")
+            out.append("bright")
+        } else if liveFeatures.lowBand > 0.58 {
+            out.append("room")
+            out.append("general")
+            out.append("full")
+        } else {
+            out.append("general")
+            out.append("room")
+            out.append("transient")
+        }
+
+        var unique: [String] = []
+        for cat in out where !unique.contains(cat) {
+            unique.append(cat)
+        }
+        return unique
+    }
+
+    private func mode4SelectClipIndex(liveFeatures: Mode4LiveFeatures) -> Int {
+        guard !mode4SampleLibrary.isEmpty else { return -1 }
+
+        let targetCategories = mode4TargetCategories(liveFeatures: liveFeatures)
+        var pool: [Int] = []
+        for cat in targetCategories {
+            if let ids = mode4CategoryToIndices[cat] {
+                pool.append(contentsOf: ids)
+            }
+        }
+        if pool.isEmpty {
+            pool = Array(mode4SampleLibrary.indices)
+        }
+
+        let wantsCall = randomUnit() < Float(controlCurrent.callResponseBias)
+        let similarity = max(0, min(1, Float(controlCurrent.similarityTarget)))
+        let stability = max(0, min(1, Float(controlCurrent.memoryWeight)))
+        let recent = mode4RecentClipIndices
+
+        if wantsCall, let anchor = recent.last {
+            if randomUnit() < similarity {
+                return anchor
+            }
+            let anchorCategory = mode4SampleLibrary[anchor].category
+            if let sameCategory = mode4CategoryToIndices[anchorCategory], let idx = mode4PickIndex(from: sameCategory) {
+                return idx
+            }
+        }
+
+        if !wantsCall, let anchor = recent.last {
+            let anchorCategory = mode4SampleLibrary[anchor].category
+            let contrast = pool.filter { mode4SampleLibrary[$0].category != anchorCategory }
+            if !contrast.isEmpty {
+                pool = contrast
+            }
+        }
+
+        if !recent.isEmpty, randomUnit() < stability, let idx = mode4PickIndex(from: recent) {
+            return idx
+        }
+
+        return mode4PickIndex(from: pool) ?? 0
+    }
+
+    private func mode4RememberClipIndex(_ clipIndex: Int) {
+        mode4RecentClipIndices.append(clipIndex)
+        if mode4RecentClipIndices.count > 12 {
+            mode4RecentClipIndices.removeFirst(mode4RecentClipIndices.count - 12)
+        }
+    }
+
+    private func mode4SelectChunkDurationMs(liveFeatures: Mode4LiveFeatures) -> Float {
+        let stability = max(0, min(1, Float(controlCurrent.memoryWeight)))
+        let microWeight = 0.20 + 0.68 * liveFeatures.onsetNoisy
+        let mesoWeight: Float = 0.44
+        let macroWeight = 0.22 + 0.60 * stability * (1.0 - 0.45 * liveFeatures.onsetNoisy)
+        let sum = microWeight + mesoWeight + macroWeight
+        let r = randomUnit() * sum
+        if r < microWeight {
+            return 30.0 + randomUnit() * 90.0
+        }
+        if r < (microWeight + mesoWeight) {
+            return 120.0 + randomUnit() * 330.0
+        }
+        return 450.0 + randomUnit() * 750.0
+    }
+
+    private func spawnMode4Voice(liveFeatures: Mode4LiveFeatures, interventions: inout SafetyInterventions) {
+        guard !mode4SampleLibrary.isEmpty else {
+            mode4NoSamplesDryOnly = true
+            return
+        }
+
+        mode4NoSamplesDryOnly = false
+        mode4ActiveVoices = mode4Voices.reduce(into: 0) { $0 += ($1.active ? 1 : 0) }
+        let voiceCap = max(2, min(mode4Voices.count, Int(2 + floor(controlCurrent.interruptiveness * 9.0))))
+        if mode4ActiveVoices >= voiceCap {
+            interventions.insert(.voiceCap)
+            return
+        }
+
+        guard let slot = mode4Voices.firstIndex(where: { !$0.active }) else {
+            interventions.insert(.voiceCap)
+            return
+        }
+
+        let clipIndex = mode4SelectClipIndex(liveFeatures: liveFeatures)
+        guard clipIndex >= 0, clipIndex < mode4SampleLibrary.count else { return }
+        let clip = mode4SampleLibrary[clipIndex]
+        let chunkMs = mode4SelectChunkDurationMs(liveFeatures: liveFeatures)
+        let desiredFrames = max(24, min(clip.samples.count - 2, Int((chunkMs / 1_000.0) * clip.sampleRate)))
+
+        let useOnsetAnchor = !clip.analysis.onsetCandidates.isEmpty && randomUnit() < (0.20 + 0.60 * liveFeatures.onsetNoisy)
+        let anchor: Int
+        if useOnsetAnchor {
+            anchor = clip.analysis.onsetCandidates[Int(randomUnit() * Float(clip.analysis.onsetCandidates.count))]
+        } else {
+            let maxAnchor = max(0, clip.samples.count - 1)
+            anchor = Int(randomUnit() * Float(maxAnchor))
+        }
+
+        var start = anchor - (desiredFrames / 2)
+        start = max(0, min(max(0, clip.samples.count - desiredFrames - 1), start))
+        var end = min(clip.samples.count - 1, start + desiredFrames)
+        start = mode4NearestSafeCut(clip, target: start, lower: 0, upper: max(0, end - 24))
+        end = mode4NearestSafeCut(clip, target: end, lower: min(clip.samples.count - 1, start + 24), upper: clip.samples.count - 1)
+        if end - start < 24 {
+            start = max(0, min(clip.samples.count - 25, start))
+            end = min(clip.samples.count - 1, start + 24)
+        }
+
+        let reverseProb = min(0.55, 0.08 + 0.28 * liveFeatures.onsetNoisy + 0.12 * (1.0 - Float(controlCurrent.memoryWeight)))
+        let reverse = randomUnit() < reverseProb
+        let semitoneSpan = 3.0 + (6.0 * Float(controlCurrent.interruptiveness))
+        let semitone = (randomUnit() * 2.0 - 1.0) * semitoneSpan
+        let pitchRatio = powf(2.0, semitone / 12.0)
+        let stretch = 0.70 + randomUnit() * 0.95
+        let rate = max(0.30, min(2.8, pitchRatio * stretch))
+
+        let sourceDurSec = Float(end - start) / clip.sampleRate
+        let outputLen = Int((sourceDurSec / max(0.25, rate)) * sampleRate)
+        let minLen = Int(sampleRate * 0.02)
+        let maxLen = Int(sampleRate * 1.25)
+        let length = max(minLen, min(maxLen, outputLen))
+
+        let baseGain = (0.28 + 0.90 * Float(controlCurrent.gestureLevel)) * max(0.35, mode4MemoryDecay)
+        let rmsComp = 1.0 / max(0.16, clip.analysis.rms * 2.8)
+        let gain = max(0.03, min(1.1, baseGain * clip.gain * min(1.35, rmsComp) * (0.84 + 0.26 * randomUnit())))
+        let panX = (randomUnit() * 2.0 - 1.0) * 0.88
+        let panY = (randomUnit() * 2.0 - 1.0) * 0.72
+        let playbackStep = rate * (clip.sampleRate / sampleRate)
+
+        mode4Voices[slot].reset(
+            clipIndex: clipIndex,
+            clipId: clip.id,
+            category: clip.category,
+            startFrame: start,
+            endFrame: end,
+            reverse: reverse,
+            playbackStep: playbackStep,
+            length: length,
+            gain: gain,
+            panX: panX,
+            panY: panY
+        )
+        mode4RememberClipIndex(clipIndex)
         mode4LastTriggerSamplesAgo = 0
+
+        let stutterProb = min(0.38, 0.08 + 0.30 * liveFeatures.onsetNoisy)
+        if randomUnit() < stutterProb, mode4ActiveVoices + 1 < voiceCap, let extraSlot = mode4Voices.firstIndex(where: { !$0.active }) {
+            let microStart = mode4NearestSafeCut(
+                clip,
+                target: start + Int((randomUnit() * 2.0 - 1.0) * 42.0),
+                lower: start,
+                upper: max(start, end - 16)
+            )
+            let microEnd = mode4NearestSafeCut(
+                clip,
+                target: microStart + Int((0.030 + randomUnit() * 0.090) * clip.sampleRate),
+                lower: min(clip.samples.count - 1, microStart + 8),
+                upper: clip.samples.count - 1
+            )
+            let microLen = max(Int(sampleRate * 0.018), min(Int(sampleRate * 0.16), Int(Float(max(8, microEnd - microStart)) * sampleRate / clip.sampleRate)))
+            mode4Voices[extraSlot].reset(
+                clipIndex: clipIndex,
+                clipId: clip.id,
+                category: clip.category,
+                startFrame: microStart,
+                endFrame: max(microStart + 8, microEnd),
+                reverse: randomUnit() < 0.40 ? !reverse : reverse,
+                playbackStep: max(0.45, min(3.0, playbackStep * (0.8 + randomUnit() * 0.6))),
+                length: microLen,
+                gain: gain * (0.45 + randomUnit() * 0.28),
+                panX: max(-1, min(1, panX + (randomUnit() * 2.0 - 1.0) * 0.20)),
+                panY: max(-1, min(1, panY + (randomUnit() * 2.0 - 1.0) * 0.20))
+            )
+        }
     }
 
     private func processMode4(
         input: Float,
+        interventions: inout SafetyInterventions,
         _ ch0: inout Float,
         _ ch1: inout Float,
         _ ch2: inout Float,
@@ -2508,82 +5476,163 @@ private final class MasterRenderState {
         reverbSend: inout Float
     ) {
         mode4LastTriggerSamplesAgo += 1
-        let clean = input * Float(max(0.45, controlCurrent.dryLevel))
+        let dryDuck: Float = mode4ActiveVoices > 0 ? 0.80 : 1.0
+        let clean = input * Float(max(0.22, controlCurrent.dryLevel)) * dryDuck
         placeMainObject(
             sample: clean,
-            spread: Float(min(0.45, controlCurrent.spread)),
-            motionSpeed: Float(0.12 + 0.30 * controlCurrent.motionSpeed),
-            radius: Float(0.18 + 0.20 * controlCurrent.motionRadius),
+            spread: Float(min(0.55, controlCurrent.spread)),
+            motionSpeed: Float(0.14 + 0.36 * controlCurrent.motionSpeed),
+            radius: Float(0.16 + 0.24 * controlCurrent.motionRadius),
             mode: 4,
             &ch0, &ch1, &ch2, &ch3, &ch4, &ch5
         )
-
-        reverbSend = clean * 0.10
+        reverbSend = clean * 0.09
 
         let onsetMetric = abs(input - mode4PrevInput)
         mode4PrevInput = input
-        let minGap = Int((0.08 + 0.30 * (1.0 - controlCurrent.interruptiveness)) * Double(sampleRate))
-        if mode4LastTriggerSamplesAgo > minGap {
-            let triggerProb = Float(controlCurrent.gestureRate) * 0.035
-            if onsetMetric > (0.012 + 0.05 * Float(controlCurrent.interruptiveness)), randomUnit() < triggerProb {
-                spawnMode4Voice(input: input)
-            } else if randomUnit() < triggerProb * 0.1 {
-                spawnMode4Voice(input: input * 0.5)
+        mode4InputEnv += 0.02 * (abs(input) - mode4InputEnv)
+        mode4LowTrack += 0.03 * (input - mode4LowTrack)
+        let high = input - mode4LowTrack
+        mode4LowEnv += 0.02 * (abs(mode4LowTrack) - mode4LowEnv)
+        mode4HighEnv += 0.02 * (abs(high) - mode4HighEnv)
+        let onsetTarget = min(1.0, (onsetMetric / max(0.002, mode4InputEnv + 0.0015)) * 0.85)
+        mode4Noisiness += 0.12 * (onsetTarget - mode4Noisiness)
+
+        let brightLive = mode4HighEnv / max(1e-6, mode4HighEnv + mode4LowEnv)
+        let lowLive = mode4LowEnv / max(1e-6, mode4HighEnv + mode4LowEnv)
+        let liveFeatures = Mode4LiveFeatures(
+            onsetNoisy: max(0, min(1, 0.58 * mode4Noisiness + 0.42 * min(1, onsetMetric * 36.0))),
+            brightness: max(0, min(1, 0.62 * brightLive + 0.38 * Float(controlCurrent.bandHighLevel))),
+            lowBand: max(0, min(1, 0.62 * lowLive + 0.38 * Float(controlCurrent.bandLowLevel)))
+        )
+
+        if mode4SampleLibrary.isEmpty {
+            mode4NoSamplesDryOnly = true
+            mode4ActiveVoices = 0
+            return
+        }
+        mode4NoSamplesDryOnly = false
+
+        let baseTriggerHz = 0.30 + (1.6 * Float(controlCurrent.gestureRate)) + (4.8 * Float(controlCurrent.interruptiveness))
+        let featureBoost = 0.56 + (1.35 * liveFeatures.onsetNoisy) + (0.22 * (1.0 - Float(controlCurrent.memoryWeight)))
+        let triggerHz = min(18.0, baseTriggerHz * featureBoost)
+        mode4TriggerAccumulator += triggerHz / sampleRate
+
+        let minGapSamples = Int((0.018 + 0.11 * (1.0 - Float(controlCurrent.interruptiveness))) * sampleRate)
+        if mode4LastTriggerSamplesAgo > minGapSamples {
+            var spawned = 0
+            while mode4TriggerAccumulator >= 1.0, spawned < 2 {
+                mode4TriggerAccumulator -= 1.0
+                spawnMode4Voice(liveFeatures: liveFeatures, interventions: &interventions)
+                spawned += 1
+            }
+
+            let impulseChance = min(0.22, triggerHz / sampleRate * (0.4 + 0.6 * liveFeatures.onsetNoisy))
+            if liveFeatures.onsetNoisy > 0.72, randomUnit() < impulseChance {
+                spawnMode4Voice(liveFeatures: liveFeatures, interventions: &interventions)
             }
         }
 
         mode4ActiveVoices = 0
         for i in 0..<mode4Voices.count where mode4Voices[i].active {
-            mode4ActiveVoices += 1
-            let t = Float(mode4Voices[i].age) / Float(max(1, mode4Voices[i].length))
-            let env = sinf(Float.pi * min(max(t, 0), 1))
-            var voiceSample: Float = 0
-            if mode4Voices[i].source == 0 {
-                let table = mode4SampleTables[mode4Voices[i].index % mode4SampleTables.count]
-                let idx = Int(mode4Voices[i].position) % table.count
-                voiceSample = table[idx]
-            } else {
-                let ph = mode4Voices[i].position * 0.012
-                voiceSample = (sinf(ph) * 0.7) + (sinf(ph * 1.7) * 0.3)
+            guard mode4Voices[i].clipIndex >= 0, mode4Voices[i].clipIndex < mode4SampleLibrary.count else {
+                mode4Voices[i].active = false
+                continue
             }
+            mode4ActiveVoices += 1
+            let clip = mode4SampleLibrary[mode4Voices[i].clipIndex]
+            let src = mode4ClipSampleLinear(clip, at: mode4Voices[i].playhead)
 
-            let g = env * mode4Voices[i].gain
-            let voiceOut = voiceSample * g
+            let inEnv = mode4Voices[i].age < mode4Voices[i].fadeInSamples
+                ? Float(mode4Voices[i].age) / Float(max(1, mode4Voices[i].fadeInSamples))
+                : 1.0
+            let remaining = mode4Voices[i].length - mode4Voices[i].age
+            let outEnv = remaining < mode4Voices[i].fadeOutSamples
+                ? Float(max(0, remaining)) / Float(max(1, mode4Voices[i].fadeOutSamples))
+                : 1.0
+            let env = max(0, min(1, inEnv * outEnv))
+            let wetScale = max(0.22, min(1, Float(controlCurrent.gestureLevel) * 1.35))
+            let voiceOut = src * env * mode4Voices[i].gain * wetScale
+
             GridSpatializer.fillNormalizedPointGains(
                 x: mode4Voices[i].panX,
                 y: mode4Voices[i].panY,
-                spread: max(0.30, min(0.95, Float(controlCurrent.spread) + 0.12)),
+                spread: max(0.32, min(0.98, Float(controlCurrent.spread) + 0.14)),
                 into: &targetGains
             )
             applyGains(voiceOut, gains: targetGains, &ch0, &ch1, &ch2, &ch3, &ch4, &ch5)
-            reverbSend += voiceOut * 0.12
+            reverbSend += voiceOut * 0.10
 
-            mode4Voices[i].position += mode4Voices[i].increment
+            if mode4Voices[i].reverse {
+                mode4Voices[i].playhead -= mode4Voices[i].playbackStep
+            } else {
+                mode4Voices[i].playhead += mode4Voices[i].playbackStep
+            }
             mode4Voices[i].age += 1
+
             if mode4Voices[i].age >= mode4Voices[i].length {
+                mode4Voices[i].active = false
+                continue
+            }
+            if mode4Voices[i].reverse {
+                if mode4Voices[i].playhead <= Float(mode4Voices[i].startFrame) {
+                    mode4Voices[i].active = false
+                }
+            } else if mode4Voices[i].playhead >= Float(mode4Voices[i].endFrame - 1) {
                 mode4Voices[i].active = false
             }
         }
     }
 
     private func preloadResonifierDefaults() {
-        let defaults = ["inst_A", "inst_B", "inst_C", "inst_D", "inst_E"]
-        for id in defaults {
-            let _ = cachedResonInstrument(id: id)
-        }
-        resonCurrentInstrument = cachedResonInstrument(id: "inst_A")
+        reloadResonifierLibrary(activeInstrumentId: "inst_A")
+    }
+
+    private func reloadResonifierLibrary(activeInstrumentId: String?) {
+        mode56LoadInterventions.removeAll(keepingCapacity: true)
+        resonInstrumentCache.removeAll(keepingCapacity: true)
+        let trimmed = activeInstrumentId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetId = (trimmed?.isEmpty == false) ? trimmed! : "inst_A"
+        resonCurrentInstrument = cachedResonInstrument(id: targetId)
         resonSwapInstrument = resonCurrentInstrument
+        resonSwapMix = 1.0
+        resonSwapStep = 0
+        resonSwapRemaining = 0
+        resonNoteAccumulator = 0
+        resonReactiveGateSamples = 0
+        resonNoiseFloor = 0.001
+        resonSilenceSamples = 0
+        resonIsSilent = true
+        resonInputLevel = 0
+        resonLastMidi = -1
+        resonDesiredVoices = 0
+        resonSpawnCount = 0
+        resonOutputEnergyAccum = 0
+        resonOutputMeterSamples = 0
+        resonLastOutputRMS = 0
+        for i in resonVoices.indices {
+            resonVoices[i].active = false
+        }
     }
 
     private func prepareResonifierTargets(control: AudioControl) {
         let instrumentId = control.midiInstId
         let incomingInstrument = cachedResonInstrument(id: instrumentId)
         if incomingInstrument.id != resonCurrentInstrument.id {
-            resonSwapInstrument = incomingInstrument
-            resonSwapMix = 1.0
-            let swapSec = 0.25 + (0.50 * Float(control.inharmonicity))
-            resonSwapRemaining = max(1, Int(sampleRate * swapSec))
-            resonSwapStep = -1.0 / Float(resonSwapRemaining)
+            if !incomingInstrument.sampleZones.isEmpty || !resonCurrentInstrument.sampleZones.isEmpty {
+                // Sample-backed instruments are switched immediately to avoid phase-domain crossfade artifacts.
+                resonCurrentInstrument = incomingInstrument
+                resonSwapInstrument = incomingInstrument
+                resonSwapMix = 1.0
+                resonSwapStep = 0.0
+                resonSwapRemaining = 0
+            } else {
+                resonSwapInstrument = incomingInstrument
+                resonSwapMix = 1.0
+                let swapSec = 0.25 + (0.50 * Float(control.inharmonicity))
+                resonSwapRemaining = max(1, Int(sampleRate * swapSec))
+                resonSwapStep = -1.0 / Float(resonSwapRemaining)
+            }
         }
 
         let chordEntry = ManifestCatalog.shared.chords[control.chordSetId]
@@ -2612,31 +5661,603 @@ private final class MasterRenderState {
         return built
     }
 
+    private func resonCollectAudioFiles(for path: String) -> [URL] {
+        guard let resolved = resolveMode4AssetURL(path: path) else { return [] }
+        let fm = FileManager.default
+        var isDir = ObjCBool(false)
+        if fm.fileExists(atPath: resolved.path, isDirectory: &isDir), isDir.boolValue {
+            var out: [URL] = []
+            if let e = fm.enumerator(at: resolved, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+                for case let url as URL in e where mode4IsAudioFile(url) {
+                    out.append(url)
+                }
+            }
+            out.sort { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            return out
+        }
+        return mode4IsAudioFile(resolved) ? [resolved] : []
+    }
+
+    private func resonCompanionSamplePaths(for soundfontPath: String) -> [String] {
+        let ns = soundfontPath as NSString
+        let baseNoExt = ns.deletingPathExtension
+        let stem = (baseNoExt as NSString).lastPathComponent
+        return [
+            "\(baseNoExt)",
+            "\(baseNoExt)_samples",
+            "\(baseNoExt).samples",
+            "Assets/Soundfonts/\(stem)",
+            "Assets/Soundfonts/\(stem)_samples",
+            "Assets/Soundfonts/\(stem).samples",
+        ]
+    }
+
+    private func resonExtractRegexCapture(pattern: String, in text: String, group: Int = 1) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let ns = text as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        guard let match = regex.firstMatch(in: text, options: [], range: range) else { return nil }
+        let g = match.range(at: group)
+        guard g.location != NSNotFound else { return nil }
+        return ns.substring(with: g)
+    }
+
+    private func resonRootMidiFromFilename(_ filename: String) -> Int? {
+        let stem = (filename as NSString).deletingPathExtension
+        if let midiString = resonExtractRegexCapture(pattern: "(?:^|[_\\-\\s])(?:midi|note|n)(\\d{1,3})(?:$|[_\\-\\s])", in: stem),
+           let midi = Int(midiString) {
+            return max(0, min(127, midi))
+        }
+        if let note = resonExtractRegexCapture(pattern: "(^|[_\\-\\s])(c#|db|d#|eb|f#|gb|g#|ab|a#|bb|c|d|e|f|g|a|b)(-?\\d)($|[_\\-\\s])", in: stem, group: 2),
+           let octaveString = resonExtractRegexCapture(pattern: "(^|[_\\-\\s])(c#|db|d#|eb|f#|gb|g#|ab|a#|bb|c|d|e|f|g|a|b)(-?\\d)($|[_\\-\\s])", in: stem, group: 3),
+           let octave = Int(octaveString) {
+            let semitoneMap: [String: Int] = [
+                "c": 0, "c#": 1, "db": 1, "d": 2, "d#": 3, "eb": 3, "e": 4, "f": 5,
+                "f#": 6, "gb": 6, "g": 7, "g#": 8, "ab": 8, "a": 9, "a#": 10, "bb": 10, "b": 11,
+            ]
+            if let semitone = semitoneMap[note.lowercased()] {
+                let midi = (octave + 1) * 12 + semitone
+                return max(0, min(127, midi))
+            }
+        }
+        return nil
+    }
+
+    private func resonBuildWavetableFromSamples(_ samples: [Float], tableCount: Int = 2_048) -> [Float] {
+        guard !samples.isEmpty else { return [Float](repeating: 0, count: tableCount) }
+        var table = [Float](repeating: 0, count: tableCount)
+        let step = Float(samples.count - 1) / Float(max(1, tableCount - 1))
+        var maxAbs: Float = 0
+        for i in 0..<tableCount {
+            let pos = Float(i) * step
+            let i0 = Int(floorf(pos))
+            let i1 = min(samples.count - 1, i0 + 1)
+            let frac = pos - Float(i0)
+            let v = samples[i0] + (samples[i1] - samples[i0]) * frac
+            table[i] = v
+            maxAbs = max(maxAbs, abs(v))
+        }
+        let norm = maxAbs > 1e-5 ? (0.95 / maxAbs) : 1.0
+        for i in 0..<tableCount {
+            table[i] *= norm
+        }
+        return table
+    }
+
+    private func resonSampleTrimBounds(samples: [Float], peak: Float) -> (start: Int, end: Int) {
+        guard samples.count > 2 else {
+            return (0, max(1, samples.count - 1))
+        }
+
+        let threshold = max(0.0012, peak * 0.035)
+        var start = 0
+        while start < samples.count - 2, abs(samples[start]) < threshold {
+            start += 1
+        }
+        if start > Int(Float(samples.count) * 0.75) {
+            start = 0
+        }
+
+        var end = samples.count - 1
+        while end > start + 1, abs(samples[end]) < threshold {
+            end -= 1
+        }
+        if end - start < 96 {
+            start = 0
+            end = samples.count - 1
+        }
+        return (start, max(start + 1, end))
+    }
+
+    private func resonBuildSampleZones(decoded: [(rootMidi: Int, sampleRate: Float, samples: [Float], gain: Float, peak: Float)]) -> [ResonSampleZone] {
+        guard !decoded.isEmpty else { return [] }
+        var bestByRoot: [Int: (rootMidi: Int, sampleRate: Float, samples: [Float], gain: Float, peak: Float)] = [:]
+        for entry in decoded {
+            let root = max(0, min(127, entry.rootMidi))
+            if let existing = bestByRoot[root] {
+                let betterPeak = entry.peak > (existing.peak * 1.08)
+                let similarPeak = abs(entry.peak - existing.peak) < 0.015
+                let longer = entry.samples.count > existing.samples.count
+                if betterPeak || (similarPeak && longer) {
+                    bestByRoot[root] = (root, entry.sampleRate, entry.samples, entry.gain, entry.peak)
+                }
+            } else {
+                bestByRoot[root] = (root, entry.sampleRate, entry.samples, entry.gain, entry.peak)
+            }
+        }
+        let sorted = bestByRoot.values.sorted { $0.rootMidi < $1.rootMidi }
+        var zones: [ResonSampleZone] = []
+        zones.reserveCapacity(sorted.count)
+        for i in sorted.indices {
+            let root = sorted[i].rootMidi
+            let low: Int = {
+                guard i > 0 else { return 0 }
+                return min(root, ((sorted[i - 1].rootMidi + root) / 2) + 1)
+            }()
+            let high: Int = {
+                guard i + 1 < sorted.count else { return 127 }
+                return max(root, (root + sorted[i + 1].rootMidi) / 2)
+            }()
+            let trim = resonSampleTrimBounds(samples: sorted[i].samples, peak: sorted[i].peak)
+            zones.append(
+                ResonSampleZone(
+                    rootMidi: root,
+                    lowMidi: max(0, min(127, low)),
+                    highMidi: max(0, min(127, high)),
+                    sampleRate: sorted[i].sampleRate,
+                    samples: sorted[i].samples,
+                    gain: sorted[i].gain,
+                    startFrame: trim.start,
+                    endFrame: min(sorted[i].samples.count - 1, trim.end),
+                    peak: sorted[i].peak
+                )
+            )
+        }
+        return zones
+    }
+
+    private func resonLoadSampleZones(from audioFiles: [URL], instrumentGain: Float) -> [ResonSampleZone] {
+        guard !audioFiles.isEmpty else { return [] }
+        var decoded: [(rootMidi: Int, sampleRate: Float, samples: [Float], gain: Float, peak: Float)] = []
+        decoded.reserveCapacity(audioFiles.count)
+        for (idx, url) in audioFiles.enumerated() {
+            do {
+                let mono = try decodeMode4MonoSamples(from: url)
+                guard mono.samples.count > 64 else { continue }
+                var peak: Float = 0
+                for s in mono.samples {
+                    peak = max(peak, abs(s))
+                }
+                if peak < 0.0005 { continue }
+                let root = resonRootMidiFromFilename(url.lastPathComponent)
+                    ?? max(24, min(96, 36 + Int((Float(idx) / Float(max(1, audioFiles.count - 1))) * 48.0)))
+                let rms = sqrtf(mono.samples.reduce(0) { $0 + ($1 * $1) } / Float(max(1, mono.samples.count)))
+                let comp = min(1.40, max(0.30, 1.0 / max(0.10, rms * 2.8)))
+                let lift = min(5.0, max(1.0, 0.90 / max(0.02, peak)))
+                decoded.append(
+                    (
+                        rootMidi: root,
+                        sampleRate: max(8_000, mono.sampleRate),
+                        samples: mono.samples,
+                        gain: instrumentGain * comp * lift,
+                        peak: peak
+                    )
+                )
+            } catch {
+                continue
+            }
+        }
+        return resonBuildSampleZones(decoded: decoded)
+    }
+
+    private func resonReadLEUInt16(_ data: Data, at offset: Int) -> UInt16? {
+        guard offset >= 0, offset + 2 <= data.count else { return nil }
+        return UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+    }
+
+    private func resonReadLEUInt32(_ data: Data, at offset: Int) -> UInt32? {
+        guard offset >= 0, offset + 4 <= data.count else { return nil }
+        return UInt32(data[offset])
+            | (UInt32(data[offset + 1]) << 8)
+            | (UInt32(data[offset + 2]) << 16)
+            | (UInt32(data[offset + 3]) << 24)
+    }
+
+    private func resonFourCC(_ data: Data, at offset: Int) -> String? {
+        guard offset >= 0, offset + 4 <= data.count else { return nil }
+        return String(data: data.subdata(in: offset..<(offset + 4)), encoding: .ascii)
+    }
+
+    private func resonExtractSF2ChunkRanges(_ data: Data) -> (smpl: Range<Int>, shdr: Range<Int>)? {
+        guard data.count >= 12 else { return nil }
+        guard resonFourCC(data, at: 0) == "RIFF", resonFourCC(data, at: 8) == "sfbk" else { return nil }
+        guard let riffSize = resonReadLEUInt32(data, at: 4) else { return nil }
+        let riffEnd = min(data.count, 8 + Int(riffSize))
+        guard riffEnd > 12 else { return nil }
+
+        var smplRange: Range<Int>?
+        var shdrRange: Range<Int>?
+
+        func scanChunks(start: Int, end: Int, listType: String?) {
+            var cursor = start
+            while cursor + 8 <= end {
+                guard let chunkId = resonFourCC(data, at: cursor),
+                      let chunkSizeRaw = resonReadLEUInt32(data, at: cursor + 4) else { break }
+                let chunkSize = Int(chunkSizeRaw)
+                let payloadStart = cursor + 8
+                let payloadEnd = payloadStart + chunkSize
+                if payloadEnd > end || payloadEnd < payloadStart {
+                    break
+                }
+
+                if chunkId == "LIST", chunkSize >= 4, let nestedType = resonFourCC(data, at: payloadStart) {
+                    scanChunks(start: payloadStart + 4, end: payloadEnd, listType: nestedType)
+                } else {
+                    if listType == "sdta", chunkId == "smpl" {
+                        smplRange = payloadStart..<payloadEnd
+                    } else if listType == "pdta", chunkId == "shdr" {
+                        shdrRange = payloadStart..<payloadEnd
+                    }
+                }
+
+                var advance = 8 + chunkSize
+                if (chunkSize & 1) == 1 {
+                    advance += 1
+                }
+                cursor += advance
+            }
+        }
+
+        scanChunks(start: 12, end: riffEnd, listType: nil)
+        guard let smplRange, let shdrRange else { return nil }
+        return (smpl: smplRange, shdr: shdrRange)
+    }
+
+    private func resonLoadSampleZonesFromSF2(_ soundfontURL: URL, instrumentGain: Float) -> [ResonSampleZone] {
+        guard let data = try? Data(contentsOf: soundfontURL),
+              let chunks = resonExtractSF2ChunkRanges(data) else {
+            return []
+        }
+
+        let samplePoolCount = chunks.smpl.count / 2
+        if samplePoolCount <= 0 {
+            return []
+        }
+
+        let headerSize = 46
+        let headerCount = chunks.shdr.count / headerSize
+        if headerCount <= 1 {
+            return []
+        }
+
+        let maxZones = 96
+        var decoded: [(rootMidi: Int, sampleRate: Float, samples: [Float], gain: Float, peak: Float)] = []
+        decoded.reserveCapacity(min(maxZones, headerCount - 1))
+
+        for idx in 0..<(headerCount - 1) where decoded.count < maxZones {
+            let base = chunks.shdr.lowerBound + idx * headerSize
+            guard let start = resonReadLEUInt32(data, at: base + 20),
+                  let end = resonReadLEUInt32(data, at: base + 24),
+                  let sampleRateRaw = resonReadLEUInt32(data, at: base + 36),
+                  let sampleType = resonReadLEUInt16(data, at: base + 44) else {
+                continue
+            }
+
+            // Skip ROM-linked entries, keep only local PCM sample data.
+            if (sampleType & 0x8000) != 0 {
+                continue
+            }
+
+            let startIdx = Int(start)
+            let endIdx = min(samplePoolCount, Int(end))
+            if endIdx <= startIdx + 64 || startIdx < 0 || startIdx >= samplePoolCount {
+                continue
+            }
+
+            let sampleRate = Float(sampleRateRaw)
+            if sampleRate < 4_000 || sampleRate > 192_000 {
+                continue
+            }
+
+            var count = endIdx - startIdx
+            let maxFramesPerZone = Int(max(16_000, sampleRate) * 6.0)
+            if count > maxFramesPerZone {
+                count = maxFramesPerZone
+            }
+
+            let bytesStart = chunks.smpl.lowerBound + (startIdx * 2)
+            var samples = [Float](repeating: 0, count: count)
+            var peak: Float = 0
+            for i in 0..<count {
+                let b = bytesStart + i * 2
+                guard let raw = resonReadLEUInt16(data, at: b) else { continue }
+                let s = Int16(bitPattern: raw)
+                let f = Float(s) / Float(Int16.max)
+                samples[i] = f
+                peak = max(peak, abs(f))
+            }
+            if peak < 0.0005 {
+                continue
+            }
+
+            let originalPitchRaw = Int(data[base + 40])
+            let rootMidi = (0...127).contains(originalPitchRaw) ? originalPitchRaw : 60
+            let rms = sqrtf(samples.reduce(0) { $0 + ($1 * $1) } / Float(max(1, samples.count)))
+            let comp = min(1.40, max(0.30, 1.0 / max(0.10, rms * 2.8)))
+            let lift = min(5.0, max(1.0, 0.90 / max(0.02, peak)))
+            decoded.append(
+                (
+                    rootMidi: rootMidi,
+                    sampleRate: max(8_000, sampleRate),
+                    samples: samples,
+                    gain: instrumentGain * comp * lift,
+                    peak: peak
+                )
+            )
+        }
+
+        return resonBuildSampleZones(decoded: decoded)
+    }
+
+    private func resonCollectSFZSampleFiles(from sfzURL: URL) -> [URL] {
+        guard let text = try? String(contentsOf: sfzURL, encoding: .utf8) else { return [] }
+        let baseDir = sfzURL.deletingLastPathComponent()
+        var out: [URL] = []
+        var seen: Set<String> = []
+        for rawLine in text.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty || line.hasPrefix("//") { continue }
+            guard let range = line.range(of: "sample=", options: [.caseInsensitive]) else { continue }
+            var rhs = String(line[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if rhs.isEmpty { continue }
+
+            if rhs.hasPrefix("\"") || rhs.hasPrefix("'") {
+                let quote = rhs.removeFirst()
+                if let end = rhs.firstIndex(of: quote) {
+                    rhs = String(rhs[..<end])
+                }
+            } else if let space = rhs.firstIndex(where: { $0.isWhitespace }) {
+                rhs = String(rhs[..<space])
+            }
+
+            rhs = rhs.replacingOccurrences(of: "\\", with: "/")
+            if rhs.isEmpty { continue }
+            let candidate: URL
+            if rhs.hasPrefix("/") {
+                candidate = URL(fileURLWithPath: rhs)
+            } else {
+                candidate = baseDir.appendingPathComponent(rhs)
+            }
+            let key = candidate.standardizedFileURL.path
+            if seen.contains(key) { continue }
+            seen.insert(key)
+            if mode4IsAudioFile(candidate), FileManager.default.isReadableFile(atPath: candidate.path) {
+                out.append(candidate)
+            }
+        }
+        return out
+    }
+
+    private func resonDiscoverFallbackSoundfontURLs(for instrumentId: String) -> [URL] {
+        let fm = FileManager.default
+        var candidates: [URL] = []
+        var seen: Set<String> = []
+
+        func appendCandidate(_ url: URL) {
+            let ext = url.pathExtension.lowercased()
+            guard ext == "sf2" || ext == "sfz" else { return }
+            let key = url.standardizedFileURL.path
+            if seen.contains(key) { return }
+            seen.insert(key)
+            candidates.append(url)
+        }
+
+        func scanDirectory(_ dir: URL, recursive: Bool) {
+            var isDir = ObjCBool(false)
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { return }
+            if recursive {
+                guard let enumerator = fm.enumerator(
+                    at: dir,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                ) else { return }
+                for case let url as URL in enumerator {
+                    appendCandidate(url)
+                }
+            } else {
+                guard let entries = try? fm.contentsOfDirectory(
+                    at: dir,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                ) else { return }
+                for entry in entries {
+                    appendCandidate(entry)
+                }
+            }
+        }
+
+        for root in mode4AssetRoots() {
+            scanDirectory(root.appendingPathComponent("Assets/Soundfonts", isDirectory: true), recursive: true)
+            scanDirectory(root.appendingPathComponent("Soundfonts", isDirectory: true), recursive: true)
+            // Xcode may flatten copied resources into the bundle root.
+            scanDirectory(root, recursive: false)
+        }
+
+        guard !candidates.isEmpty else { return [] }
+        let sf2Only = candidates.filter { $0.pathExtension.lowercased() == "sf2" }
+        let pool = (sf2Only.isEmpty ? candidates : sf2Only)
+            .sorted { lhs, rhs in
+                lhs.lastPathComponent.localizedCaseInsensitiveCompare(rhs.lastPathComponent) == .orderedAscending
+            }
+        guard !pool.isEmpty else { return [] }
+
+        let start = Int(stableSeed(for: instrumentId) % UInt64(pool.count))
+        if start == 0 { return pool }
+        return Array(pool[start...]) + Array(pool[..<start])
+    }
+
+    private func resonSampleZoneIndex(in instrument: ResonInstrument, midiNote: Int) -> Int? {
+        guard !instrument.sampleZones.isEmpty else { return nil }
+        if let idx = instrument.sampleZones.firstIndex(where: { midiNote >= $0.lowMidi && midiNote <= $0.highMidi }) {
+            return idx
+        }
+        return instrument.sampleZones.enumerated().min(by: { abs($0.element.rootMidi - midiNote) < abs($1.element.rootMidi - midiNote) })?.offset
+    }
+
+    private func resonSampleZoneLinear(_ zone: ResonSampleZone, at frame: Float) -> Float {
+        let maxIdx = max(0, zone.samples.count - 1)
+        let f = max(0, min(Float(maxIdx), frame))
+        let i0 = Int(floorf(f))
+        let i1 = min(maxIdx, i0 + 1)
+        let frac = f - Float(i0)
+        let s0 = zone.samples[i0]
+        let s1 = zone.samples[i1]
+        return s0 + (s1 - s0) * frac
+    }
+
     private func buildResonInstrument(id: String, entry: InstrumentManifestEntry?) -> ResonInstrument {
         let fallback = ResonInstrument.fallback(id: id)
-        guard let entry else { return fallback }
+        guard let entry else {
+            mode56LoadInterventions.append("mode56_inst_missing:\(id)")
+            return fallback
+        }
 
         let tableCount = 2_048
-        var table = [Float](repeating: 0, count: tableCount)
         let hash = stableSeed(for: id + (entry.samplePackPath ?? "") + (entry.soundfontPath ?? "") + (entry.samplerPresetRef ?? ""))
         let brightness = max(0.05, min(0.95, 0.25 + (Float((hash >> 8) & 0xFF) / 255.0) * 0.7))
         let gain = powf(10.0, Float((entry.gainDb ?? 0.0) / 20.0))
         let polyphony = max(1, min(16, entry.polyphonyHint ?? entry.polyphony ?? 8))
+        var sampleZones: [ResonSampleZone] = []
+        var sourceKind = "wavetable"
+        var sourceRef = "fallback_wavetable"
 
+        if let samplePackPath = entry.samplePackPath, !samplePackPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let files = resonCollectAudioFiles(for: samplePackPath)
+            sampleZones = resonLoadSampleZones(from: files, instrumentGain: gain)
+            if !sampleZones.isEmpty {
+                sourceKind = "sample_pack"
+                sourceRef = samplePackPath
+            } else {
+                mode56LoadInterventions.append("mode56_sample_pack_empty:\(id)")
+            }
+        }
+
+        if sampleZones.isEmpty {
+            let explicitSoundfontPath = entry.soundfontPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+            var selectedSoundfontURL: URL?
+            if let explicitSoundfontPath, !explicitSoundfontPath.isEmpty {
+                selectedSoundfontURL = resolveMode4AssetURL(path: explicitSoundfontPath)
+            }
+            let discovered = resonDiscoverFallbackSoundfontURLs(for: id)
+            var candidates: [URL] = []
+            var seenCandidates: Set<String> = []
+            if let selectedSoundfontURL {
+                let key = selectedSoundfontURL.standardizedFileURL.path
+                seenCandidates.insert(key)
+                candidates.append(selectedSoundfontURL)
+            }
+            for candidate in discovered {
+                let key = candidate.standardizedFileURL.path
+                if seenCandidates.contains(key) { continue }
+                seenCandidates.insert(key)
+                candidates.append(candidate)
+            }
+            if selectedSoundfontURL == nil, let first = discovered.first {
+                mode56LoadInterventions.append("mode56_soundfont_autopick:\(id)->\(first.lastPathComponent)")
+            }
+
+            var tryFailCount = 0
+            for candidate in candidates {
+                let ext = candidate.pathExtension.lowercased()
+                var zones: [ResonSampleZone] = []
+                var resolvedSourceKind: String?
+                if ext == "sf2" {
+                    zones = resonLoadSampleZonesFromSF2(candidate, instrumentGain: gain)
+                    if !zones.isEmpty {
+                        resolvedSourceKind = "soundfont_sf2"
+                    }
+                } else if ext == "sfz" {
+                    let files = resonCollectSFZSampleFiles(from: candidate)
+                    zones = resonLoadSampleZones(from: files, instrumentGain: gain)
+                    if !zones.isEmpty {
+                        resolvedSourceKind = "soundfont_sfz"
+                    }
+                }
+
+                if zones.isEmpty {
+                    var files: [URL] = resonCollectAudioFiles(for: candidate.path)
+                    if files.isEmpty {
+                        let companionSeedPath = explicitSoundfontPath ?? candidate.path
+                        for companion in resonCompanionSamplePaths(for: companionSeedPath) {
+                            files = resonCollectAudioFiles(for: companion)
+                            if !files.isEmpty { break }
+                        }
+                    }
+                    zones = resonLoadSampleZones(from: files, instrumentGain: gain)
+                    if !zones.isEmpty {
+                        resolvedSourceKind = "soundfont_samples"
+                    }
+                }
+
+                if !zones.isEmpty, let resolvedSourceKind {
+                    sampleZones = zones
+                    sourceKind = resolvedSourceKind
+                    sourceRef = candidate.lastPathComponent
+                    mode56LoadInterventions.append("mode56_soundfont_selected:\(id)->\(candidate.lastPathComponent)")
+                    break
+                } else if tryFailCount < 4 {
+                    tryFailCount += 1
+                    let token = candidate.lastPathComponent.replacingOccurrences(of: " ", with: "_")
+                    mode56LoadInterventions.append("mode56_soundfont_try_fail:\(id):\(token)")
+                }
+            }
+
+            if sampleZones.isEmpty, !candidates.isEmpty {
+                mode56LoadInterventions.append("mode56_soundfont_no_extract:\(id)")
+            } else if sampleZones.isEmpty,
+                      let explicitSoundfontPath,
+                      !explicitSoundfontPath.isEmpty {
+                mode56LoadInterventions.append("mode56_soundfont_missing:\(id)")
+            }
+        }
+
+        var table: [Float]
+        if let firstZone = sampleZones.first {
+            table = resonBuildWavetableFromSamples(firstZone.samples, tableCount: tableCount)
+        } else {
+            table = [Float](repeating: 0, count: tableCount)
+        }
         let h2 = 0.10 + (0.35 * brightness)
         let h3 = 0.05 + (0.25 * brightness)
         let h4 = 0.02 + (0.15 * brightness)
         let phaseJitter = Float((hash & 0x3FF)) / 1024.0 * Float.pi * 2.0
 
-        for i in 0..<tableCount {
-            let ph = 2.0 * Float.pi * Float(i) / Float(tableCount)
-            let fundamental = sinf(ph + phaseJitter * 0.05)
-            let second = sinf(ph * 2.0 + phaseJitter * 0.21) * h2
-            let third = sinf(ph * 3.0 + phaseJitter * 0.37) * h3
-            let fourth = sinf(ph * 4.0 + phaseJitter * 0.49) * h4
-            table[i] = (fundamental * (0.85 - 0.35 * brightness)) + second + third + fourth
+        if sampleZones.isEmpty {
+            for i in 0..<tableCount {
+                let ph = 2.0 * Float.pi * Float(i) / Float(tableCount)
+                let fundamental = sinf(ph + phaseJitter * 0.05)
+                let second = sinf(ph * 2.0 + phaseJitter * 0.21) * h2
+                let third = sinf(ph * 3.0 + phaseJitter * 0.37) * h3
+                let fourth = sinf(ph * 4.0 + phaseJitter * 0.49) * h4
+                table[i] = (fundamental * (0.85 - 0.35 * brightness)) + second + third + fourth
+            }
         }
-        return ResonInstrument(id: id, wavetable: table, gain: gain, brightness: brightness, polyphonyHint: polyphony)
+        let sourceToken = sourceRef.replacingOccurrences(of: " ", with: "_")
+        mode56LoadInterventions.append("mode56_loaded:\(id):\(sourceKind):\(sampleZones.count):\(sourceToken)")
+        print("[audio] mode56 load inst=\(id) source=\(sourceKind) zones=\(sampleZones.count) ref=\(sourceRef)")
+        if mode56LoadInterventions.count > 24 {
+            mode56LoadInterventions = Array(mode56LoadInterventions.suffix(24))
+        }
+        return ResonInstrument(
+            id: id,
+            wavetable: table,
+            gain: gain,
+            brightness: brightness,
+            polyphonyHint: polyphony,
+            sampleZones: sampleZones,
+            sourceKind: sourceKind,
+            sourceRef: sourceRef
+        )
     }
 
     private func chordRootMidi(for chordSetId: String, keyHint: String?) -> Int {
@@ -2747,8 +6368,8 @@ private final class MasterRenderState {
 
         updateResonPitchTracker(input)
 
+        let transient = abs(input - resonPrevInput)
         resonEnv += 0.004 * (abs(input) - resonEnv)
-        let onset = abs(input - resonPrevInput)
         resonPrevInput = input
 
         let modeVoiceMax = mode == 5 ? 8 : 3
@@ -2756,44 +6377,180 @@ private final class MasterRenderState {
         if mode == 5 {
             requestedVoiceCap = Int(2 + floor(controlCurrent.voiceCap * 6.0))
         } else {
-            requestedVoiceCap = Int(1 + floor(controlCurrent.voiceCap * 2.0))
+            requestedVoiceCap = Int(2 + floor(controlCurrent.voiceCap * 2.0))
         }
         let effectiveVoiceCap = max(1, min(modeVoiceMax, min(requestedVoiceCap, cpuAction.voiceLimit)))
         if effectiveVoiceCap < requestedVoiceCap {
             interventions.insert(.voiceCap)
         }
 
-        let maxNoteRate: Float = mode == 5 ? 12.0 : 6.0
+        let maxNoteRate: Float = mode == 5 ? 11.0 : 5.5
         let noteRateNorm = Float(controlCurrent.noteRate)
-        let noteRateHz: Float = (0.15 + (0.85 * noteRateNorm)) * maxNoteRate
-        resonNoteAccumulator += noteRateHz / sampleRate
-        let onsetGate = 0.008 + (0.060 * (1.0 - Float(controlCurrent.velocityBias)))
-        let eligible = onset > onsetGate || resonEnv > (0.012 + 0.030 * noteRateNorm)
-        if eligible && resonNoteAccumulator >= 1.0 {
-            resonNoteAccumulator -= floorf(resonNoteAccumulator)
-            let openSlot = resonVoices.firstIndex(where: { !$0.active })
-            let slot = openSlot ?? resonVoices.indices.min(by: { resonVoices[$0].age > resonVoices[$1].age })
-            if let slot {
+        let noteRateHz: Float = (0.25 + (0.75 * noteRateNorm)) * maxNoteRate
+        let noiseTrackAlpha: Float = resonReactiveGateSamples > 0 ? 0.00045 : 0.0025
+        resonNoiseFloor += noiseTrackAlpha * (resonEnv - resonNoiseFloor)
+        resonNoiseFloor = max(0.00005, min(0.08, resonNoiseFloor))
+        let baseEnvOpen = (mode == 5 ? 0.011 : 0.014) + ((mode == 5 ? 0.018 : 0.020) * noteRateNorm)
+        let envOpen = max(baseEnvOpen, resonNoiseFloor * (mode == 5 ? 2.8 : 3.2))
+        let envClose = envOpen * 0.78
+        let transientOpen = (mode == 5 ? 0.0035 : 0.0040) + ((mode == 5 ? 0.011 : 0.012) * noteRateNorm)
+
+        let silenceEnv = max(0.00035, resonNoiseFloor * (mode == 5 ? 1.20 : 1.35))
+        let silenceTransient = transientOpen * 0.28
+        if resonEnv <= silenceEnv && transient <= silenceTransient {
+            resonSilenceSamples += 1
+        } else {
+            resonSilenceSamples = max(0, resonSilenceSamples - 8)
+        }
+        let silenceHoldSamples = Int(sampleRate * (mode == 5 ? 0.060 : 0.075))
+        let isSilent = resonSilenceSamples >= silenceHoldSamples
+
+        if !isSilent && (resonEnv >= envOpen || transient >= transientOpen) {
+            let holdSamples = Int(sampleRate * (mode == 5 ? 0.10 : 0.14))
+            resonReactiveGateSamples = max(resonReactiveGateSamples, holdSamples)
+        } else if resonEnv <= envClose || isSilent {
+            resonReactiveGateSamples = max(0, resonReactiveGateSamples - 1)
+        }
+        let reactiveActive = resonReactiveGateSamples > 0 && !isSilent
+        let levelNormDen = max(0.001, envOpen - silenceEnv)
+        let levelNorm = reactiveActive ? max(0, min(1, (resonEnv - silenceEnv) / levelNormDen)) : 0
+        resonInputLevel = levelNorm
+
+        if isSilent {
+            resonReactiveGateSamples = 0
+            resonNoteAccumulator = 0
+            resonDesiredVoices = 0
+            if !resonIsSilent {
+                releaseAllResonVoices(fast: true)
+            }
+            resonIsSilent = true
+        } else {
+            resonIsSilent = false
+        }
+
+        let transientNormDen = max(0.001, transientOpen * (mode == 5 ? 2.4 : 2.1))
+        let transientNorm = max(0, min(1, (transient - (transientOpen * 0.35)) / transientNormDen))
+        let envNormDen = max(0.001, envOpen - envClose)
+        let envNorm = reactiveActive ? max(0, min(1, (resonEnv - envClose) / envNormDen)) : 0
+        let activityNorm = max(levelNorm, transientNorm, envNorm)
+        let pitchTracked = resonPitchConf > 0.28
+        let detectedMidi = pitchTracked ? (69.0 + (12.0 * log2(max(30.0, resonPitchHz) / 440.0))) : nil
+        let pitchMatchStrength: Float = {
+            guard pitchTracked else { return 0 }
+            let confNorm = max(0, min(1, (resonPitchConf - 0.28) / 0.72))
+            let followNorm = max(0.20, Float(controlCurrent.pitchFollow))
+            return reactiveActive ? confNorm * followNorm : 0
+        }()
+
+        if reactiveActive {
+            let volumeRate = powf(max(0, levelNorm), 1.12)
+            let rateBoost = 1.0 + ((mode == 5 ? 1.15 : 0.95) * transientNorm)
+            resonNoteAccumulator += (noteRateHz * volumeRate * rateBoost) / sampleRate
+            resonNoteAccumulator = min(8.0, resonNoteAccumulator)
+        } else {
+            resonNoteAccumulator = 0
+        }
+        let minReactiveVoices = mode == 5
+            ? min(effectiveVoiceCap, levelNorm > 0.42 ? 2 : 1)
+            : min(effectiveVoiceCap, levelNorm > 0.55 ? 2 : 1)
+        let variableVoices = max(0, effectiveVoiceCap - minReactiveVoices)
+        let desiredVoices = reactiveActive
+            ? min(
+                effectiveVoiceCap,
+                minReactiveVoices + Int((activityNorm * Float(variableVoices)).rounded())
+            )
+            : 0
+        resonDesiredVoices = desiredVoices
+
+        let accumulatedSpawns = Int(floorf(resonNoteAccumulator))
+        if accumulatedSpawns > 0 {
+            resonNoteAccumulator -= Float(accumulatedSpawns)
+        }
+        let activeVoicesPre = resonVoices.reduce(0) { $0 + ($1.active ? 1 : 0) }
+        let topUpNeed = max(0, desiredVoices - activeVoicesPre)
+        var burstBonus = 0
+        if transientNorm > 0.72 || levelNorm > 0.70 {
+            burstBonus += 1
+        }
+        if mode == 5 && (transientNorm > 0.88 || levelNorm > 0.86) {
+            burstBonus += 1
+        }
+
+        var spawnQuota = reactiveActive ? max(0, accumulatedSpawns + burstBonus) : 0
+        if spawnQuota == 0, reactiveActive, topUpNeed > 0 {
+            let shouldTopUp = levelNorm > (mode == 5 ? 0.24 : 0.32) || transientNorm > (mode == 5 ? 0.40 : 0.52)
+            if shouldTopUp {
+                spawnQuota = 1
+            }
+        }
+        if topUpNeed > 0 {
+            spawnQuota = max(spawnQuota, min(topUpNeed, 1 + burstBonus))
+        }
+        spawnQuota = max(0, min(spawnQuota, mode == 5 ? 3 : 2))
+
+        if spawnQuota > 0 {
+            let contourOffsets: [Int] = mode == 5
+                ? [0, 7, 12, 3, 10, -5, 5, 14, -12]
+                : [0, 5, 9, 12, -7, 7, 14, -12]
+            let wideAntiRepeat: [Int] = mode == 5
+                ? [5, 7, 12, -5, -12, 3]
+                : [5, 7, 12, -7, 9, -12]
+            let tightAntiRepeat: [Int] = [2, -2, 3, -3, 5, -5]
+            let antiRepeatSteps = pitchMatchStrength > 0.55 ? tightAntiRepeat : wideAntiRepeat
+            var burstMidis: [Int] = []
+            for spawnIndex in 0..<spawnQuota {
+                let openSlot = resonVoices.firstIndex(where: { !$0.active })
+                let slot = openSlot ?? resonVoices.indices.min(by: { resonVoices[$0].age > resonVoices[$1].age })
+                guard let slot else { break }
                 if openSlot == nil {
                     interventions.insert(.voiceCap)
                 }
-                var midiBase = 52 + Int(resonEnv * 24.0)
-                if resonPitchConf > 0.35 && controlCurrent.pitchFollow > 0.20 {
-                    let follow = Float(controlCurrent.pitchFollow)
-                    let detectedMidi = 69.0 + (12.0 * log2(max(30.0, resonPitchHz) / 440.0))
-                    let blended = Float(midiBase) * (1.0 - follow) + detectedMidi * follow
-                    midiBase = Int(blended.rounded())
+
+                var midiTarget = 48 + Int((levelNorm * 28.0) + (transientNorm * 8.0))
+                if let detectedMidi {
+                    let blended = Float(midiTarget) * (1.0 - pitchMatchStrength) + detectedMidi * pitchMatchStrength
+                    midiTarget = Int(blended.rounded())
                 }
-                let chordMidi = nearestChordMidi(targetMidi: midiBase, rootMidi: resonRootMidi, intervals: resonChordIntervals)
-                var finalMidi = chordMidi
+                let contourIndex = Int(randomUnit() * Float(contourOffsets.count))
+                let contourScale = max(0.20, 1.0 - (0.80 * pitchMatchStrength))
+                midiTarget += Int((Float(contourOffsets[contourIndex]) * contourScale).rounded())
+                if spawnIndex > 0 {
+                    let spreadOffsets = mode == 5 ? [12, -12, 7, -5] : [7, -5, 12, -12]
+                    let spreadScale = max(0.35, 1.0 - (0.60 * pitchMatchStrength))
+                    midiTarget += Int((Float(spreadOffsets[(spawnIndex - 1) % spreadOffsets.count]) * spreadScale).rounded())
+                }
                 if !resonMotif.isEmpty {
-                    finalMidi += resonMotif[resonMotifStep % resonMotif.count]
+                    midiTarget += resonMotif[resonMotifStep % resonMotif.count]
                     resonMotifStep = (resonMotifStep + 1) % max(1, resonMotif.count)
                 }
+                var finalMidi = nearestChordMidi(targetMidi: midiTarget, rootMidi: resonRootMidi, intervals: resonChordIntervals)
+                if let detectedMidi, pitchMatchStrength > 0.08 {
+                    let corrected = (Float(finalMidi) * (1.0 - (0.55 * pitchMatchStrength))) + (detectedMidi * (0.55 * pitchMatchStrength))
+                    finalMidi = nearestChordMidi(targetMidi: Int(corrected.rounded()), rootMidi: resonRootMidi, intervals: resonChordIntervals)
+                }
+                var attempts = 0
+                while attempts < antiRepeatSteps.count &&
+                    (finalMidi == resonLastMidi || burstMidis.contains(finalMidi)) {
+                    let shift = antiRepeatSteps[(spawnIndex + attempts) % antiRepeatSteps.count]
+                    finalMidi = nearestChordMidi(
+                        targetMidi: finalMidi + shift,
+                        rootMidi: resonRootMidi,
+                        intervals: resonChordIntervals
+                    )
+                    attempts += 1
+                }
+                burstMidis.append(finalMidi)
+                resonLastMidi = finalMidi
+
                 let freqHz = 440.0 * powf(2.0, Float(finalMidi - 69) / 12.0)
                 let minLenMs: Float = 60
                 let maxLenMs: Float = mode == 5 ? 1_500 : 1_200
                 var lenMs = minLenMs + (maxLenMs - minLenMs) * (0.15 + 0.75 * (1.0 - Float(controlCurrent.noteRate)))
+                lenMs *= 1.14 - (0.58 * levelNorm)
+                lenMs *= 1.0 - (0.26 * transientNorm)
+                if spawnIndex > 0 {
+                    lenMs *= max(0.42, 0.78 - (0.14 * Float(spawnIndex)))
+                }
                 let articulation = controlCurrent.articulationId.lowercased()
                 if articulation.contains("short") {
                     lenMs *= 0.55
@@ -2803,13 +6560,44 @@ private final class MasterRenderState {
                 lenMs = min(maxLenMs, max(minLenMs, lenMs))
                 let sustain = max(1, Int((lenMs / 1000.0) * sampleRate))
                 let release = max(1, Int((mode == 5 ? 0.11 : 0.09) * sampleRate))
-                let velocity = max(0.12, min(1.0, 0.22 + (resonEnv * 2.2 * Float(controlCurrent.velocityBias))))
-                let panSpeed = (0.0004 + Float(controlCurrent.motionSpeed) * 0.0024) * (0.8 + 0.4 * randomUnit())
-                let panRadius = max(0.20, min(1.0, Float(controlCurrent.spread) * (mode == 5 ? 0.95 : 0.80)))
+                let velocityFloor: Float = mode == 5 ? 0.18 : 0.14
+                let velocityBase = 0.16 + (levelNorm * 1.9 * Float(controlCurrent.velocityBias))
+                let burstVelocity = max(0.62, 1.0 - (Float(spawnIndex) * 0.11))
+                let velocity = max(velocityFloor, min(1.0, (velocityBase * burstVelocity) + (0.14 * transientNorm)))
+                let panSpeed = (0.0005 + Float(controlCurrent.motionSpeed) * 0.0026) * (0.8 + 0.4 * randomUnit())
+                let panRadiusBase = Float(controlCurrent.spread) * (mode == 5 ? 0.95 : 0.85)
+                let panRadius = max(0.20, min(1.0, panRadiusBase * (0.82 + 0.30 * activityNorm)))
+                let voiceInstrument = resonCurrentInstrument
+                var zoneIndex = -1
+                var samplePosition: Float = 0
+                var sampleStep: Float = 1
+                var sustainSamples = sustain
+                let zoneMidiHint: Int = {
+                    guard let detectedMidi else { return finalMidi }
+                    let bias = 0.45 * pitchMatchStrength
+                    let hinted = (Float(finalMidi) * (1.0 - bias)) + (detectedMidi * bias)
+                    return Int(hinted.rounded())
+                }()
+                if let selectedZoneIndex = resonSampleZoneIndex(in: voiceInstrument, midiNote: zoneMidiHint) {
+                    zoneIndex = selectedZoneIndex
+                    let zone = voiceInstrument.sampleZones[selectedZoneIndex]
+                    samplePosition = Float(zone.startFrame)
+                    let transpose = powf(2.0, Float(finalMidi - zone.rootMidi) / 12.0)
+                    let stepMin: Float = pitchMatchStrength > 0.50 ? 0.45 : 0.33
+                    let stepMax: Float = pitchMatchStrength > 0.50 ? 2.2 : 3.0
+                    sampleStep = max(stepMin, min(stepMax, (zone.sampleRate / sampleRate) * transpose))
+                    let availableFrames = max(1, zone.endFrame - zone.startFrame)
+                    let maxPlayable = Int(Float(availableFrames) / max(0.01, sampleStep))
+                    sustainSamples = max(1, min(sustainSamples, maxPlayable))
+                }
                 resonVoices[slot].reset(
                     midiNote: finalMidi,
                     freqHz: freqHz,
-                    sustainSamples: sustain,
+                    instrumentId: voiceInstrument.id,
+                    sampleZoneIndex: zoneIndex,
+                    samplePosition: samplePosition,
+                    sampleStep: sampleStep,
+                    sustainSamples: sustainSamples,
                     releaseSamples: release,
                     velocity: velocity,
                     panPhase: randomUnit() * Float.pi * 2.0,
@@ -2817,10 +6605,12 @@ private final class MasterRenderState {
                     panRadius: panRadius,
                     panOffset: randomUnit() * Float.pi * 2.0
                 )
+                resonSpawnCount &+= 1
             }
         }
 
         var activeCount = 0
+        var frameEnergy: Float = 0
         for i in 0..<resonVoices.count where resonVoices[i].active {
             activeCount += 1
             if activeCount > effectiveVoiceCap {
@@ -2829,11 +6619,27 @@ private final class MasterRenderState {
                 interventions.insert(.voiceCap)
             }
 
-            let phase = resonVoices[i].phase
+            let voiceInstrument = cachedResonInstrument(id: resonVoices[i].instrumentId)
             let inh = Float(controlCurrent.inharmonicity)
-            let currentSample = renderResonInstrumentSample(resonCurrentInstrument, phase: phase, inharmonicity: inh)
-            let swapSample = renderResonInstrumentSample(resonSwapInstrument, phase: phase, inharmonicity: inh)
-            let instSample = (currentSample * resonSwapMix) + (swapSample * (1.0 - resonSwapMix))
+            let phase = resonVoices[i].phase
+            let oscillatorSample = renderResonInstrumentSample(voiceInstrument, phase: phase, inharmonicity: inh)
+            let instSample: Float
+            if resonVoices[i].sampleZoneIndex >= 0,
+               resonVoices[i].sampleZoneIndex < voiceInstrument.sampleZones.count {
+                let zone = voiceInstrument.sampleZones[resonVoices[i].sampleZoneIndex]
+                if resonVoices[i].samplePosition >= Float(zone.endFrame) {
+                    resonVoices[i].active = false
+                    continue
+                }
+                let zoneSample = resonSampleZoneLinear(zone, at: resonVoices[i].samplePosition) * zone.gain
+                let fallbackBlend: Float = zone.peak < 0.006 ? 0.25 : 0.0
+                instSample = (zoneSample * (1.0 - fallbackBlend)) + (oscillatorSample * fallbackBlend)
+                resonVoices[i].samplePosition += resonVoices[i].sampleStep
+            } else {
+                instSample = oscillatorSample
+            }
+            resonVoices[i].phase += resonVoices[i].freqHz / sampleRate
+            resonVoices[i].phase -= floorf(resonVoices[i].phase)
 
             let attack = max(1, Int(sampleRate * 0.005))
             let env: Float
@@ -2847,6 +6653,7 @@ private final class MasterRenderState {
             }
 
             let voiceOut = instSample * env * resonVoices[i].velocity
+            frameEnergy += voiceOut * voiceOut
             resonVoices[i].panPhase += resonVoices[i].panSpeed
             let x = resonVoices[i].panRadius * cosf(resonVoices[i].panPhase + resonVoices[i].panOffset)
             let y = resonVoices[i].panRadius * sinf((resonVoices[i].panPhase * 0.85) + resonVoices[i].panOffset * 0.6)
@@ -2856,15 +6663,28 @@ private final class MasterRenderState {
                 spread: max(0.25, min(1.0, Float(controlCurrent.spread))),
                 into: &targetGains
             )
-            applyGains(voiceOut * Float(controlCurrent.wetLevel), gains: targetGains, &ch0, &ch1, &ch2, &ch3, &ch4, &ch5)
+            let modeWetBoost: Float = mode == 5 ? 1.65 : 1.35
+            applyGains(voiceOut * Float(controlCurrent.wetLevel) * modeWetBoost, gains: targetGains, &ch0, &ch1, &ch2, &ch3, &ch4, &ch5)
             reverbSend += voiceOut * (mode == 5 ? 0.18 : 0.12)
 
-            resonVoices[i].phase += resonVoices[i].freqHz / sampleRate
-            resonVoices[i].phase -= floorf(resonVoices[i].phase)
-            resonVoices[i].age += 1
-            if env <= 0.0001 || resonVoices[i].age > (resonVoices[i].sustainSamples + resonVoices[i].releaseSamples) {
+            let releaseStartAge = resonVoices[i].sustainSamples
+            let releaseDoneAge = resonVoices[i].sustainSamples + resonVoices[i].releaseSamples
+            let nextAge = resonVoices[i].age + 1
+            if nextAge > releaseDoneAge
+                || (resonVoices[i].age >= releaseStartAge && env <= 0.0001) {
                 resonVoices[i].active = false
+            } else {
+                resonVoices[i].age = nextAge
             }
+        }
+
+        resonOutputEnergyAccum += frameEnergy
+        resonOutputMeterSamples += 1
+        let meterWindow = max(256, Int(sampleRate * 0.10))
+        if resonOutputMeterSamples >= meterWindow {
+            resonLastOutputRMS = sqrtf(resonOutputEnergyAccum / Float(max(1, resonOutputMeterSamples)))
+            resonOutputEnergyAccum = 0
+            resonOutputMeterSamples = 0
         }
 
         resonDebugCounter += 1
@@ -3196,50 +7016,144 @@ private final class MasterRenderState {
         return tanhf(filtered * safetyGain)
     }
 
-    private func processResonator(input: Float) -> Float {
-        let excite = input * Float(controlCurrent.exciteAmount)
-        let resonance = 0.78 + 0.20 * Float(controlCurrent.resonance)
-        let profile = resonatorProfileFreqs(controlCurrent.resonatorTuningProfileId)
-
-        var sum: Float = 0
-        for i in 0..<profile.count {
-            let w = 2.0 * Float.pi * profile[i] / sampleRate
-            let a = 2.0 * resonance * cosf(w)
-            let b = resonance * resonance
-            let y = excite + a * resonY1[i] - b * resonY2[i]
-            resonY2[i] = resonY1[i]
-            resonY1[i] = y
-            sum += y
-        }
-        let profileCount = Float(max(1, profile.count))
-        let normalized = sum / profileCount
-        let driveGain = 1.0 + 1.35 * Float(controlCurrent.drive)
-        let driven = tanhf(normalized * driveGain)
-        return driven * (0.80 + 0.20 * Float(controlCurrent.resonance))
-    }
-
-    private func processBitReduction(input: Float) -> Float {
+    private func processMode3(input: Float) -> Float {
+        let drive = max(0, min(1, Float(controlCurrent.drive)))
+        let resonance = max(0, min(1, Float(controlCurrent.resonance)))
+        let downNorm = max(0, min(1, Float(controlCurrent.downsample)))
         let bitDepthControl = Float(controlCurrent.bitDepth)
         let bits = max(8, min(24, Int((8.0 + (bitDepthControl * 8.0)).rounded())))
         let bitDepthNorm = (Float(bits) - 8.0) / 16.0
-        let quantLevels = Float(1 << bits)
-        let q = roundf(input * quantLevels) / quantLevels
-
-        let downNorm = Float(controlCurrent.downsample)
-        let holdN = max(1, Int(1 + downNorm * 4.0))
-        if downsampleCounter <= 0 {
-            downsampleHold = q
-            downsampleCounter = holdN
-        } else {
-            downsampleCounter -= 1
-        }
-        let crushMix = min(0.45, 0.10 + 0.55 * downNorm + 0.30 * (1.0 - bitDepthNorm))
-        return input * (1.0 - crushMix) + downsampleHold * crushMix
+        let severity = min(1.0, max(0.0, (0.58 * (1.0 - bitDepthNorm)) + (0.42 * downNorm)))
+        // Make mode 3 input-first: pre-drive the mic signal, then crush.
+        let preGain = 1.8 + (8.0 * drive)
+        let driven = tanhf(input * preGain)
+        let texture = processMode3Inharmonic(input: driven)
+        let textureMix = 0.02 + (0.10 * resonance)
+        let source = (driven * (1.0 - textureMix)) + (texture * textureMix)
+        let crushed = processMode3BitCore(input: source)
+        let crusherDelta = crushed - source
+        let emphasized = crushed + (crusherDelta * (0.30 + (0.95 * severity)))
+        let shaped = processMode3SafetyShaping(input: emphasized)
+        // Keep final saturation as safety glue, not the main timbre source.
+        let glue = 0.90 + (0.14 * drive)
+        return tanhf(shaped * glue) * 0.95
     }
 
-    private func processWetHFClamp(input: Float) -> Float {
-        let cutoff = 3_000.0 + (7_000.0 * Float(1.0 - controlCurrent.resonance * 0.7))
-        let alpha = onePoleAlpha(cutoffHz: Float(cutoff), sampleRate: sampleRate)
+    private func processMode3Inharmonic(input: Float) -> Float {
+        let spread = max(0, min(1, Float(controlCurrent.resonance)))
+        let depth = max(0, min(1, Float(controlCurrent.drive)))
+        let tone = max(0, min(1, Float(controlCurrent.exciteAmount)))
+        let downNorm = max(0, min(1, Float(controlCurrent.downsample)))
+
+        // Keep a smooth activity follower; avoid transient-triggered jumps that read as clicks.
+        mode3State.env += 0.010 * (abs(input) - mode3State.env)
+        let transient = abs(input - mode3State.prevInput)
+        mode3State.prevInput = input
+        mode3State.triggerSmoothed += 0.020 * (transient - mode3State.triggerSmoothed)
+
+        let baseHz: Float = 78.0 + (132.0 * spread) + (96.0 * tone)
+        let ratioA: Float = 1.313 + (0.52 * spread)
+        let ratioB: Float = 2.071 + (0.44 * spread)
+        let ratioRing: Float = 2.743 + (0.52 * tone)
+        let carrierHz = baseHz * (1.0 + 0.06 * tone)
+
+        mode3State.modPhaseA += (2.0 * .pi * baseHz * ratioA) / sampleRate
+        mode3State.modPhaseB += (2.0 * .pi * baseHz * ratioB) / sampleRate
+        mode3State.ringPhase += (2.0 * .pi * baseHz * ratioRing) / sampleRate
+        mode3State.shimmerPhase += (2.0 * .pi * (16.0 + (58.0 * spread))) / sampleRate
+        mode3State.carrierPhase += (2.0 * .pi * carrierHz) / sampleRate
+        if mode3State.modPhaseA > 2.0 * .pi { mode3State.modPhaseA -= 2.0 * .pi }
+        if mode3State.modPhaseB > 2.0 * .pi { mode3State.modPhaseB -= 2.0 * .pi }
+        if mode3State.ringPhase > 2.0 * .pi { mode3State.ringPhase -= 2.0 * .pi }
+        if mode3State.shimmerPhase > 2.0 * .pi { mode3State.shimmerPhase -= 2.0 * .pi }
+        if mode3State.carrierPhase > 2.0 * .pi { mode3State.carrierPhase -= 2.0 * .pi }
+
+        let modA = sinf(mode3State.modPhaseA)
+        let modB = sinf(mode3State.modPhaseB)
+        let shimmer = sinf(mode3State.shimmerPhase)
+        let modSignal = (modA * 0.56) + (modB * 0.44) + (shimmer * 0.20)
+        let fmIndex = 0.18 + (1.12 * depth) + (0.46 * mode3State.env)
+        let carrier = sinf(mode3State.carrierPhase + (fmIndex * modSignal))
+        let sideA = sinf((mode3State.carrierPhase * 1.41) + (modB * 1.07))
+        let sideB = sinf((mode3State.carrierPhase * 2.07) + (modA * 0.88))
+        let ringed = carrier * sinf(mode3State.ringPhase)
+        let texture = (carrier * 0.44) + (sideA * 0.22) + (sideB * 0.18) + (ringed * 0.24)
+        let activity = min(1.0, (mode3State.env * 8.0) + (transient * 6.0))
+        let textureAmt = (0.06 + (0.22 * spread) + (0.10 * tone)) * activity * (1.0 - 0.35 * downNorm)
+        let inputAnchor = input * (0.68 + (0.16 * depth))
+        return inputAnchor + (texture * textureAmt)
+    }
+
+    private func mode3BellBucketFrequency(spread: Float, tone: Float, trigger: Float, input: Float) -> Float {
+        let buckets: [Float] = [110.0, 130.81, 146.83, 174.61, 196.0, 220.0, 261.63, 293.66, 329.63, 392.0, 440.0, 523.25]
+        let weighted = min(0.999, max(0.0, (0.52 * spread) + (0.28 * tone) + (0.20 * min(1.0, trigger * 8.0))))
+        let baseIndex = min(buckets.count - 1, max(0, Int(weighted * Float(buckets.count))))
+        let offset = (input >= 0 ? 1 : -1) * ((mode3State.strikeIndex % 3) - 1)
+        let idx = max(0, min(buckets.count - 1, baseIndex + offset))
+        let base = buckets[idx]
+        let semitone = roundf(12.0 * log2f(base / 55.0))
+        let quantized = 55.0 * powf(2.0, semitone / 12.0)
+        return quantized * (1.0 + (0.05 * (spread - 0.5)))
+    }
+
+    private func processMode3BitCore(input: Float) -> Float {
+        let bitDepthControl = Float(controlCurrent.bitDepth)
+        let bits = max(8, min(24, Int((8.0 + (bitDepthControl * 8.0)).rounded())))
+        let effectiveBits = max(3, min(12, Int((Float(bits) * 0.45).rounded())))
+        let bitDepthNorm = (Float(effectiveBits) - 3.0) / 9.0
+        let downNorm = max(0, min(1, Float(controlCurrent.downsample)))
+        let levels = powf(2.0, Float(effectiveBits - 1))
+        let quantized = roundf(input * levels) / max(1.0, levels)
+
+        let downForHold = max(0.15, downNorm)
+        let holdN = max(2, Int(2 + (powf(downForHold, 1.20) * 220.0)))
+        if mode3State.holdCounter <= 0 {
+            mode3State.holdSample = quantized
+            mode3State.holdCounter = holdN
+        } else {
+            mode3State.holdCounter -= 1
+        }
+        // De-zipper S&H edges to avoid impulse-like clicks while preserving grit.
+        let holdSmooth = 0.18 + (0.42 * (1.0 - downNorm))
+        mode3State.holdSmoothed += holdSmooth * (mode3State.holdSample - mode3State.holdSmoothed)
+
+        let baseSeverity = min(1.0, max(0.0, (0.58 * (1.0 - bitDepthNorm)) + (0.42 * downNorm)))
+        let severity = max(0.45, baseSeverity)
+        let crushMix = min(1.0, 0.88 + (0.12 * severity))
+        let aliased = mode3State.holdSmoothed + ((quantized - mode3State.holdSmoothed) * (0.08 + (0.72 * downNorm)))
+        return ((1.0 - crushMix) * input) + (crushMix * aliased)
+    }
+
+    private func processMode3SafetyShaping(input: Float) -> Float {
+        let tone = max(0, min(1, Float(controlCurrent.exciteAmount)))
+        let hfCutoff = 1_700.0 + (5_200.0 * (0.35 + (0.65 * tone)))
+        let hfAlpha = onePoleAlpha(cutoffHz: hfCutoff, sampleRate: sampleRate)
+        mode3State.hfClampY += hfAlpha * (input - mode3State.hfClampY)
+        let hf = input - mode3State.hfClampY
+
+        mode3State.deEssEnv += 0.009 * (abs(hf) - mode3State.deEssEnv)
+        let deEss = min(0.55, max(0.0, (mode3State.deEssEnv - 0.08) * (3.6 - (1.2 * tone))))
+        let hfSafe = hf * (1.0 - deEss)
+
+        let lowMidCutoff = 240.0 + (280.0 * (1.0 - tone))
+        let lowMidAlpha = onePoleAlpha(cutoffHz: lowMidCutoff, sampleRate: sampleRate)
+        mode3State.lowMidLP += lowMidAlpha * (input - mode3State.lowMidLP)
+        let lowMidControl = 0.04 + (0.14 * Float(controlCurrent.resonance)) + (0.05 * mode3State.env)
+        var shaped = (mode3State.hfClampY + hfSafe) - (mode3State.lowMidLP * lowMidControl)
+
+        let tilt = -0.30 + (0.70 * tone)
+        shaped += hfSafe * tilt * 0.20
+
+        let dcBlocked = shaped - mode3State.dcPrevX + (0.995 * mode3State.dcPrevY)
+        mode3State.dcPrevX = shaped
+        mode3State.dcPrevY = dcBlocked
+        return dcBlocked
+    }
+
+    private func processMode3ReverbClamp(input: Float) -> Float {
+        let tone = max(0, min(1, Float(controlCurrent.exciteAmount)))
+        let cutoff = 1_400.0 + (3_600.0 * tone)
+        let alpha = onePoleAlpha(cutoffHz: cutoff, sampleRate: sampleRate)
         wetClampY += alpha * (input - wetClampY)
         return wetClampY
     }
@@ -3367,17 +7281,6 @@ private final class MasterRenderState {
         for i in 0..<6 {
             current[i] += gainSlew * (target[i] - current[i])
         }
-    }
-
-    private func resonatorProfileFreqs(_ id: String) -> [Float] {
-        let lower = id.lowercased()
-        if lower.contains("metal") {
-            return [210, 310, 470, 820, 1_270, 1_960]
-        }
-        if lower.contains("body") {
-            return [110, 190, 320, 620, 910, 1_430]
-        }
-        return [140, 260, 430, 680, 1_040, 1_620]
     }
 
     private func randomUnit() -> Float {

@@ -1,19 +1,20 @@
 import SwiftUI
 import Combine
 
-enum HarnessRunProfile: String, CaseIterable, Identifiable {
-    case networkOnly
+enum HarnessRunProfile: String, Identifiable {
     case audioAndFeatures
 
     var id: String { rawValue }
 
     var title: String {
-        switch self {
-        case .networkOnly:
-            return "Network Only (10 Hz)"
-        case .audioAndFeatures:
-            return "Audio + Real Features"
-        }
+        "Audio + Real Features"
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        guard indices.contains(index) else { return nil }
+        return self[index]
     }
 }
 
@@ -89,7 +90,7 @@ enum ModelSlotPersistence {
     }
 }
 
-struct RubricScores: Codable, Equatable {
+struct RubricScores: Codable, Equatable, Sendable {
     var stability: Double = 3
     var responsiveness: Double = 3
     var timbreQuality: Double = 3
@@ -101,7 +102,7 @@ struct RubricScores: Codable, Equatable {
     }
 }
 
-private struct RubricEntry: Codable {
+private struct RubricEntry: Codable, Sendable {
     let tsMs: Int
     let sessionId: String?
     let bundleId: String?
@@ -117,6 +118,11 @@ private final class RubricEntryWriter {
     private let queue = DispatchQueue(label: "tub.rubric.writer", qos: .utility)
 
     func append(_ entry: RubricEntry, appName: String = "TheTubHarness") {
+        let enc = JSONEncoder()
+        enc.keyEncodingStrategy = .convertToSnakeCase
+        guard var payload = try? enc.encode(entry) else { return }
+        payload.append(0x0A)
+
         queue.async {
             guard let base = try? SessionPaths.appSupportBaseDirectory(appName: appName) else { return }
             let fileURL = base
@@ -128,10 +134,6 @@ private final class RubricEntryWriter {
                 if !FileManager.default.fileExists(atPath: fileURL.path) {
                     FileManager.default.createFile(atPath: fileURL.path, contents: nil)
                 }
-                let enc = JSONEncoder()
-                enc.keyEncodingStrategy = .convertToSnakeCase
-                var payload = try enc.encode(entry)
-                payload.append(0x0A)
                 let handle = try FileHandle(forWritingTo: fileURL)
                 try handle.seekToEnd()
                 handle.write(payload)
@@ -155,6 +157,20 @@ struct TelemetrySample: Identifiable {
     let replayAudioTimeS: Double
     let replayTargetTimeS: Double
     let replayAlignmentDeltaS: Double
+}
+
+private enum ShellVisibilityPanel: String, Hashable {
+    case left
+    case right
+    case timeline
+}
+
+private enum TimelineMetricToggle: String, Hashable {
+    case latency
+    case tick
+    case timeout
+    case interventions
+    case alignment
 }
 
 struct ShellLayoutViewModel {
@@ -368,11 +384,15 @@ final class ControlRoomState: ObservableObject {
 
     func saveRubric(mode: Int, runProfile: HarnessRunProfile) {
         guard let client else { return }
+        guard let targetSessionId = client.feedbackTargetSessionId else {
+            appendEvent("Rubric not saved: no feedback target session.", severity: .warning)
+            return
+        }
 
         let entry = RubricEntry(
             tsMs: Int(Date().timeIntervalSince1970 * 1000),
-            sessionId: client.activeSessionId,
-            bundleId: client.bundlePath,
+            sessionId: targetSessionId,
+            bundleId: client.feedbackTargetBundleId,
             mode: mode,
             runProfile: runProfile.rawValue,
             scores: rubric.scores,
@@ -492,15 +512,18 @@ private struct TelemetryTimelineView: View {
 
                 var border = Path()
                 border.addRoundedRect(in: CGRect(x: 0.5, y: 0.5, width: size.width - 1, height: size.height - 1), cornerSize: CGSize(width: 6, height: 6))
-                context.stroke(border, with: .color(Color.white.opacity(0.18)), lineWidth: 1)
+                context.stroke(border, with: .color(Color.black.opacity(0.16)), lineWidth: 1)
             }
             .overlay(alignment: .topLeading) {
                 Text("Latency / Tick / Timeout / Alignment")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.75))
+                    .foregroundStyle(Color.black.opacity(0.76))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.black.opacity(0.35), in: Capsule())
+                    .background(Color.white.opacity(0.90), in: Capsule())
+                    .overlay {
+                        Capsule().stroke(Color.black.opacity(0.12), lineWidth: 1)
+                    }
                     .padding(.top, 6)
                     .padding(.leading, 6)
             }
@@ -535,7 +558,7 @@ struct ContentView: View {
     private let modeEngine = ModeEngine()
 
     @State private var mode: Int = 0
-    @State private var runProfile: HarnessRunProfile = .audioAndFeatures
+    private let runProfile: HarnessRunProfile = .audioAndFeatures
     @State private var recordInputAudio: Bool
 
     @State private var replayPath: String = ""
@@ -544,7 +567,17 @@ struct ContentView: View {
     @State private var replayStatus: String?
     @State private var isReplayRunning: Bool = false
     @State private var replayCancelToken: ReplayCancellationToken?
+    @State private var evalDatasetPath: String = "/Users/seb/the-tub-ml/datasets/phase1/bootstrap_golden.jsonl"
+    @State private var evalBaselinePath: String = "/Users/seb/the-tub-ml/models/policy_v1.pt"
+    @State private var evalCandidatePath: String = "/Users/seb/the-tub-ml/models/policy_v1_mode4.pt"
+    @State private var evalModesCSV: String = ""
+    @State private var evalStatus: String?
+    @State private var evalReportText: String = ""
+    @State private var isEvalRunning: Bool = false
     @State private var commandQuery: String = ""
+    @State private var showInputRoutingModal: Bool = false
+    @State private var showOutputRoutingModal: Bool = false
+    @State private var showManualReplayEntry: Bool = false
 
     init(defaultRecordInputAudio: Bool = false) {
         _recordInputAudio = State(initialValue: defaultRecordInputAudio)
@@ -554,8 +587,8 @@ struct ContentView: View {
         ZStack {
             LinearGradient(
                 colors: [
-                    Color(red: 0.06, green: 0.07, blue: 0.08),
-                    Color(red: 0.11, green: 0.12, blue: 0.14)
+                    Color(red: 0.94, green: 0.96, blue: 0.99),
+                    Color(red: 0.89, green: 0.93, blue: 0.98)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -565,29 +598,21 @@ struct ContentView: View {
             VStack(spacing: 10) {
                 topBar
 
-                HStack(alignment: .top, spacing: 10) {
-                    if controlRoom.shell.showLeftRail {
-                        leftRail
-                            .frame(width: 330)
-                    }
-
-                    centerStage
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    if controlRoom.shell.showRightRail {
-                        rightRail
-                            .frame(width: 360)
-                    }
-                }
-
                 if controlRoom.shell.showBottomTimeline {
-                    bottomTimeline
-                        .frame(height: 220)
+                    VSplitView {
+                        workspaceDeck
+                            .frame(minHeight: 420, maxHeight: .infinity, alignment: .top)
+                        bottomTimeline
+                            .frame(minHeight: 170, idealHeight: 220, maxHeight: 260)
+                    }
+                } else {
+                    workspaceDeck
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .padding(12)
-            .foregroundStyle(Color.white.opacity(0.93))
-            .font(.system(size: 13, weight: .medium, design: .monospaced))
+            .foregroundStyle(Color.black.opacity(0.88))
+            .font(.system(size: 13, weight: .medium, design: .rounded))
         }
         .sheet(isPresented: Binding(
             get: { controlRoom.shell.showCommandPalette },
@@ -601,131 +626,272 @@ struct ContentView: View {
         )) {
             shortcutLegend
         }
+        .sheet(isPresented: $showInputRoutingModal) {
+            inputRoutingModal
+        }
+        .sheet(isPresented: $showOutputRoutingModal) {
+            outputRoutingModal
+        }
+        .environment(\.colorScheme, .light)
         .onAppear {
             client.setMode(mode)
+            analyzer.onLiveInputBuffer = { [weak audio] buffer, time in
+                audio?.ingestLiveInputBuffer(buffer, time: time)
+            }
             analyzer.refreshInputDevices()
+            audio.refreshInputRouting()
+            audio.refreshOutputDevices()
             controlRoom.bind(client: client, audio: audio, analyzer: analyzer)
+            syncLiveInputCaptureInfo()
+            syncSessionInputRouteMetadata()
+            syncSessionOutputRouteMetadata()
 
             audio.onInputRecordingAlignment = { alignment in
                 client.noteSessionAudioAlignment(hostTime: alignment.hostTime, sampleIndex: alignment.sampleIndex)
             }
         }
+        .onChange(of: analyzer.inputRouteProfile) { _, _ in
+            syncLiveInputCaptureInfo()
+            syncSessionInputRouteMetadata()
+        }
+        .onChange(of: analyzer.inputRouteWarning) { _, _ in
+            syncLiveInputCaptureInfo()
+            syncSessionInputRouteMetadata()
+        }
+        .onChange(of: audio.outputProfile) { _, _ in
+            syncSessionOutputRouteMetadata()
+        }
+        .onChange(of: audio.outputRouteMode) { _, _ in
+            syncSessionOutputRouteMetadata()
+        }
+    }
+
+    private var workspaceDeck: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if controlRoom.shell.showLeftRail {
+                leftRail
+                    .frame(width: 320)
+                    .frame(maxHeight: .infinity, alignment: .top)
+            }
+
+            centerStage
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+            if controlRoom.shell.showRightRail {
+                rightRail
+                    .frame(width: 360)
+                    .frame(maxHeight: .infinity, alignment: .top)
+            }
+        }
     }
 
     private var topBar: some View {
-        HStack(spacing: 10) {
-            Text("THE TUB CONTROL ROOM")
-                .font(.system(size: 16, weight: .bold, design: .rounded))
-                .foregroundStyle(Color(red: 0.86, green: 0.90, blue: 0.96))
+        VStack(alignment: .leading, spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 14) {
+                    headerBrandBlock
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    headerStateRail
+                    headerActionRail
+                }
 
-            statusChip(label: controlRoom.transport.isReady ? "MODEL READY" : "MODEL OFFLINE", active: controlRoom.transport.isReady)
-            statusChip(label: client.isRunning ? "LIVE RUN" : "IDLE", active: client.isRunning)
-            statusChip(label: isReplayRunning ? "REPLAY" : "NO REPLAY", active: isReplayRunning)
+                VStack(alignment: .leading, spacing: 10) {
+                    headerBrandBlock
+                    HStack(alignment: .center, spacing: 12) {
+                        headerStateRail
+                        Spacer(minLength: 0)
+                        headerActionRail
+                    }
+                }
 
-            Spacer(minLength: 8)
-
-            Button(client.isRunning ? "Stop" : "Start") {
-                if client.isRunning {
-                    stopAll()
-                } else {
-                    startSelectedProfile()
+                VStack(alignment: .leading, spacing: 10) {
+                    headerBrandBlock
+                    headerStateRail
+                    headerActionRail
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .tint(client.isRunning ? .red : .green)
-            .keyboardShortcut(.space, modifiers: [])
-            .accessibilityIdentifier("control_room.start_stop")
-            .disabled(isReplayRunning)
 
-            Button("Palette") {
-                controlRoom.shell.showCommandPalette = true
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    headerMetaTiles
+                }
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 8)], spacing: 8) {
+                    headerMetaTiles
+                }
             }
-            .buttonStyle(.bordered)
-            .keyboardShortcut("k", modifiers: [.command])
-            .accessibilityIdentifier("control_room.command_palette")
-
-            Button("Shortcuts") {
-                controlRoom.shell.showShortcutLegend = true
-            }
-            .buttonStyle(.bordered)
-
-            Divider()
-                .frame(height: 20)
-
-            Toggle("L", isOn: Binding(
-                get: { controlRoom.shell.showLeftRail },
-                set: { controlRoom.shell.showLeftRail = $0 }
-            ))
-            .toggleStyle(.button)
-
-            Toggle("R", isOn: Binding(
-                get: { controlRoom.shell.showRightRail },
-                set: { controlRoom.shell.showRightRail = $0 }
-            ))
-            .toggleStyle(.button)
-
-            Toggle("T", isOn: Binding(
-                get: { controlRoom.shell.showBottomTimeline },
-                set: { controlRoom.shell.showBottomTimeline = $0 }
-            ))
-            .toggleStyle(.button)
         }
-        .padding(10)
-        .background(Color.black.opacity(0.38), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(alignment: .bottomLeading) {
-            HStack(spacing: 14) {
-                Text("Session: \(controlRoom.transport.sessionId.isEmpty ? "none" : controlRoom.transport.sessionId)")
-                Text("Endpoint: \(controlRoom.transport.endpointHost):\(controlRoom.transport.endpointPort)")
-                Text(controlRoom.transport.bundlePath.isEmpty ? "Bundle: none" : "Bundle loaded")
-            }
-            .font(.system(size: 11, weight: .regular, design: .monospaced))
-            .foregroundStyle(Color.white.opacity(0.70))
-            .padding(.horizontal, 10)
-            .padding(.bottom, 4)
+        .shellPanelCard(fill: ShellChromePalette.surfaceElevated, borderOpacity: 0.18, shadowOpacity: 0.08, contentPadding: 8)
+    }
+
+    @ViewBuilder
+    private var headerBrandBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("The Tub Control Room")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle(ShellChromePalette.ink)
+            Text("Live DSP harness")
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .foregroundStyle(ShellChromePalette.inkSoft)
         }
     }
 
-    private var leftRail: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            panelTitle("Mode + Model Slots")
+    @ViewBuilder
+    private var headerStateRail: some View {
+        HStack(spacing: 8) {
+            headerStatePills
+        }
+    }
 
-            Stepper("Mode: \(mode)", value: $mode, in: 0...10)
-                .onChange(of: mode) { _, newValue in
-                    client.setMode(newValue)
-                }
-                .accessibilityIdentifier("control_room.mode_stepper")
+    @ViewBuilder
+    private var headerStatePills: some View {
+        ShellStatusPill(
+            title: "Model",
+            value: controlRoom.transport.isReady ? "Ready" : "Offline",
+            tone: controlRoom.transport.isReady ? .positive : .idle
+        )
+        ShellStatusPill(
+            title: "Run",
+            value: client.isRunning ? "Live Audio" : "Idle",
+            tone: client.isRunning ? .active : .idle
+        )
+        ShellStatusPill(
+            title: "Replay",
+            value: isReplayRunning ? "Active" : "Idle",
+            tone: isReplayRunning ? .warning : .idle
+        )
+        .fixedSize(horizontal: true, vertical: true)
+    }
 
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 6)], spacing: 6) {
-                ForEach(0...10, id: \.self) { m in
-                    Button("M\(m)") {
-                        mode = m
-                        client.setMode(m)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(mode == m ? .green : .gray)
-                }
+    @ViewBuilder
+    private var headerActionRail: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 8) {
+                headerTransportButton
+                headerSecondaryButtons
+                headerVisibilityToggleGroup
             }
 
-            Divider().background(Color.white.opacity(0.20))
-
-            HStack {
-                Text("Model Slots")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                Spacer()
-                Button("+") { controlRoom.addModelSlot() }
-                    .buttonStyle(.bordered)
-            }
-
-            ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(controlRoom.modelSlots.slots) { slot in
-                        slotCard(slot)
-                    }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    headerTransportButton
+                    headerSecondaryButtons
                 }
+                headerVisibilityToggleGroup
             }
         }
-        .padding(10)
-        .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var headerTransportButton: some View {
+        Button {
+            if client.isRunning {
+                stopAll()
+            } else {
+                startSelectedProfile()
+            }
+        } label: {
+            Label(client.isRunning ? "Stop" : "Start", systemImage: client.isRunning ? "stop.fill" : "play.fill")
+        }
+        .shellActionButton(
+            role: .primaryTransport,
+            accent: client.isRunning ? ShellChromePalette.dangerRed : ShellChromePalette.startGreen
+        )
+        .keyboardShortcut(.space, modifiers: [])
+        .accessibilityIdentifier("control_room.start_stop")
+        .disabled(isReplayRunning)
+    }
+
+    @ViewBuilder
+    private var headerSecondaryButtons: some View {
+        Button {
+            controlRoom.shell.showCommandPalette = true
+        } label: {
+            Label("Palette", systemImage: "command")
+        }
+        .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.accentBlue, size: .compact)
+        .keyboardShortcut("k", modifiers: [.command])
+        .accessibilityIdentifier("control_room.command_palette")
+
+        Button {
+            controlRoom.shell.showShortcutLegend = true
+        } label: {
+            Label("Shortcuts", systemImage: "keyboard")
+        }
+        .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.accentBlue, size: .compact)
+    }
+
+    private var headerVisibilityToggleGroup: some View {
+        ShellSegmentedToggleGroup(
+            items: [
+                ShellSegmentedToggleItem(value: ShellVisibilityPanel.left, title: "Left Panel", systemImage: nil),
+                ShellSegmentedToggleItem(value: ShellVisibilityPanel.right, title: "Right Panel", systemImage: nil),
+                ShellSegmentedToggleItem(value: ShellVisibilityPanel.timeline, title: "Timeline", systemImage: nil)
+            ],
+            isActive: isHeaderPanelVisible,
+            toggle: toggleHeaderPanel,
+            size: .compact
+        )
+    }
+
+    @ViewBuilder
+    private var headerMetaTiles: some View {
+        ShellMetaTile(label: "Session", value: sessionDisplayValue)
+        ShellMetaTile(label: "Endpoint", value: "\(controlRoom.transport.endpointHost):\(controlRoom.transport.endpointPort)")
+        ShellMetaTile(label: "Bundle", value: bundleDisplayName)
+        ShellMetaTile(label: "Input", value: analyzer.activeInputName)
+        ShellMetaTile(label: "Output", value: outputRouteSummary)
+    }
+
+    private var leftRail: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center) {
+                    panelTitle("Modes")
+                    Spacer()
+                    Text("Mode \(mode) Active")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(ShellChromePalette.accentBlue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(ShellChromePalette.accentBlueSoft, in: Capsule())
+                }
+
+                Text("Switch the live model mode directly. The DSP path stays on; only the active mode changes.")
+                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.inkSoft)
+
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    ForEach(0...10, id: \.self) { m in
+                        modeSelectorButton(m)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .shellPanelCard(fill: ShellChromePalette.surface, borderOpacity: 0.18)
+    }
+
+    private func modeSelectorButton(_ candidate: Int) -> some View {
+        let isActive = candidate == mode
+        return Button {
+            mode = candidate
+            client.setMode(candidate)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Mode \(candidate)")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                Text(isActive ? "Active now" : "Switch live mode")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(isActive ? ShellChromePalette.accentBlue : ShellChromePalette.inkSoft)
+            }
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+        }
+        .shellActionButton(
+            role: isActive ? .secondaryAction : .utilityAction,
+            accent: isActive ? ShellChromePalette.accentBlue : nil
+        )
     }
 
     private func slotCard(_ slot: ModelSlotProfile) -> some View {
@@ -776,205 +942,549 @@ struct ContentView: View {
                 Button(isArmed ? "Confirm Switch" : "Arm Switch") {
                     controlRoom.armOrSwitchSlot(slot)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(isArmed ? .orange : .blue)
+                .shellActionButton(
+                    role: .secondaryAction,
+                    accent: isArmed ? ShellChromePalette.warmAmber : ShellChromePalette.accentBlue,
+                    size: .compact
+                )
                 .accessibilityIdentifier("control_room.slot_switch_\(slot.id.uuidString)")
 
                 if controlRoom.modelSlots.slots.count > 1 {
                     Button("Remove") {
                         controlRoom.removeSlot(slot.id)
                     }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
+                    .shellActionButton(role: .destructiveAction, size: .compact)
                 }
             }
         }
         .padding(8)
-        .background((isActive ? Color.green.opacity(0.16) : Color.black.opacity(0.22)), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background((isActive ? Color.green.opacity(0.14) : Color(red: 0.97, green: 0.98, blue: 1.0)), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isArmed ? Color.orange.opacity(0.9) : Color.white.opacity(0.16), lineWidth: 1)
+                .stroke(isArmed ? Color.orange.opacity(0.9) : Color.black.opacity(0.14), lineWidth: 1)
         }
     }
 
     private var centerStage: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            panelTitle("Live Operations")
+        GeometryReader { proxy in
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    panelTitle("Live Operations")
 
-            HStack(spacing: 10) {
-                Picker("Run profile", selection: $runProfile) {
-                    ForEach(HarnessRunProfile.allCases) { p in
-                        Text(p.title).tag(p)
+                    HStack(spacing: 10) {
+                        ShellStatusPill(
+                            title: "Path",
+                            value: runProfile.title,
+                            tone: .active
+                        )
+                        .frame(maxWidth: 240, alignment: .leading)
+
+                        Text("This harness always runs the real audio + DSP path.")
+                            .font(.system(size: 11, weight: .regular, design: .rounded))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+
+                        Spacer()
+
+                        Toggle("Record Input Audio", isOn: $recordInputAudio)
+                            .toggleStyle(.switch)
+                            .accessibilityIdentifier("control_room.record_toggle")
                     }
-                }
-                .pickerStyle(.segmented)
+                    .padding(.horizontal, 2)
 
-                Toggle("Record Input Audio", isOn: $recordInputAudio)
-                    .toggleStyle(.switch)
-                    .accessibilityIdentifier("control_room.record_toggle")
-            }
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 12) {
+                            liveOpsInputCard
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                            liveOpsOutputCard
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
 
-            HStack(spacing: 8) {
-                if analyzer.inputDevices.isEmpty {
-                    Text("Input: none detected")
-                        .foregroundStyle(Color.orange)
-                } else {
-                    Picker("Input", selection: Binding(
-                        get: { analyzer.selectedInputUID },
-                        set: { setInputDevice(uid: $0) }
-                    )) {
-                        ForEach(analyzer.inputDevices) { device in
-                            Text(device.name).tag(device.uid)
+                        VStack(alignment: .leading, spacing: 12) {
+                            liveOpsInputCard
+                            liveOpsOutputCard
                         }
                     }
-                    .frame(maxWidth: 340)
-                }
 
-                Button("Refresh Inputs") { analyzer.refreshInputDevices() }
-                    .buttonStyle(.bordered)
-                Spacer()
-                Text("Active Input: \(analyzer.activeInputName)")
-                    .foregroundStyle(Color.white.opacity(0.75))
-            }
+                    HStack(spacing: 8) {
+                        let feedbackDisabled = isReplayRunning || client.feedbackTargetState == .none
+                        let feedbackTargetText: String = {
+                            switch client.feedbackTargetState {
+                            case .active:
+                                return "active: \(client.feedbackTargetSessionId ?? "none")"
+                            case .lastFinished:
+                                return "last finished: \(client.feedbackTargetSessionId ?? "none")"
+                            case .none:
+                                return "none"
+                            }
+                        }()
 
-            HStack(spacing: 8) {
-                Button("Jolt") { client.pulseJolt() }
-                    .buttonStyle(.bordered)
-                    .keyboardShortcut("j", modifiers: [.command])
-                    .disabled(isReplayRunning)
+                        Button("Jolt") { client.pulseJolt() }
+                            .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.warmAmber, size: .compact)
+                            .keyboardShortcut("j", modifiers: [.command])
+                            .disabled(isReplayRunning)
 
-                Button("Clear") { client.pulseClear() }
-                    .buttonStyle(.bordered)
-                    .keyboardShortcut("l", modifiers: [.command])
-                    .disabled(isReplayRunning)
+                        Button("Clear") { client.pulseClear() }
+                            .shellActionButton(role: .utilityAction, size: .compact)
+                            .keyboardShortcut("l", modifiers: [.command])
+                            .disabled(isReplayRunning)
 
-                Button("Send once") { client.sendOnce(mode: mode) }
-                    .buttonStyle(.bordered)
-                    .disabled(isReplayRunning)
+                        Button("Send once") { client.sendOnce(mode: mode) }
+                            .shellActionButton(role: .utilityAction, size: .compact)
+                            .disabled(isReplayRunning)
 
-                Divider().frame(height: 18)
+                        Divider().frame(height: 18)
 
-                Button("Good") { client.setHumanLabel(.good) }
-                    .buttonStyle(.bordered)
-                    .keyboardShortcut("1", modifiers: [])
-                Button("Too Much") { client.setHumanLabel(.tooMuch) }
-                    .buttonStyle(.bordered)
-                    .keyboardShortcut("2", modifiers: [])
-                Button("Too Flat") { client.setHumanLabel(.tooFlat) }
-                    .buttonStyle(.bordered)
-                    .keyboardShortcut("3", modifiers: [])
-                Button("Clear Label") { client.setHumanLabel(nil) }
-                    .buttonStyle(.bordered)
-                    .keyboardShortcut("0", modifiers: [])
+                        Button("Good") { client.setHumanLabel(.good) }
+                            .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.startGreen, size: .compact)
+                            .keyboardShortcut("1", modifiers: [])
+                            .disabled(feedbackDisabled)
+                        Button("Too Much") { client.setHumanLabel(.tooMuch) }
+                            .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.dangerRed, size: .compact)
+                            .keyboardShortcut("2", modifiers: [])
+                            .disabled(feedbackDisabled)
+                        Button("Too Flat") { client.setHumanLabel(.tooFlat) }
+                            .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.warmAmber, size: .compact)
+                            .keyboardShortcut("3", modifiers: [])
+                            .disabled(feedbackDisabled)
+                        Button("Clear Label") { client.setHumanLabel(nil) }
+                            .shellActionButton(role: .utilityAction, size: .compact)
+                            .keyboardShortcut("0", modifiers: [])
+                            .disabled(feedbackDisabled)
 
-                Spacer()
-                Text("Label: \(client.currentLabel?.rawValue ?? "none")")
-                    .foregroundStyle(Color.white.opacity(0.75))
-            }
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("Label: \(client.currentLabel?.rawValue ?? "none")")
+                                .foregroundStyle(Color.black.opacity(0.74))
+                            Text("Feedback target: \(feedbackTargetText)")
+                                .foregroundStyle(client.feedbackTargetState == .none ? Color.orange : Color.black.opacity(0.74))
+                                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                        }
+                    }
 
-            Divider().background(Color.white.opacity(0.20))
+                    Divider().background(Color.black.opacity(0.16))
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    TextField("Replay session_id", text: $replaySessionId)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("control_room.replay_session")
-                    Button("Start Replay") { startReplaySession() }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.blue)
-                        .disabled(client.isRunning || isReplayRunning || replaySessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .accessibilityIdentifier("control_room.replay_start")
-                    Button("Stop Replay") { stopReplay() }
-                        .buttonStyle(.bordered)
-                        .disabled(!isReplayRunning)
-                        .accessibilityIdentifier("control_room.replay_stop")
-                }
+                    replayOperationsCard
 
-                HStack(spacing: 8) {
-                    TextField("Seek replay seconds", text: $replaySeekSeconds)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("control_room.replay_seek")
-                    Button("Seek") { seekReplay() }
-                        .buttonStyle(.bordered)
-                        .disabled(!isReplayRunning || replaySeekSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
+                    Divider().background(Color.black.opacity(0.16))
 
-                if let replayStatus {
-                    Text(replayStatus)
-                        .foregroundStyle(Color.white.opacity(0.78))
-                        .font(.system(size: 12, weight: .regular, design: .monospaced))
-                }
-            }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 10)], spacing: 10) {
+                        metricCard("Sent", value: "\(client.sentCount)")
+                        metricCard("Recv", value: "\(client.recvCount)")
+                        metricCard("Timeout", value: "\(client.timeoutCount)")
+                        metricCard("Latency", value: client.lastLatencyMs.map { "\($0)ms" } ?? "na")
+                        metricCard("Tick", value: client.lastTickIntervalMs.map { String(format: "%.1fms", $0) } ?? "na")
+                        metricCard("AudioIn", value: analyzer.inputStatus.label)
+                    }
 
-            Divider().background(Color.white.opacity(0.20))
+                    if let reason = analyzer.fallbackReason {
+                        Text("Feature fallback: \(reason)")
+                            .foregroundStyle(Color.orange)
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    }
 
-            HStack(spacing: 12) {
-                metricCard("Sent", value: "\(client.sentCount)")
-                metricCard("Recv", value: "\(client.recvCount)")
-                metricCard("Timeout", value: "\(client.timeoutCount)")
-                metricCard("Latency", value: client.lastLatencyMs.map { "\($0)ms" } ?? "na")
-                metricCard("Tick", value: client.lastTickIntervalMs.map { String(format: "%.1fms", $0) } ?? "na")
-                metricCard("AudioIn", value: analyzer.inputStatus.label)
-            }
+                    if let err = client.lastError {
+                        Text("Error: \(err)")
+                            .foregroundStyle(Color(red: 0.94, green: 0.39, blue: 0.37))
+                    }
 
-            if let reason = analyzer.fallbackReason {
-                Text("Feature fallback: \(reason)")
-                    .foregroundStyle(Color.orange)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-            }
+                    if let out = client.lastOut {
+                        Text(roundTripLine(out))
+                            .foregroundStyle(Color.black.opacity(0.82))
+                            .lineLimit(2)
+                    }
 
-            if let err = client.lastError {
-                Text("Error: \(err)")
-                    .foregroundStyle(Color(red: 0.94, green: 0.39, blue: 0.37))
-            }
+                    Text(featuresLine(analyzer.latestFeatures))
+                        .foregroundStyle(Color.black.opacity(0.72))
+                        .lineLimit(2)
+                    if let out = client.lastOut, out.mode == 5 || out.mode == 6 {
+                        let diag = mode56DiagLine(mode: out.mode, interventions: audio.snapshotSafetyInterventions())
+                        if !diag.isEmpty {
+                            Text(diag)
+                                .foregroundStyle(Color.orange.opacity(0.92))
+                                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                .lineLimit(3)
+                        }
+                    }
 
-            if let out = client.lastOut {
-                Text(roundTripLine(out))
-                    .foregroundStyle(Color.white.opacity(0.78))
-                    .lineLimit(2)
-            }
+                    Divider().background(Color.black.opacity(0.16))
 
-            if runProfile == .audioAndFeatures {
-                Text(featuresLine(analyzer.latestFeatures))
-                    .foregroundStyle(Color.white.opacity(0.72))
-                    .lineLimit(2)
-            } else {
-                Text("Features source: dummy (network-only proof mode)")
-                    .foregroundStyle(Color.white.opacity(0.72))
-            }
-
-            Divider().background(Color.white.opacity(0.20))
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Control Room Event Log")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(controlRoom.events.prefix(30)) { event in
-                            HStack(alignment: .top, spacing: 6) {
-                                Text(timeString(event.timestamp))
-                                    .foregroundStyle(Color.white.opacity(0.55))
-                                    .frame(width: 72, alignment: .leading)
-                                Circle()
-                                    .fill(event.severity.color)
-                                    .frame(width: 6, height: 6)
-                                    .padding(.top, 5)
-                                Text(event.message)
-                                    .foregroundStyle(Color.white.opacity(0.88))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Control Room Event Log")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            ForEach(controlRoom.events.prefix(12)) { event in
+                                HStack(alignment: .top, spacing: 6) {
+                                    Text(timeString(event.timestamp))
+                                        .foregroundStyle(Color.black.opacity(0.60))
+                                        .frame(width: 72, alignment: .leading)
+                                    Circle()
+                                        .fill(event.severity.color)
+                                        .frame(width: 6, height: 6)
+                                        .padding(.top, 5)
+                                    Text(event.message)
+                                        .foregroundStyle(Color.black.opacity(0.86))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
                             }
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, minHeight: max(proxy.size.height - 24, 1), alignment: .topLeading)
+            }
+            .contentMargins(.vertical, 0, for: .scrollContent)
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .shellPanelCard(fill: ShellChromePalette.surface, borderOpacity: 0.18)
+    }
+
+    private var liveOpsInputCard: some View {
+        let activeInput = analyzer.inputDevices.first(where: { $0.uid == analyzer.selectedInputUID })
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Input")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                    Text("Live ingest and always-hot active paths.")
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.inkSoft)
+                }
+                Spacer()
+                Text("Active Input: \(analyzer.activeInputName)")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.inkSoft)
+            }
+
+            HStack(spacing: 8) {
+                inputDeviceMenu
+                Button("Refresh Inputs") {
+                    analyzer.refreshInputDevices()
+                    audio.refreshInputRouting()
+                    syncLiveInputCaptureInfo()
+                    syncSessionInputRouteMetadata()
+                }
+                .shellActionButton(role: .utilityAction, size: .compact)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Active Input Paths + Manual Trim")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                        Text("Primary input stays hot. Additional inputs are opt-in. Trims affect live DSP + features only.")
+                            .font(.system(size: 11, weight: .regular, design: .rounded))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                    }
+                    Spacer()
+                    Button("Open Input Paths & Trim") {
+                        showInputRoutingModal = true
+                    }
+                    .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.accentBlue, size: .compact)
+                }
+
+                HStack(spacing: 12) {
+                    Text("Active: \(analyzer.inputRouteProfile.activeCount)/\(activeInput?.inputChannels ?? 0)")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    Text("Map: \(analyzer.inputRouteProfile.activeSummary())")
+                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    if let warning = analyzer.inputRouteWarning, !warning.isEmpty {
+                        Text(warning)
+                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            .foregroundStyle(Color.black.opacity(0.86))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.orange.opacity(0.84), in: Capsule())
+                    } else {
+                        Text("Capture stays aligned with output.")
+                            .font(.system(size: 11, weight: .regular, design: .rounded))
+                    }
+                }
+                .foregroundStyle(Color.black.opacity(0.72))
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
+                    ForEach(0..<min(activeInput?.inputChannels ?? 0, 4), id: \.self) { idx in
+                        let meter = analyzer.inputChannelLevels[safe: idx] ?? 0
+                        let gain = analyzer.inputRouteProfile.channelGainDb[safe: idx] ?? 0
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(idx == 0 ? "Input 1 • Primary" : "Input \(idx + 1)")
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(meter > 0.015 ? Color(red: 0.16, green: 0.70, blue: 0.34) : Color.black.opacity(0.14))
+                                    .frame(width: 10, height: 10)
+                                    .overlay {
+                                        Circle().stroke(Color.black.opacity(0.18), lineWidth: 1)
+                                    }
+                                Text(String(format: "%.3f", meter))
+                                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                Text(String(format: "%+.1f dB", gain))
+                                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                            }
+                            .foregroundStyle(Color.black.opacity(0.70))
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.white, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.black.opacity(0.12), lineWidth: 1)
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .background(Color(red: 0.96, green: 0.98, blue: 1.0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.black.opacity(0.14), lineWidth: 1)
             }
         }
-        .padding(10)
-        .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(12)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.black.opacity(0.12), lineWidth: 1)
+        }
+    }
+
+    private var liveOpsOutputCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Output")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                    Text("Routing, safety fallback, and gallery calibration.")
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.inkSoft)
+                }
+                Spacer()
+                Text("Output: \(audio.activeOutputName) • \(audio.activeOutputChannels)ch")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.inkSoft)
+            }
+
+            HStack(spacing: 8) {
+                outputDeviceMenu
+                Button("Refresh Outputs") {
+                    audio.refreshOutputDevices()
+                }
+                .shellActionButton(role: .utilityAction, size: .compact)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Output Route Mode")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color.black.opacity(0.72))
+                ShellSegmentedToggleGroup(
+                    items: [
+                        ShellSegmentedToggleItem(value: OutputRouteMode.gallery6Locked, title: "Gallery 6ch Locked", systemImage: nil),
+                        ShellSegmentedToggleItem(value: OutputRouteMode.stereoFallback, title: "Stereo Safety Fallback", systemImage: nil)
+                    ],
+                    isActive: { $0 == audio.outputProfile.preferredMode },
+                    toggle: { audio.setOutputRouteMode($0) },
+                    size: .compact
+                )
+
+                HStack(spacing: 8) {
+                    Text(audio.outputRouteLocked ? "Gallery Route Locked" : "Stereo Fallback Active")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .foregroundStyle(Color.black.opacity(0.88))
+                        .background((audio.outputRouteLocked ? Color.green.opacity(0.86) : Color.yellow.opacity(0.9)), in: Capsule())
+                        .overlay {
+                            Capsule().stroke(audio.outputRouteLocked ? Color.green.opacity(0.95) : Color.yellow.opacity(0.95), lineWidth: 1)
+                        }
+                    Text("Route mode: \(audio.outputRouteMode.rawValue)")
+                        .foregroundStyle(Color.black.opacity(0.72))
+                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    if let warning = audio.outputRouteWarning, !warning.isEmpty {
+                        Text(warning)
+                            .foregroundStyle(Color.black.opacity(0.88))
+                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.orange.opacity(0.9), in: Capsule())
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Gallery 6-Channel Routing + Calibration")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                        Text("Open the dedicated setup modal for mapping, trim, delay, and speaker tests.")
+                            .font(.system(size: 11, weight: .regular, design: .rounded))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                    }
+                    Spacer()
+                    Button("Open Routing & Calibration") {
+                        showOutputRoutingModal = true
+                    }
+                    .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.accentBlue, size: .compact)
+                }
+
+                HStack(spacing: 12) {
+                    Text("Output Master Gain")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    Slider(
+                        value: Binding(
+                            get: { audio.outputProfile.masterGainDb },
+                            set: { newValue in
+                                audio.updateOutputProfile { $0.masterGainDb = newValue }
+                            }
+                        ),
+                        in: OutputRoutingProfile.minMasterGainDb...OutputRoutingProfile.maxMasterGainDb,
+                        step: 0.5
+                    )
+                    .tint(Color(red: 0.15, green: 0.48, blue: 0.90))
+                    .frame(width: 180)
+                    Text(String(format: "%.1f dB", audio.outputProfile.masterGainDb))
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    Text("Pink: \(String(format: "%.1f", audio.outputProfile.testLevelDb)) dB")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    Text("Map \(audio.outputProfile.mappingSummary())")
+                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(Color.black.opacity(0.72))
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Hardware Output Monitor")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color.black.opacity(0.72))
+                        Spacer()
+                        Text("First hardware output channels, up to 6")
+                            .font(.system(size: 10, weight: .regular, design: .rounded))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                    }
+
+                    outputRenderDiagnosticsStrip
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
+                        ForEach(0..<min(OutputRoutingProfile.virtualChannelCount, max(1, audio.activeOutputChannels)), id: \.self) { idx in
+                            outputMonitorTile(hardwareIndex: idx)
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .background(Color(red: 0.96, green: 0.98, blue: 1.0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.black.opacity(0.14), lineWidth: 1)
+            }
+        }
+        .padding(12)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.black.opacity(0.12), lineWidth: 1)
+        }
+    }
+
+    private var inputDeviceMenu: some View {
+        Group {
+            if analyzer.inputDevices.isEmpty {
+                Text("No input device")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.orange)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 34, alignment: .leading)
+                    .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+                    }
+            } else {
+                Menu {
+                    ForEach(analyzer.inputDevices) { device in
+                        Button {
+                            setInputDevice(uid: device.uid)
+                        } label: {
+                            if device.uid == analyzer.selectedInputUID {
+                                Label("\(device.name) (\(device.inputChannels)ch)", systemImage: "checkmark")
+                            } else {
+                                Text("\(device.name) (\(device.inputChannels)ch)")
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Input Device")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(ShellChromePalette.inkSoft)
+                            Text(selectedInputDeviceTitle)
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(ShellChromePalette.ink)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .shellActionButton(role: .utilityAction)
+            }
+        }
+    }
+
+    private var outputDeviceMenu: some View {
+        Group {
+            if audio.outputDevices.isEmpty {
+                Text("No output device")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.orange)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 34, alignment: .leading)
+                    .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+                    }
+            } else {
+                Menu {
+                    ForEach(audio.outputDevices) { device in
+                        Button {
+                            setOutputDevice(uid: device.uid)
+                        } label: {
+                            if device.uid == audio.selectedOutputUID {
+                                Label("\(device.name) (\(device.outputChannels)ch)", systemImage: "checkmark")
+                            } else {
+                                Text("\(device.name) (\(device.outputChannels)ch)")
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Output Device")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(ShellChromePalette.inkSoft)
+                            Text(selectedOutputDeviceTitle)
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(ShellChromePalette.ink)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .shellActionButton(role: .utilityAction)
+            }
+        }
     }
 
     private var rightRail: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            panelTitle("Rubric + Annotation")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                panelTitle("Rubric + Annotation")
 
             rubricSlider(label: "Stability", value: Binding(
                 get: { controlRoom.rubric.scores.stability },
@@ -1003,7 +1513,7 @@ struct ContentView: View {
                 Spacer()
                 if let saved = controlRoom.rubric.lastSavedAt {
                     Text("Saved \(timeString(saved))")
-                        .foregroundStyle(Color.white.opacity(0.62))
+                        .foregroundStyle(Color.black.opacity(0.62))
                 }
             }
 
@@ -1013,23 +1523,86 @@ struct ContentView: View {
             ))
             .frame(minHeight: 180)
             .scrollContentBackground(.hidden)
-            .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Color(red: 0.97, green: 0.98, blue: 1.0), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                    .stroke(Color.black.opacity(0.16), lineWidth: 1)
             }
 
             Button("Save Rubric Entry") {
                 controlRoom.saveRubric(mode: mode, runProfile: runProfile)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.green)
+            .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.startGreen)
             .accessibilityIdentifier("control_room.rubric_save")
 
-            Spacer(minLength: 4)
+            Divider().background(Color.black.opacity(0.16))
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Phase1 A/B Eval")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+
+                TextField("Dataset JSONL path", text: $evalDatasetPath)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(isEvalRunning)
+                TextField("Baseline checkpoint path", text: $evalBaselinePath)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(isEvalRunning)
+                TextField("Candidate checkpoint path", text: $evalCandidatePath)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(isEvalRunning)
+                TextField("Modes (optional, csv)", text: $evalModesCSV)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(isEvalRunning)
+
+                HStack(spacing: 8) {
+                    Button(isEvalRunning ? "Evaluating..." : "Run Phase1 A/B Eval") {
+                        runPhase1EvalAB()
+                    }
+                    .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.accentBlue)
+                    .disabled(
+                        isEvalRunning
+                            || evalDatasetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || evalBaselinePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || evalCandidatePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+                    .accessibilityIdentifier("control_room.eval_phase1_run")
+
+                    Button("Clear") {
+                        evalStatus = nil
+                        evalReportText = ""
+                    }
+                    .shellActionButton(role: .utilityAction, size: .compact)
+                    .disabled(isEvalRunning)
+                }
+
+                if let evalStatus {
+                    Text(evalStatus)
+                        .foregroundStyle(Color.black.opacity(0.78))
+                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                }
+
+                if !evalReportText.isEmpty {
+                    ScrollView {
+                        Text(evalReportText)
+                            .font(.system(size: 10, weight: .regular, design: .monospaced))
+                            .foregroundStyle(Color.black.opacity(0.76))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(minHeight: 90, maxHeight: 160)
+                    .background(Color(red: 0.97, green: 0.98, blue: 1.0), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.black.opacity(0.16), lineWidth: 1)
+                    }
+                }
+            }
+
+                Spacer(minLength: 4)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(10)
-        .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .frame(maxHeight: .infinity, alignment: .top)
+        .shellPanelCard(fill: ShellChromePalette.surface, borderOpacity: 0.18)
     }
 
     private var bottomTimeline: some View {
@@ -1037,16 +1610,22 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 panelTitle("Telemetry Timeline")
                 Spacer()
-                Toggle("Latency", isOn: Binding(get: { controlRoom.telemetry.showLatency }, set: { controlRoom.telemetry.showLatency = $0 }))
-                    .toggleStyle(.button)
-                Toggle("Tick", isOn: Binding(get: { controlRoom.telemetry.showTick }, set: { controlRoom.telemetry.showTick = $0 }))
-                    .toggleStyle(.button)
-                Toggle("Timeout", isOn: Binding(get: { controlRoom.telemetry.showTimeouts }, set: { controlRoom.telemetry.showTimeouts = $0 }))
-                    .toggleStyle(.button)
-                Toggle("Interventions", isOn: Binding(get: { controlRoom.telemetry.showInterventions }, set: { controlRoom.telemetry.showInterventions = $0 }))
-                    .toggleStyle(.button)
-                Toggle("Alignment", isOn: Binding(get: { controlRoom.telemetry.showAlignment }, set: { controlRoom.telemetry.showAlignment = $0 }))
-                    .toggleStyle(.button)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    ShellSegmentedToggleGroup(
+                        items: [
+                            ShellSegmentedToggleItem(value: TimelineMetricToggle.latency, title: "Latency", systemImage: nil),
+                            ShellSegmentedToggleItem(value: TimelineMetricToggle.tick, title: "Tick", systemImage: nil),
+                            ShellSegmentedToggleItem(value: TimelineMetricToggle.timeout, title: "Timeout", systemImage: nil),
+                            ShellSegmentedToggleItem(value: TimelineMetricToggle.interventions, title: "Interventions", systemImage: nil),
+                            ShellSegmentedToggleItem(value: TimelineMetricToggle.alignment, title: "Alignment", systemImage: nil)
+                        ],
+                        isActive: isTimelineMetricVisible,
+                        toggle: toggleTimelineMetric,
+                        size: .compact
+                    )
+                    .fixedSize(horizontal: true, vertical: true)
+                }
+                .frame(maxWidth: 520)
             }
 
             TelemetryTimelineView(telemetry: controlRoom.telemetry)
@@ -1059,10 +1638,381 @@ struct ContentView: View {
                 Spacer()
             }
             .font(.system(size: 11, weight: .regular, design: .monospaced))
-            .foregroundStyle(Color.white.opacity(0.70))
+            .foregroundStyle(Color.black.opacity(0.70))
         }
-        .padding(10)
-        .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shellPanelCard(fill: ShellChromePalette.surface, borderOpacity: 0.18, contentPadding: 10)
+    }
+
+    private var inputRoutingModal: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Active Input Paths + Manual Trim")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                    Text("Choose which interface inputs stay hot for live DSP, then trim each path manually. Channel 1 stays on. Input recording remains raw multichannel.")
+                        .font(.system(size: 12, weight: .regular, design: .rounded))
+                        .foregroundStyle(Color.black.opacity(0.66))
+                }
+                Spacer()
+                Button("Close Input Setup") {
+                    showInputRoutingModal = false
+                }
+                .shellActionButton(role: .utilityAction)
+            }
+
+            if let activeInput = analyzer.inputDevices.first(where: { $0.uid == analyzer.selectedInputUID }) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Button("Reset Input Paths & Trim") {
+                                analyzer.resetInputRouteProfileToDefault()
+                                audio.resetInputRouteProfileToDefault()
+                                syncLiveInputCaptureInfo()
+                                syncSessionInputRouteMetadata()
+                            }
+                            .shellActionButton(role: .utilityAction)
+
+                            Spacer()
+
+                            Text("Active: \(analyzer.inputRouteProfile.activeCount)/\(activeInput.inputChannels)")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Color.black.opacity(0.76))
+                            Text("Map: \(analyzer.inputRouteProfile.activeSummary())")
+                                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                .foregroundStyle(Color.black.opacity(0.70))
+                            if let warning = analyzer.inputRouteWarning, !warning.isEmpty {
+                                Text(warning)
+                                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                    .foregroundStyle(Color.black.opacity(0.88))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Color.orange.opacity(0.9), in: Capsule())
+                            }
+                        }
+
+                        Text("Use these trims to shape the live DSP/feature feed only. They do not rewrite the raw recorded multichannel input.")
+                            .font(.system(size: 11, weight: .regular, design: .rounded))
+                            .foregroundStyle(Color.black.opacity(0.70))
+
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 10)], spacing: 10) {
+                            ForEach(0..<activeInput.inputChannels, id: \.self) { idx in
+                                let meter = analyzer.inputChannelLevels[safe: idx] ?? 0
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack(spacing: 8) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(idx == 0 ? "Input \(idx + 1) • Primary" : "Input \(idx + 1)")
+                                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                            Text(idx == 0 ? "Always on for live capture." : "Opt in to keep this path hot.")
+                                                .font(.system(size: 10, weight: .regular, design: .rounded))
+                                                .foregroundStyle(Color.black.opacity(0.64))
+                                        }
+                                        Spacer()
+                                        Circle()
+                                            .fill(
+                                                meter > 0.015
+                                                ? Color(red: 0.16, green: 0.70, blue: 0.34)
+                                                : Color.black.opacity(0.14)
+                                            )
+                                            .frame(width: 11, height: 11)
+                                            .overlay {
+                                                Circle().stroke(Color.black.opacity(0.18), lineWidth: 1)
+                                            }
+                                        Text(String(format: "%.3f", meter))
+                                            .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                            .foregroundStyle(Color.black.opacity(0.70))
+                                    }
+
+                                    Toggle(
+                                        idx == 0 ? "Primary Input Active" : "Enable This Input For Live DSP",
+                                        isOn: Binding(
+                                            get: { analyzer.inputRouteProfile.activeChannels[safe: idx] ?? false },
+                                            set: { newValue in
+                                                setInputChannelActive(index: idx, active: newValue)
+                                            }
+                                        )
+                                    )
+                                    .toggleStyle(.switch)
+                                    .disabled(idx == 0)
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("Input Trim \(String(format: "%+.1f", analyzer.inputRouteProfile.channelGainDb[safe: idx] ?? 0)) dB")
+                                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                            .foregroundStyle(Color.black.opacity(0.76))
+                                        Slider(
+                                            value: Binding(
+                                                get: { analyzer.inputRouteProfile.channelGainDb[safe: idx] ?? 0 },
+                                                set: { newValue in
+                                                    setInputChannelGain(index: idx, gainDb: newValue)
+                                                }
+                                            ),
+                                            in: InputRoutingProfile.minChannelGainDb...InputRoutingProfile.maxChannelGainDb,
+                                            step: 0.5
+                                        )
+                                        .tint(Color(red: 0.12, green: 0.52, blue: 0.90))
+                                    }
+                                }
+                                .padding(10)
+                                .background(Color.white, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                                }
+                            }
+                        }
+                    }
+                    .padding(12)
+                }
+                .background(
+                    Color(red: 0.95, green: 0.97, blue: 1.0),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("No input interface is currently selected.")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    Text("Connect or choose an input device first, then reopen this setup panel.")
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(Color.black.opacity(0.68))
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(
+                    Color(red: 0.95, green: 0.97, blue: 1.0),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                }
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 1040, minHeight: 720)
+        .background(Color(red: 0.94, green: 0.97, blue: 1.0))
+        .environment(\.colorScheme, .light)
+    }
+
+    private var outputRoutingModal: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Gallery 6-Channel Routing + Calibration")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                    Text("Route virtual channels V1–V6 to hardware outputs, calibrate alignment, and validate with pink-noise bursts.")
+                        .font(.system(size: 12, weight: .regular, design: .rounded))
+                        .foregroundStyle(Color.black.opacity(0.66))
+                }
+                Spacer()
+                Button("Close Setup") {
+                    showOutputRoutingModal = false
+                }
+                .shellActionButton(role: .utilityAction)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Button("Reset Mapping to 1→6") { audio.resetOutputProfileToDefault() }
+                            .shellActionButton(role: .utilityAction)
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 3) {
+                            Text("Master Output Trim")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Color.black.opacity(0.70))
+                            HStack(spacing: 8) {
+                                Slider(
+                                    value: Binding(
+                                        get: { audio.outputProfile.masterGainDb },
+                                        set: { newValue in
+                                            audio.updateOutputProfile { $0.masterGainDb = newValue }
+                                        }
+                                    ),
+                                    in: OutputRoutingProfile.minMasterGainDb...OutputRoutingProfile.maxMasterGainDb,
+                                    step: 0.5
+                                )
+                                .tint(Color(red: 0.20, green: 0.45, blue: 0.90))
+                                .frame(width: 220)
+                                Text(String(format: "%.1f dB", audio.outputProfile.masterGainDb))
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(Color.black.opacity(0.85))
+                                    .frame(width: 76, alignment: .trailing)
+                            }
+                        }
+                    }
+
+                    Text("Assign each virtual channel (V1–V6) to a physical interface output. Use per-channel trim, delay, polarity, mute, and solo for alignment and troubleshooting.")
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(Color.black.opacity(0.70))
+
+                    ForEach(0..<OutputRoutingProfile.virtualChannelCount, id: \.self) { idx in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 10) {
+                                Text("Virtual Channel V\(idx + 1)")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundStyle(Color.black.opacity(0.86))
+                                Spacer()
+                                Button("Test V\(idx + 1) Speaker") {
+                                    audio.startOutputPinkNoiseTest(channel: idx, scanAll: false)
+                                }
+                                .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.accentBlue, size: .compact)
+                            }
+
+                            HStack(alignment: .top, spacing: 14) {
+                                Stepper(
+                                    "Physical Output \(audio.outputProfile.channels[safe: idx]?.hardwareOutput ?? 1)",
+                                    value: Binding(
+                                        get: { audio.outputProfile.channels[safe: idx]?.hardwareOutput ?? 1 },
+                                        set: { newValue in
+                                            audio.updateOutputProfile {
+                                                guard idx < $0.channels.count else { return }
+                                                $0.channels[idx].hardwareOutput = newValue
+                                            }
+                                        }
+                                    ),
+                                    in: 1...max(1, audio.activeOutputChannels)
+                                )
+                                .frame(minWidth: 200, maxWidth: 260, alignment: .leading)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Channel Gain \(String(format: "%.1f", audio.outputProfile.channels[safe: idx]?.gainDb ?? 0)) dB")
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(Color.black.opacity(0.76))
+                                    Slider(
+                                        value: Binding(
+                                            get: { audio.outputProfile.channels[safe: idx]?.gainDb ?? 0 },
+                                            set: { newValue in
+                                                audio.updateOutputProfile {
+                                                    guard idx < $0.channels.count else { return }
+                                                    $0.channels[idx].gainDb = newValue
+                                                }
+                                            }
+                                        ),
+                                        in: OutputRoutingProfile.minGainDb...OutputRoutingProfile.maxGainDb,
+                                        step: 0.5
+                                    )
+                                    .tint(Color(red: 0.08, green: 0.55, blue: 0.89))
+                                }
+                                .frame(minWidth: 220)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Channel Delay \(String(format: "%.1f", audio.outputProfile.channels[safe: idx]?.delayMs ?? 0)) ms")
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(Color.black.opacity(0.76))
+                                    Slider(
+                                        value: Binding(
+                                            get: { audio.outputProfile.channels[safe: idx]?.delayMs ?? 0 },
+                                            set: { newValue in
+                                                audio.updateOutputProfile {
+                                                    guard idx < $0.channels.count else { return }
+                                                    $0.channels[idx].delayMs = newValue
+                                                }
+                                            }
+                                        ),
+                                        in: OutputRoutingProfile.minDelayMs...OutputRoutingProfile.maxDelayMs,
+                                        step: 0.5
+                                    )
+                                    .tint(Color(red: 0.88, green: 0.46, blue: 0.18))
+                                }
+                                .frame(minWidth: 220)
+                            }
+
+                            HStack(spacing: 18) {
+                                Toggle("Invert Polarity", isOn: Binding(
+                                    get: { audio.outputProfile.channels[safe: idx]?.polarityInverted ?? false },
+                                    set: { newValue in
+                                        audio.updateOutputProfile {
+                                            guard idx < $0.channels.count else { return }
+                                            $0.channels[idx].polarityInverted = newValue
+                                        }
+                                    }
+                                ))
+                                .toggleStyle(.switch)
+
+                                Toggle("Mute Channel", isOn: Binding(
+                                    get: { audio.outputProfile.channels[safe: idx]?.muted ?? false },
+                                    set: { newValue in
+                                        audio.updateOutputProfile {
+                                            guard idx < $0.channels.count else { return }
+                                            $0.channels[idx].muted = newValue
+                                        }
+                                    }
+                                ))
+                                .toggleStyle(.switch)
+
+                                Toggle("Solo Channel", isOn: Binding(
+                                    get: { audio.outputProfile.channels[safe: idx]?.solo ?? false },
+                                    set: { newValue in
+                                        audio.updateOutputProfile {
+                                            guard idx < $0.channels.count else { return }
+                                            $0.channels[idx].solo = newValue
+                                        }
+                                    }
+                                ))
+                                .toggleStyle(.switch)
+                            }
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.black.opacity(0.82))
+                        }
+                        .padding(10)
+                        .background(Color.white, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Speaker Test (Pink-Noise Bursts)")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.black.opacity(0.84))
+                        Text("Use the speaker test toggle to verify channel order through outputs 1–6, then stop once routing is confirmed.")
+                            .font(.system(size: 11, weight: .regular, design: .rounded))
+                            .foregroundStyle(Color.black.opacity(0.68))
+
+                        HStack(spacing: 8) {
+                            outputScanSpeakerTestButton
+                            Spacer()
+                            Text("Pink Test Level")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Color.black.opacity(0.70))
+                            Slider(
+                                value: Binding(
+                                    get: { audio.outputProfile.testLevelDb },
+                                    set: { newValue in
+                                        audio.updateOutputProfile { $0.testLevelDb = newValue }
+                                    }
+                                ),
+                                in: OutputRoutingProfile.minTestLevelDb...OutputRoutingProfile.maxTestLevelDb,
+                                step: 0.5
+                            )
+                            .tint(Color(red: 0.16, green: 0.49, blue: 0.90))
+                            .frame(width: 200)
+                            Text(String(format: "%.1f dB", audio.outputProfile.testLevelDb))
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Color.black.opacity(0.85))
+                                .frame(width: 78, alignment: .trailing)
+                        }
+                    }
+                }
+                .padding(12)
+            }
+            .background(
+                Color(red: 0.95, green: 0.97, blue: 1.0),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.black.opacity(0.18), lineWidth: 1)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 1100, minHeight: 760)
+        .background(Color(red: 0.94, green: 0.97, blue: 1.0))
+        .environment(\.colorScheme, .light)
     }
 
     private var commandPalette: some View {
@@ -1097,7 +2047,7 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(minWidth: 560, minHeight: 420)
-        .background(Color(red: 0.12, green: 0.13, blue: 0.15))
+        .background(Color(red: 0.96, green: 0.98, blue: 1.0))
     }
 
     private var shortcutLegend: some View {
@@ -1113,7 +2063,7 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(minWidth: 420, minHeight: 260)
-        .background(Color(red: 0.12, green: 0.13, blue: 0.15))
+        .background(Color(red: 0.96, green: 0.98, blue: 1.0))
     }
 
     private var paletteActions: [CommandPaletteAction] {
@@ -1123,10 +2073,450 @@ struct ContentView: View {
             CommandPaletteAction(id: "clear", title: "Pulse Clear", subtitle: "Send momentary clear control", keywords: ["clear", "button"]),
             CommandPaletteAction(id: "replay_start", title: "Start Replay", subtitle: "Start replay for current session_id", keywords: ["replay", "start"]),
             CommandPaletteAction(id: "replay_stop", title: "Stop Replay", subtitle: "Cancel active replay", keywords: ["replay", "stop"]),
-            CommandPaletteAction(id: "toggle_left", title: "Toggle Left Rail", subtitle: "Show/hide mode + model slots", keywords: ["panel", "left"]),
+            CommandPaletteAction(id: "toggle_left", title: "Toggle Left Rail", subtitle: "Show/hide mode selector", keywords: ["panel", "left", "mode"]),
             CommandPaletteAction(id: "toggle_right", title: "Toggle Right Rail", subtitle: "Show/hide rubric workspace", keywords: ["panel", "right"]),
             CommandPaletteAction(id: "toggle_timeline", title: "Toggle Timeline", subtitle: "Show/hide telemetry timeline", keywords: ["panel", "timeline"])
         ]
+    }
+
+    private var sessionDisplayValue: String {
+        if !controlRoom.transport.sessionId.isEmpty {
+            return controlRoom.transport.sessionId
+        }
+        if let lastSessionId = controlRoom.replay.lastSessionId, !lastSessionId.isEmpty {
+            return "Last \(lastSessionId)"
+        }
+        return "Created on Start"
+    }
+
+    private var bundleDisplayName: String {
+        guard !controlRoom.transport.bundlePath.isEmpty else { return "Created on Start" }
+        return URL(fileURLWithPath: controlRoom.transport.bundlePath).lastPathComponent
+    }
+
+    private var outputRouteSummary: String {
+        "\(audio.activeOutputName) • \(audio.activeOutputChannels)ch"
+    }
+
+    private var currentReplayCandidateId: String? {
+        let trimmed = controlRoom.transport.sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private var lastReplayCandidateId: String? {
+        guard let last = controlRoom.replay.lastSessionId?.trimmingCharacters(in: .whitespacesAndNewlines), !last.isEmpty else {
+            return nil
+        }
+        return last
+    }
+
+    private var replayResolvedSessionId: String? {
+        let manual = replaySessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !manual.isEmpty {
+            return manual
+        }
+        if let currentReplayCandidateId {
+            return currentReplayCandidateId
+        }
+        return lastReplayCandidateId
+    }
+
+    private var replaySourceSummary: String {
+        let manual = replaySessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !manual.isEmpty {
+            if manual == currentReplayCandidateId {
+                return "Current run selected"
+            }
+            if manual == lastReplayCandidateId {
+                return "Last captured selected"
+            }
+            return "Manual session override"
+        }
+        if currentReplayCandidateId != nil {
+            return "Defaults to current run"
+        }
+        if lastReplayCandidateId != nil {
+            return "Defaults to last captured"
+        }
+        return "No replay source available"
+    }
+
+    private var replayStatusMessage: String {
+        replayStatus ?? controlRoom.replay.statusMessage ?? "Choose a recorded session source, then start replay when you want to drive the harness from that capture."
+    }
+
+    private var selectedInputDeviceTitle: String {
+        analyzer.inputDevices.first(where: { $0.uid == analyzer.selectedInputUID }).map {
+            "\($0.name) (\($0.inputChannels)ch)"
+        } ?? "Select input"
+    }
+
+    private var selectedOutputDeviceTitle: String {
+        audio.outputDevices.first(where: { $0.uid == audio.selectedOutputUID }).map {
+            "\($0.name) (\($0.outputChannels)ch)"
+        } ?? "Select output"
+    }
+
+    private var outputScanSpeakerTestButton: some View {
+        let isRunning = audio.isOutputTestRunning
+        let title = isRunning ? "Stop Speaker Test" : "Start Speaker Test"
+        let role: ShellActionRole = isRunning ? .destructiveAction : .secondaryAction
+        let accent = isRunning ? ShellChromePalette.dangerRed : ShellChromePalette.accentBlue
+
+        return Button(title) {
+            if isRunning {
+                audio.stopOutputTest()
+            } else {
+                audio.startOutputPinkNoiseTest(channel: nil, scanAll: true)
+            }
+        }
+        .shellActionButton(role: role, accent: accent)
+    }
+
+    private var replayOperationsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Replay Recorded Session")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                    Text("Choose a captured session, then run its recorded trace and input audio back through the harness.")
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.inkSoft)
+                }
+                Spacer()
+                ShellStatusPill(
+                    title: "Replay",
+                    value: isReplayRunning ? "Running" : "Ready",
+                    tone: isReplayRunning ? .warning : .idle
+                )
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 10) {
+                    replaySourceOptionCard(
+                        title: "Current Run",
+                        description: "Replay the live session that is active right now.",
+                        sessionId: currentReplayCandidateId,
+                        actionTitle: "Use Current Session",
+                        isSelected: replayResolvedSessionId == currentReplayCandidateId && currentReplayCandidateId != nil
+                    ) {
+                        selectReplaySource(currentReplayCandidateId)
+                    }
+
+                    replaySourceOptionCard(
+                        title: "Last Captured",
+                        description: "Replay the most recent captured session after a stop.",
+                        sessionId: lastReplayCandidateId,
+                        actionTitle: "Use Last Captured",
+                        isSelected: replayResolvedSessionId == lastReplayCandidateId && lastReplayCandidateId != nil
+                    ) {
+                        selectReplaySource(lastReplayCandidateId)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    replaySourceOptionCard(
+                        title: "Current Run",
+                        description: "Replay the live session that is active right now.",
+                        sessionId: currentReplayCandidateId,
+                        actionTitle: "Use Current Session",
+                        isSelected: replayResolvedSessionId == currentReplayCandidateId && currentReplayCandidateId != nil
+                    ) {
+                        selectReplaySource(currentReplayCandidateId)
+                    }
+
+                    replaySourceOptionCard(
+                        title: "Last Captured",
+                        description: "Replay the most recent captured session after a stop.",
+                        sessionId: lastReplayCandidateId,
+                        actionTitle: "Use Last Captured",
+                        isSelected: replayResolvedSessionId == lastReplayCandidateId && lastReplayCandidateId != nil
+                    ) {
+                        selectReplaySource(lastReplayCandidateId)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Selected Replay Source")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                        Text(replayResolvedSessionId ?? "No session selected yet")
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                            .foregroundStyle(ShellChromePalette.ink)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer()
+                    Text(replaySourceSummary)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.inkSoft)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.white, in: Capsule())
+                        .overlay {
+                            Capsule().stroke(Color.black.opacity(0.12), lineWidth: 1)
+                        }
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        if isReplayRunning {
+                            stopReplay()
+                        } else {
+                            startReplaySession()
+                        }
+                    } label: {
+                        Label(isReplayRunning ? "Stop Replay" : "Start Replay", systemImage: isReplayRunning ? "stop.fill" : "play.fill")
+                    }
+                    .shellActionButton(
+                        role: isReplayRunning ? .destructiveAction : .secondaryAction,
+                        accent: isReplayRunning ? ShellChromePalette.dangerRed : ShellChromePalette.accentBlue
+                    )
+                    .disabled(!isReplayRunning && replayResolvedSessionId == nil)
+                    .accessibilityIdentifier(isReplayRunning ? "control_room.replay_stop" : "control_room.replay_start")
+
+                    Button(showManualReplayEntry ? "Hide Manual Session ID" : "Use a Different Session ID") {
+                        showManualReplayEntry.toggle()
+                    }
+                    .shellActionButton(role: .utilityAction, size: .compact)
+
+                    if showManualReplayEntry, !replaySessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button("Clear Manual Override") {
+                            replaySessionId = ""
+                        }
+                        .shellActionButton(role: .utilityAction, size: .compact)
+                    }
+                }
+
+                if showManualReplayEntry {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Manual Session ID")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                        TextField("Paste a recorded session ID if you want to replay something other than Current or Last Captured.", text: $replaySessionId)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("control_room.replay_session")
+                    }
+                }
+
+                Text(replayStatusMessage)
+                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                    .foregroundStyle(Color.black.opacity(0.74))
+            }
+            .padding(10)
+            .background(Color(red: 0.96, green: 0.98, blue: 1.0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.black.opacity(0.14), lineWidth: 1)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Jump During Replay")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                        Text("Move to a new time in the replay. Quick jumps are absolute positions from the session start.")
+                            .font(.system(size: 11, weight: .regular, design: .rounded))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                    }
+                    Spacer()
+                    Text(isReplayRunning ? "Replay transport is live." : "Start replay to enable jumping.")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(isReplayRunning ? ShellChromePalette.startGreen : ShellChromePalette.inkSoft)
+                }
+
+                HStack(spacing: 8) {
+                    replayJumpButton("Start", seconds: 0)
+                    replayJumpButton("30s", seconds: 30)
+                    replayJumpButton("60s", seconds: 60)
+                    replayJumpButton("120s", seconds: 120)
+                }
+
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Exact Time (Seconds)")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                        TextField("e.g. 42.5", text: $replaySeekSeconds)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 180, alignment: .leading)
+                            .accessibilityIdentifier("control_room.replay_seek")
+                    }
+
+                    Button("Jump to Time") { seekReplay() }
+                        .shellActionButton(role: .utilityAction)
+                        .disabled(!isReplayRunning || replaySeekSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+
+    private func replaySourceOptionCard(
+        title: String,
+        description: String,
+        sessionId: String?,
+        actionTitle: String,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.ink)
+                Text(description)
+                    .font(.system(size: 10, weight: .regular, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.inkSoft)
+            }
+
+            Text(sessionId ?? "No session available yet")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(sessionId == nil ? Color.black.opacity(0.42) : Color.black.opacity(0.82))
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            HStack {
+                Button(actionTitle, action: action)
+                    .shellActionButton(role: isSelected ? .secondaryAction : .utilityAction, accent: ShellChromePalette.accentBlue, size: .compact)
+                    .disabled(sessionId == nil)
+                if isSelected {
+                    Text("Selected")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(ShellChromePalette.accentBlue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(ShellChromePalette.accentBlueSoft, in: Capsule())
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isSelected ? ShellChromePalette.accentBlue.opacity(0.45) : Color.black.opacity(0.12), lineWidth: 1)
+        }
+    }
+
+    private func replayJumpButton(_ title: String, seconds: Double) -> some View {
+        Button(title) {
+            seekReplay(to: seconds)
+        }
+        .shellActionButton(role: .utilityAction, size: .compact)
+        .disabled(!isReplayRunning)
+    }
+
+    private var outputRenderDiagnosticsStrip: some View {
+        let diag = audio.outputRenderDiagnostics
+        let expectedText = "\(max(1, audio.activeOutputChannels))ch expected"
+        let actualText = diag.slotCount > 0 ? "\(diag.slotCount)ch actual" : "no callback"
+        let layoutText = diag.bufferCount > 0 ? "\(diag.bufferCount) buffer\(diag.bufferCount == 1 ? "" : "s")" : "no buffers"
+        let preDb = levelText(diag.preRoutePeak)
+        let postDb = levelText(diag.postRoutePeak)
+        let mismatch = diag.slotCount > 0 && diag.configuredHardwareChannels > 0 && diag.slotCount != diag.configuredHardwareChannels
+
+        return HStack(spacing: 8) {
+            outputRenderBadge(
+                title: "Render",
+                value: diag.callbackActive ? "Live" : "Idle",
+                tint: diag.callbackActive ? ShellChromePalette.startGreen : Color.black.opacity(0.12)
+            )
+            outputRenderBadge(
+                title: "Layout",
+                value: "\(actualText) • \(layoutText)",
+                tint: mismatch ? ShellChromePalette.warmAmber : ShellChromePalette.accentBlue.opacity(0.16),
+                emphasize: mismatch
+            )
+            outputRenderBadge(
+                title: "Signal",
+                value: "pre \(preDb) • post \(postDb)",
+                tint: diag.postRoutePeak > 0.0006 ? ShellChromePalette.accentBlue.opacity(0.16) : Color.black.opacity(0.08)
+            )
+            Text(expectedText)
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundStyle(Color.black.opacity(0.60))
+            Spacer()
+        }
+    }
+
+    private func outputRenderBadge(title: String, value: String, tint: Color, emphasize: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title.uppercased())
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color.black.opacity(0.55))
+            Text(value)
+                .font(.system(size: 11, weight: emphasize ? .bold : .semibold, design: .rounded))
+                .foregroundStyle(Color.black.opacity(0.82))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(tint, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.black.opacity(0.10), lineWidth: 1)
+        }
+    }
+
+    private func outputMonitorTile(hardwareIndex idx: Int) -> some View {
+        let level = audio.outputHardwareLevels[safe: idx] ?? 0
+        let normalized = min(1.0, max(0.0, sqrt(Double(level)) * 1.18))
+        let dbText = levelText(level)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("Out \(idx + 1)")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.ink)
+                Spacer()
+                Circle()
+                    .fill(level > 0.015 ? ShellChromePalette.startGreen : Color.black.opacity(0.12))
+                    .frame(width: 8, height: 8)
+                    .overlay {
+                        Circle().stroke(Color.black.opacity(0.16), lineWidth: 1)
+                    }
+            }
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.black.opacity(0.08))
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(level > 0.20 ? ShellChromePalette.warmAmber : ShellChromePalette.accentBlue)
+                        .frame(width: max(6, proxy.size.width * normalized))
+                }
+            }
+            .frame(height: 9)
+
+            HStack {
+                Text(dbText)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color.black.opacity(0.76))
+                Spacer()
+                Text(level > 0.20 ? "hot" : level > 0.015 ? "live" : "idle")
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Color.black.opacity(0.64))
+            }
+        }
+        .padding(8)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.black.opacity(0.12), lineWidth: 1)
+        }
+    }
+
+    private func levelText(_ level: Float) -> String {
+        level > 0.0006 ? String(format: "%.0f dB", 20.0 * log10(Double(level))) : "−inf dB"
+    }
+
+    private func selectReplaySource(_ sessionId: String?) {
+        guard let sessionId, !sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        replaySessionId = sessionId
+        showManualReplayEntry = false
     }
 
     private func runPaletteAction(_ id: String) {
@@ -1156,36 +2546,79 @@ struct ContentView: View {
         }
     }
 
-    private func statusChip(label: String, active: Bool) -> some View {
-        Text(label)
-            .font(.system(size: 11, weight: .bold, design: .monospaced))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background((active ? Color.green.opacity(0.20) : Color.white.opacity(0.08)), in: Capsule())
-            .overlay {
-                Capsule()
-                    .stroke(active ? Color.green.opacity(0.82) : Color.white.opacity(0.16), lineWidth: 1)
-            }
+    private func isHeaderPanelVisible(_ panel: ShellVisibilityPanel) -> Bool {
+        switch panel {
+        case .left:
+            return controlRoom.shell.showLeftRail
+        case .right:
+            return controlRoom.shell.showRightRail
+        case .timeline:
+            return controlRoom.shell.showBottomTimeline
+        }
+    }
+
+    private func toggleHeaderPanel(_ panel: ShellVisibilityPanel) {
+        switch panel {
+        case .left:
+            controlRoom.shell.showLeftRail.toggle()
+        case .right:
+            controlRoom.shell.showRightRail.toggle()
+        case .timeline:
+            controlRoom.shell.showBottomTimeline.toggle()
+        }
+    }
+
+    private func isTimelineMetricVisible(_ item: TimelineMetricToggle) -> Bool {
+        switch item {
+        case .latency:
+            return controlRoom.telemetry.showLatency
+        case .tick:
+            return controlRoom.telemetry.showTick
+        case .timeout:
+            return controlRoom.telemetry.showTimeouts
+        case .interventions:
+            return controlRoom.telemetry.showInterventions
+        case .alignment:
+            return controlRoom.telemetry.showAlignment
+        }
+    }
+
+    private func toggleTimelineMetric(_ item: TimelineMetricToggle) {
+        switch item {
+        case .latency:
+            controlRoom.telemetry.showLatency.toggle()
+        case .tick:
+            controlRoom.telemetry.showTick.toggle()
+        case .timeout:
+            controlRoom.telemetry.showTimeouts.toggle()
+        case .interventions:
+            controlRoom.telemetry.showInterventions.toggle()
+        case .alignment:
+            controlRoom.telemetry.showAlignment.toggle()
+        }
     }
 
     private func panelTitle(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 12, weight: .bold, design: .rounded))
-            .foregroundStyle(Color(red: 0.87, green: 0.92, blue: 0.97))
+        ShellSectionTitle(title: title)
     }
 
     private func metricCard(_ label: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(Color.white.opacity(0.66))
+                .foregroundStyle(ShellChromePalette.inkSoft)
             Text(value)
                 .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundStyle(ShellChromePalette.ink)
                 .lineLimit(1)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .background(ShellChromePalette.surfaceMuted, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(ShellChromePalette.border, lineWidth: 1)
+        }
     }
 
     private func rubricSlider(label: String, value: Binding<Double>) -> some View {
@@ -1209,6 +2642,142 @@ struct ContentView: View {
     private func setInputDevice(uid: String) {
         analyzer.selectInputDevice(uid: uid)
         audio.selectInputDevice(uid: uid)
+        syncLiveInputCaptureInfo()
+        syncSessionInputRouteMetadata()
+    }
+
+    private func setInputChannelActive(index: Int, active: Bool) {
+        analyzer.setInputChannelActive(channelIndex: index, active: active)
+        audio.setInputChannelActive(channelIndex: index, active: active)
+        syncLiveInputCaptureInfo()
+        syncSessionInputRouteMetadata()
+    }
+
+    private func setInputChannelGain(index: Int, gainDb: Double) {
+        analyzer.updateInputChannelGain(channelIndex: index, gainDb: gainDb)
+        audio.updateInputChannelGain(channelIndex: index, gainDb: gainDb)
+    }
+
+    private func syncLiveInputCaptureInfo() {
+        let info = analyzer.currentCaptureInfo()
+        audio.updateLiveInputCaptureInfo(sampleRate: info.sampleRate, channels: info.channels)
+    }
+
+    private func syncSessionInputRouteMetadata() {
+        let info = analyzer.currentInputRouteInfo()
+        client.configureSessionInputRoute(
+            inputDeviceUID: info.inputUID.isEmpty ? nil : info.inputUID,
+            inputDeviceName: info.inputName,
+            inputChannels: info.inputChannels,
+            inputActiveChannels: info.activeSummary,
+            inputRouteWarning: info.warning
+        )
+    }
+
+    private func setOutputDevice(uid: String) {
+        audio.selectOutputDevice(uid: uid)
+        syncSessionOutputRouteMetadata()
+    }
+
+    private func syncSessionOutputRouteMetadata() {
+        let info = audio.currentOutputRouteInfo()
+        client.configureSessionOutputRoute(
+            outputDeviceUID: info.outputUID.isEmpty ? nil : info.outputUID,
+            outputDeviceName: info.outputName,
+            outputChannels: info.hardwareChannels,
+            outputRouteMode: info.activeMode.rawValue,
+            outputRouteMapping: info.mappingSummary,
+            outputRouteWarning: info.warning
+        )
+    }
+
+    private func parseEvalModesCSV(_ raw: String) -> [Int] {
+        let pieces = raw
+            .split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\t" || $0 == "\n" })
+            .compactMap { Int($0) }
+            .filter { (0...10).contains($0) }
+        var seen = Set<Int>()
+        return pieces.filter { seen.insert($0).inserted }
+    }
+
+    private func shellEscape(_ raw: String) -> String {
+        if raw.isEmpty { return "''" }
+        let escaped = raw.replacingOccurrences(of: "'", with: "'\"'\"'")
+        return "'\(escaped)'"
+    }
+
+    private func runPhase1EvalAB() {
+        let dataset = evalDatasetPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseline = evalBaselinePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = evalCandidatePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !dataset.isEmpty, !baseline.isEmpty, !candidate.isEmpty else { return }
+
+        let modes = parseEvalModesCSV(evalModesCSV)
+        isEvalRunning = true
+        evalStatus = "Running phase1 eval..."
+        evalReportText = ""
+        controlRoom.appendEvent("Running phase1 A/B eval.", severity: .info)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+
+            var evalArgs = [
+                "eval-phase1",
+                "--dataset \(self.shellEscape(dataset))",
+                "--baseline \(self.shellEscape(baseline))",
+                "--candidate \(self.shellEscape(candidate))",
+                "--fail-on-regression"
+            ]
+            for mode in modes {
+                evalArgs.append("--mode \(mode)")
+            }
+            let tubMlCommand = ".venv/bin/tub-ml \(evalArgs.joined(separator: " "))"
+            let fallbackCommand = "source .venv/bin/activate && tub-ml \(evalArgs.joined(separator: " "))"
+            let command = [
+                "cd /Users/seb/the-tub-ml",
+                "if [ -x .venv/bin/tub-ml ]; then \(tubMlCommand); else \(fallbackCommand); fi"
+            ]
+            process.arguments = ["-lc", command.joined(separator: " && ")]
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                DispatchQueue.main.async {
+                    self.isEvalRunning = false
+                    self.evalStatus = "Eval launch failed: \(error.localizedDescription)"
+                    self.controlRoom.appendEvent("Phase1 eval launch failed.", severity: .error)
+                }
+                return
+            }
+
+            let stdout = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let merged = [stdout, stderr].filter { !$0.isEmpty }.joined(separator: "\n")
+            let trimmed = merged.trimmingCharacters(in: .whitespacesAndNewlines)
+            let pass = trimmed.contains("\"overall_pass\": true")
+            let failed = process.terminationStatus != 0
+
+            DispatchQueue.main.async {
+                self.isEvalRunning = false
+                if failed {
+                    self.evalStatus = "Phase1 eval failed (exit \(process.terminationStatus))."
+                    self.controlRoom.appendEvent("Phase1 eval failed.", severity: .error)
+                } else {
+                    self.evalStatus = pass ? "Phase1 eval PASS." : "Phase1 eval FAIL."
+                    self.controlRoom.appendEvent(
+                        pass ? "Phase1 eval pass." : "Phase1 eval fail.",
+                        severity: pass ? .info : .warning
+                    )
+                }
+                self.evalReportText = trimmed.isEmpty ? "No output." : trimmed
+            }
+        }
     }
 
     private func startSelectedProfile() {
@@ -1217,75 +2786,64 @@ struct ContentView: View {
         }
         replayStatus = nil
 
-        switch runProfile {
-        case .networkOnly:
-            analyzer.stop()
-            audio.stop()
-            client.featuresProvider = nil
-            client.interventionsProvider = nil
-            client.onModelOut = nil
-            client.setMode(mode)
-            client.startLoop(recordInputAudio: false, replayMode: false, replayedSessionId: nil)
-            client.configureSessionInputAudio(sampleRate: 0, channels: 0, format: "caf", path: nil)
-            client.setReplayAudioMissing(false)
-            controlRoom.appendEvent("Started network-only run.", severity: .info)
-
-        case .audioAndFeatures:
-            analyzer.start()
-            client.featuresProvider = { [weak analyzer] in
-                analyzer?.snapshotFrame() ?? FeaturePacketSnapshot(
-                    features: Features(
-                        loudnessLufs: -80,
-                        onsetRateHz: 0,
-                        specCentroidHz: 0,
-                        bandLow: 0,
-                        bandMid: 0,
-                        bandHigh: 0,
-                        noisiness: 0
-                    ),
-                    source: "dummy",
-                    fallbackReason: "analyzer_unavailable"
-                )
-            }
-            client.interventionsProvider = { [weak audio] in
-                audio?.snapshotSafetyInterventions() ?? []
-            }
-
-            client.onModelOut = { [weak audio, modeEngine] out, _, sentButtons in
-                guard let audio else { return }
-                DispatchQueue.main.async {
-                    let control = modeEngine.makeControl(out: out, sentButtons: sentButtons)
-                    audio.apply(control: control)
-                }
-            }
-
-            audio.start()
-            client.setMode(mode)
-
-            client.startLoop(
-                recordInputAudio: recordInputAudio,
-                replayMode: false,
-                replayedSessionId: nil
+        analyzer.start()
+        audio.start()
+        syncLiveInputCaptureInfo()
+        client.featuresProvider = { [weak analyzer] in
+            analyzer?.snapshotFrame() ?? FeaturePacketSnapshot(
+                features: Features(
+                    loudnessLufs: -80,
+                    onsetRateHz: 0,
+                    specCentroidHz: 0,
+                    bandLow: 0,
+                    bandMid: 0,
+                    bandHigh: 0,
+                    noisiness: 0
+                ),
+                source: "dummy",
+                fallbackReason: "analyzer_unavailable"
             )
-            client.setReplayContext(replayMode: false, replayedSessionId: nil)
-            client.setReplayAudioMissing(false)
+        }
+        client.interventionsProvider = { [weak audio] in
+            audio?.snapshotSafetyInterventions() ?? []
+        }
 
-            if recordInputAudio, let path = client.inputAudioPath {
-                do {
-                    let info = try audio.startInputRecording(to: URL(fileURLWithPath: path), fileFormat: "caf")
-                    client.configureSessionInputAudio(sampleRate: info.sampleRate, channels: info.channels, format: info.format, path: path)
-                    controlRoom.appendEvent("Input audio recording enabled.", severity: .info)
-                } catch {
-                    replayStatus = "Input audio recording failed: \(error.localizedDescription)"
-                    let inputInfo = audio.currentInputCaptureInfo()
-                    client.configureSessionInputAudio(sampleRate: inputInfo.sampleRate, channels: inputInfo.channels, format: inputInfo.format, path: nil)
-                    controlRoom.appendEvent("Input audio recording failed.", severity: .warning)
-                }
-            } else {
-                let inputInfo = audio.currentInputCaptureInfo()
-                client.configureSessionInputAudio(sampleRate: inputInfo.sampleRate, channels: inputInfo.channels, format: inputInfo.format, path: nil)
-                controlRoom.appendEvent("Started live audio/features run.", severity: .info)
+        client.onModelOut = { [weak audio, modeEngine] out, _, sentButtons in
+            guard let audio else { return }
+            DispatchQueue.main.async {
+                let control = modeEngine.makeControl(out: out, sentButtons: sentButtons)
+                audio.apply(control: control)
             }
+        }
+
+        client.setMode(mode)
+
+        client.startLoop(
+            recordInputAudio: recordInputAudio,
+            replayMode: false,
+            replayedSessionId: nil
+        )
+        syncLiveInputCaptureInfo()
+        syncSessionInputRouteMetadata()
+        syncSessionOutputRouteMetadata()
+        client.setReplayContext(replayMode: false, replayedSessionId: nil)
+        client.setReplayAudioMissing(false)
+
+        if recordInputAudio, let path = client.inputAudioPath {
+            do {
+                let info = try audio.startInputRecording(to: URL(fileURLWithPath: path), fileFormat: "caf")
+                client.configureSessionInputAudio(sampleRate: info.sampleRate, channels: info.channels, format: info.format, path: path)
+                controlRoom.appendEvent("Input audio recording enabled.", severity: .info)
+            } catch {
+                replayStatus = "Input audio recording failed: \(error.localizedDescription)"
+                let inputInfo = analyzer.currentCaptureInfo()
+                client.configureSessionInputAudio(sampleRate: inputInfo.sampleRate, channels: inputInfo.channels, format: inputInfo.format, path: nil)
+                controlRoom.appendEvent("Input audio recording failed.", severity: .warning)
+            }
+        } else {
+            let inputInfo = analyzer.currentCaptureInfo()
+            client.configureSessionInputAudio(sampleRate: inputInfo.sampleRate, channels: inputInfo.channels, format: inputInfo.format, path: nil)
+            controlRoom.appendEvent("Started live audio/features run.", severity: .info)
         }
     }
 
@@ -1313,15 +2871,17 @@ struct ContentView: View {
     }
 
     private func startReplaySession() {
-        let sessionId = replaySessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionId = replayResolvedSessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !sessionId.isEmpty else { return }
         guard !isReplayRunning else { return }
+        replaySessionId = sessionId
 
         analyzer.stop()
         if client.isRunning {
             stopAll()
         }
-        audio.start()
+        audio.startReplayEngineIfNeeded()
+        controlRoom.resetReplayAlignment()
 
         let token = ReplayCancellationToken()
         replayCancelToken = token
@@ -1344,11 +2904,16 @@ struct ContentView: View {
                 let hasAudio = (session.inputAudioURL != nil)
                 if let audioURL = session.inputAudioURL {
                     try audio.startReplayInput(from: audioURL)
+                    let warmupDeadline = Date().addingTimeInterval(0.50)
+                    while !audio.isReplayInputActive && Date() < warmupDeadline {
+                        usleep(5_000)
+                    }
                 } else {
                     audio.enableSilentReplayInputFallback()
                     client.setReplayAudioMissing(true)
                     print("{\"replay_audio_missing\":true,\"session_id\":\"\(sessionId)\"}")
                 }
+                let replayAnchorS = hasAudio ? audio.replayCurrentTimeSeconds() : 0
 
                 let baseInterventions = hasAudio ? [String]() : ["replay_audio_missing"]
                 let outURL = try TraceReplayer.replaySession(
@@ -1356,12 +2921,12 @@ struct ContentView: View {
                     host: endpoint.host,
                     port: endpoint.port,
                     timeoutMs: 1_000,
-                    timingProvider: hasAudio ? { audio.replayCurrentTimeSeconds() } : nil,
+                    timingProvider: hasAudio ? { max(0, audio.replayCurrentTimeSeconds() - replayAnchorS) } : nil,
                     baseInterventions: baseInterventions,
                     shouldCancel: { token.isCancelled },
                     onFrameResult: { frame, modelOut in
                         let target = max(0, Double(frame.tsMs - startTs) / 1000.0)
-                        let audioTime = audio.replayCurrentTimeSeconds()
+                        let audioTime = max(0, audio.replayCurrentTimeSeconds() - replayAnchorS)
                         DispatchQueue.main.async {
                             controlRoom.noteReplayAlignment(targetTimeS: target, audioTimeS: audioTime)
                         }
@@ -1379,9 +2944,11 @@ struct ContentView: View {
                     replayCancelToken = nil
                     replayStatus = "Replay complete: \(outURL.path)"
                     replayPath = outURL.path
-                    audio.stopReplayInput(restoreLiveInput: true)
+                    audio.stopReplayInput(restoreLiveInput: false)
+                    audio.stop()
                     controlRoom.setReplayRunning(false)
                     controlRoom.setReplayStatus(replayStatus)
+                    controlRoom.resetReplayAlignment()
                     controlRoom.appendEvent("Replay completed.", severity: .info)
                 }
             } catch TraceReplayError.cancelled {
@@ -1389,9 +2956,11 @@ struct ContentView: View {
                     isReplayRunning = false
                     replayCancelToken = nil
                     replayStatus = "Replay stopped."
-                    audio.stopReplayInput(restoreLiveInput: true)
+                    audio.stopReplayInput(restoreLiveInput: false)
+                    audio.stop()
                     controlRoom.setReplayRunning(false)
                     controlRoom.setReplayStatus(replayStatus)
+                    controlRoom.resetReplayAlignment()
                     controlRoom.appendEvent("Replay cancelled.", severity: .warning)
                 }
             } catch {
@@ -1399,9 +2968,11 @@ struct ContentView: View {
                     isReplayRunning = false
                     replayCancelToken = nil
                     replayStatus = "Replay failed: \(error.localizedDescription)"
-                    audio.stopReplayInput(restoreLiveInput: true)
+                    audio.stopReplayInput(restoreLiveInput: false)
+                    audio.stop()
                     controlRoom.setReplayRunning(false)
                     controlRoom.setReplayStatus(replayStatus)
+                    controlRoom.resetReplayAlignment()
                     controlRoom.appendEvent("Replay failed.", severity: .error)
                 }
             }
@@ -1422,6 +2993,11 @@ struct ContentView: View {
             controlRoom.setReplayStatus(replayStatus)
             return
         }
+        seekReplay(to: seconds)
+    }
+
+    private func seekReplay(to seconds: Double) {
+        guard isReplayRunning else { return }
         do {
             try audio.seekReplayInput(to: max(0, seconds))
             replayStatus = "Replay seeked to \(String(format: "%.2f", max(0, seconds)))s."
@@ -1467,5 +3043,14 @@ struct ContentView: View {
             f.noisiness,
             pitchPart + keyPart
         )
+    }
+
+    private func mode56DiagLine(mode: Int, interventions: [String]) -> String {
+        let modePrefix = "mode\(mode)_"
+        let relevant = interventions.filter { token in
+            token.hasPrefix(modePrefix) || token.hasPrefix("mode56_") || token.hasPrefix("render_mode:")
+        }
+        guard !relevant.isEmpty else { return "" }
+        return "AudioDiag " + relevant.suffix(8).joined(separator: " | ")
     }
 }

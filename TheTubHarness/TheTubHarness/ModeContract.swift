@@ -1,16 +1,36 @@
 import Foundation
+import CryptoKit
 
 enum ModeContract {
     static let supportedProtocolVersion = 1
     static let contractVersion = "control_surface_v1"
+    // This is intentionally pinned. If contract tables change, bump protocol/contract
+    // strategy explicitly and update this fingerprint with test coverage.
+    static let lockedContractFingerprint = "22f406ef941be4597779a8eb594a22db355c36073747492f431e5872ba95699c"
+
+    struct ContractLockStatus: Equatable {
+        let lockedFingerprint: String
+        let computedFingerprint: String
+        let matched: Bool
+    }
 
     typealias Bounds = (Double, Double)
     typealias Transform = (Double) -> Double
 
+    struct ContractLockPayload: Codable, Equatable {
+        let protocolVersion: Int
+        let contractVersion: String
+        let modeSpecificParams: [String: [String]]
+        let legacyParamAliases: [String: [String: String]]
+        let requiredPicksByMode: [String: [String]]
+        let modeBounds: [String: [String: [Double]]]
+        let safeModeParams: [String: [String: Double]]
+    }
+
     // Control Surface v1 per-mode canonical params.
     static let modeSpecificParams: [Int: Set<String>] = [
         0: ["dry_level", "reverb_mix", "reverb_decay_s", "pre_delay_ms", "tone_db"],
-        1: ["loop_len_s", "repeat_prob", "stutter_len_ms", "jitter_ms", "feedback", "motion_speed", "spread"],
+        1: ["fracture", "mutation", "pitch_lock", "hold_len_s", "tail_fade_ms", "scene_rate_hz", "motion_speed", "spread"],
         2: ["grain_size_ms", "grain_density", "scan_rate", "freeze_prob", "freeze_len_s", "pitch_spread_cents"],
         3: ["drive", "bit_depth_bits", "downsample_amt", "res_shift", "tone_db"],
         4: ["density", "gesture_rate_hz", "sample_mix", "dry_level", "stability"],
@@ -32,12 +52,17 @@ enum ModeContract {
             "brightness": "tone_db",
         ],
         1: [
-            "window_norm": "loop_len_s",
-            "repeat_grid": "loop_len_s",
-            "stutter_len_norm": "stutter_len_ms",
-            "stutter_len": "stutter_len_ms",
-            "gate_sharpness": "jitter_ms",
-            "threshold_bias": "feedback",
+            "repeat_prob": "fracture",
+            "jitter_ms": "mutation",
+            "gate_sharpness": "mutation",
+            "pitch_follow": "pitch_lock",
+            "feedback": "hold_len_s",
+            "loop_len_s": "hold_len_s",
+            "window_norm": "hold_len_s",
+            "repeat_grid": "hold_len_s",
+            "stutter_len_ms": "scene_rate_hz",
+            "stutter_len_norm": "scene_rate_hz",
+            "stutter_len": "scene_rate_hz",
             "motion_intensity": "motion_speed",
         ],
         2: [
@@ -103,7 +128,6 @@ enum ModeContract {
         out[4, default: []].formUnion(["bank_id", "sample_id"])
         out[5, default: []].formUnion(["midi_inst_id", "chord_set_id"])
         out[6, default: []].formUnion(["midi_inst_id", "chord_set_id"])
-        out[9, default: []].formUnion(["bank_id", "midi_inst_id"])
         out[10, default: []].formUnion(["scene_id"])
         return out
     }()
@@ -124,9 +148,9 @@ enum ModeContract {
 
     static let safeModeParams: [Int: [String: Double]] = [
         0: ["dry_level": 0.92, "reverb_mix": 0.12, "reverb_decay_s": 0.9, "pre_delay_ms": 12.0, "tone_db": 0.0],
-        1: ["loop_len_s": 0.72, "repeat_prob": 0.62, "stutter_len_ms": 78.0, "jitter_ms": 22.0, "feedback": 0.15, "motion_speed": 0.30, "spread": 0.50],
+        1: ["fracture": 0.58, "mutation": 0.42, "pitch_lock": 0.68, "hold_len_s": 8.0, "tail_fade_ms": 480.0, "scene_rate_hz": 3.0, "motion_speed": 0.45, "spread": 0.62],
         2: ["grain_size_ms": 28.0, "grain_density": 0.62, "scan_rate": 0.58, "freeze_prob": 0.08, "freeze_len_s": 0.9, "pitch_spread_cents": 24.0],
-        3: ["drive": 0.22, "bit_depth_bits": 18.0, "downsample_amt": 0.08, "res_shift": 0.45, "tone_db": -1.0],
+        3: ["drive": 0.52, "bit_depth_bits": 12.0, "downsample_amt": 0.44, "res_shift": 0.64, "tone_db": -3.0],
         4: ["density": 0.38, "gesture_rate_hz": 1.2, "sample_mix": 0.30, "dry_level": 0.72, "stability": 0.7],
         5: ["note_rate_notes_per_s": 4.0, "voice_cap": 4.0, "pitch_follow": 0.82, "velocity_bias": 0.55, "level": 0.62, "stability": 0.72],
         6: ["note_rate_notes_per_s": 2.4, "voice_cap": 2.0, "pitch_follow": 0.8, "velocity_bias": 0.52, "level": 0.58, "stability": 0.72, "dry_level": 0.68],
@@ -150,11 +174,9 @@ enum ModeContract {
         out[0]?["pre_delay_ms"] = (0.0, 60.0)
         out[0]?["tone_db"] = (-6.0, 6.0)
 
-        out[1]?["loop_len_s"] = (0.08, 4.0)
-        out[1]?["repeat_prob"] = (0.0, 0.9)
-        out[1]?["stutter_len_ms"] = (30.0, 450.0)
-        out[1]?["jitter_ms"] = (0.0, 120.0)
-        out[1]?["feedback"] = (0.0, 0.65)
+        out[1]?["hold_len_s"] = (6.0, 12.0)
+        out[1]?["tail_fade_ms"] = (150.0, 1_200.0)
+        out[1]?["scene_rate_hz"] = (0.25, 12.0)
 
         out[2]?["grain_size_ms"] = (12.0, 120.0)
         out[2]?["grain_density"] = (0.1, 0.9)
@@ -197,12 +219,17 @@ enum ModeContract {
             "brightness": linear(min: -6.0, max: 6.0),
         ],
         1: [
-            "window_norm": linear(min: 0.08, max: 4.0),
-            "repeat_grid": linear(min: 0.08, max: 4.0),
-            "stutter_len_norm": linear(min: 30.0, max: 450.0),
-            "stutter_len": linear(min: 30.0, max: 450.0),
-            "gate_sharpness": linear(min: 0.0, max: 120.0),
-            "threshold_bias": linear(min: 0.0, max: 0.65),
+            "repeat_prob": linear(min: 0.0, max: 1.0),
+            "jitter_ms": mode1MutationTransform,
+            "gate_sharpness": mode1MutationTransform,
+            "pitch_follow": mode1PitchLockTransform,
+            "feedback": mode1HoldFromFeedbackTransform,
+            "loop_len_s": mode1HoldFromLoopLengthTransform,
+            "window_norm": mode1HoldFromLoopLengthTransform,
+            "repeat_grid": mode1HoldFromLoopLengthTransform,
+            "stutter_len_ms": mode1SceneRateFromStutterTransform,
+            "stutter_len_norm": mode1SceneRateFromStutterTransform,
+            "stutter_len": mode1SceneRateFromStutterTransform,
         ],
         2: [
             "grain_size": linear(min: 12.0, max: 120.0),
@@ -290,7 +317,7 @@ enum ModeContract {
 
             var value = raw
             if let transform = transforms[key], key != canonical {
-                value = transform(clamp01(raw))
+                value = transform(raw)
             }
             out[canonical] = value
         }
@@ -311,6 +338,30 @@ enum ModeContract {
         }
         if m == 8, out["reverb_decay_range_s"] == nil {
             out["reverb_decay_range_s"] = 2.0 * clamp01(out["reverb_rand_amt"] ?? params["reverb_wet"] ?? 0.2)
+        }
+        if m == 1, out["fracture"] == nil {
+            out["fracture"] = clamp01(params["repeat_prob"] ?? 0.55)
+        }
+        if m == 1, out["mutation"] == nil {
+            out["mutation"] = mode1MutationTransform(params["jitter_ms"] ?? params["gate_sharpness"] ?? 0.3)
+        }
+        if m == 1, out["pitch_lock"] == nil {
+            out["pitch_lock"] = mode1PitchLockTransform(params["pitch_follow"] ?? 0.65)
+        }
+        if m == 1, out["hold_len_s"] == nil {
+            if let loop = params["loop_len_s"] ?? params["window_norm"] ?? params["repeat_grid"] {
+                out["hold_len_s"] = mode1HoldFromLoopLengthTransform(loop)
+            } else if let feedback = params["feedback"] {
+                out["hold_len_s"] = mode1HoldFromFeedbackTransform(feedback)
+            } else {
+                out["hold_len_s"] = 8.0
+            }
+        }
+        if m == 1, out["tail_fade_ms"] == nil {
+            out["tail_fade_ms"] = 420.0
+        }
+        if m == 1, out["scene_rate_hz"] == nil {
+            out["scene_rate_hz"] = mode1SceneRateFromStutterTransform(params["stutter_len_ms"] ?? params["stutter_len_norm"] ?? params["stutter_len"] ?? 0.35)
         }
         if m == 8, out["twitchiness"] == nil {
             out["twitchiness"] = clamp01(params["motion_speed"] ?? 0.4)
@@ -459,6 +510,60 @@ enum ModeContract {
         safeDefaults(mode: mode, tsMs: tsMs, contractViolation: true)
     }
 
+    static func contractLockPayload() -> ContractLockPayload {
+        let modeKeys = Array(0...10)
+        let canonical: [String: [String]] = Dictionary(uniqueKeysWithValues: modeKeys.map { mode in
+            (String(mode), Array(modeSpecificParams[mode, default: []]).sorted())
+        })
+        let aliases: [String: [String: String]] = Dictionary(uniqueKeysWithValues: modeKeys.map { mode in
+            let map = legacyParamAliases[mode, default: [:]]
+            return (String(mode), map)
+        })
+        let required: [String: [String]] = Dictionary(uniqueKeysWithValues: modeKeys.map { mode in
+            (String(mode), Array(requiredPicksByMode[mode, default: []]).sorted())
+        })
+        let bounds: [String: [String: [Double]]] = Dictionary(uniqueKeysWithValues: modeKeys.map { mode in
+            let map = modeBounds[mode, default: [:]].mapValues { [$0.0, $0.1] }
+            return (String(mode), map)
+        })
+        let safe: [String: [String: Double]] = Dictionary(uniqueKeysWithValues: modeKeys.map { mode in
+            (String(mode), safeModeParams[mode, default: [:]])
+        })
+
+        return ContractLockPayload(
+            protocolVersion: supportedProtocolVersion,
+            contractVersion: contractVersion,
+            modeSpecificParams: canonical,
+            legacyParamAliases: aliases,
+            requiredPicksByMode: required,
+            modeBounds: bounds,
+            safeModeParams: safe
+        )
+    }
+
+    static func contractFingerprint() -> String {
+        let encoder = JSONEncoder()
+        if #available(macOS 13.0, *) {
+            encoder.outputFormatting = [.sortedKeys]
+        }
+        let data = (try? encoder.encode(contractLockPayload())) ?? Data()
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func contractLockStatus() -> ContractLockStatus {
+        let computed = contractFingerprint()
+        return ContractLockStatus(
+            lockedFingerprint: lockedContractFingerprint,
+            computedFingerprint: computed,
+            matched: computed == lockedContractFingerprint
+        )
+    }
+
+    static func isContractLockMatched() -> Bool {
+        contractLockStatus().matched
+    }
+
     private static func clampMode(_ mode: Int) -> Int {
         Swift.max(0, Swift.min(10, mode))
     }
@@ -468,13 +573,59 @@ enum ModeContract {
         return (b.0 + b.1) * 0.5
     }
 
-    private static func clamp01(_ value: Double) -> Double {
+    private nonisolated static func clamp01(_ value: Double) -> Double {
         max(0.0, min(1.0, value))
     }
 
     private static func linear(min: Double, max: Double) -> Transform {
         let span = max - min
-        return { value in min + span * value }
+        return { value in min + span * clamp01(value) }
+    }
+
+    private nonisolated static func mode1MutationTransform(_ raw: Double) -> Double {
+        if raw > 1.0 {
+            return clamp01((raw - 0.0) / 120.0)
+        }
+        // Legacy normalized controls (gate_sharpness / jitter proxies) already live in 0..1.
+        return clamp01(raw)
+    }
+
+    private nonisolated static func mode1PitchLockTransform(_ raw: Double) -> Double {
+        if raw > 1.0 {
+            return clamp01((raw - 0.65) / 0.35)
+        }
+        return clamp01(raw)
+    }
+
+    private nonisolated static func mode1HoldFromFeedbackTransform(_ raw: Double) -> Double {
+        let norm: Double
+        if raw > 1.0 {
+            norm = clamp01((raw - 6.0) / 6.0)
+        } else {
+            norm = clamp01(raw / 0.65)
+        }
+        return 6.0 + (6.0 * norm)
+    }
+
+    private nonisolated static func mode1HoldFromLoopLengthTransform(_ raw: Double) -> Double {
+        let norm: Double
+        if raw > 1.0 {
+            norm = clamp01((raw - 0.08) / (4.0 - 0.08))
+        } else {
+            norm = clamp01(raw)
+        }
+        return 6.0 + (6.0 * norm)
+    }
+
+    private nonisolated static func mode1SceneRateFromStutterTransform(_ raw: Double) -> Double {
+        let ms: Double
+        if raw > 1.0 {
+            ms = min(max(raw, 30.0), 450.0)
+        } else {
+            ms = 30.0 + (420.0 * clamp01(raw))
+        }
+        let t = clamp01((ms - 30.0) / 420.0)
+        return 12.0 - ((12.0 - 0.25) * t)
     }
 
     private static func pickValue(for key: String, picks: Picks) -> String? {

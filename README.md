@@ -49,6 +49,7 @@ When the run loop starts, the harness creates:
 
 and prints:
 - `running bundle <bundle_id> (policy=..., banks=..., contract=...)`
+  - includes `fp=<contract_fingerprint_prefix>` and `lock=<ok|mismatch>` so harness/model contract lock status is visible in logs.
 
 Live human labels (sticky) in the UI:
 - `1` or `Good` button -> `good`
@@ -113,6 +114,11 @@ RUN_GOLDEN_TRACE=1 MODEL_HOST=127.0.0.1 MODEL_PORT=9910 xcodebuild -scheme TheTu
 ```
 
 Mode contract reference: `docs/mode-contract.md`.
+
+Pre-ML contract lock:
+- `ModeContract.lockedContractFingerprint` is test-pinned.
+- Run bundles include `contract_fingerprint`.
+- Treat a fingerprint mismatch between harness and model as a release blocker.
 
 ## Mode verification by ear (including 5/6 MIDI-resonification)
 
