@@ -116,6 +116,22 @@ struct Features: Codable, Equatable {
     }
 }
 
+extension Features {
+    static let silence = Features(
+        loudnessLufs: -80,
+        onsetRateHz: 0,
+        specCentroidHz: 0,
+        bandLow: 0,
+        bandMid: 0,
+        bandHigh: 0,
+        noisiness: 0,
+        pitchHz: nil,
+        pitchConf: 0,
+        keyEstimate: nil,
+        keyConf: 0
+    )
+}
+
 struct HarnessState: Codable, Equatable {
     let overload: Bool
     let cooldown: Double
@@ -152,7 +168,7 @@ struct ModelIn: Codable, Equatable {
         case protocolVersion, tsMs, sessionId, frameHz, mode, buttons, features, state
     }
 
-    init(protocolVersion: Int = 1, tsMs: Int, sessionId: String, frameHz: Int = 10, mode: Int,
+    init(protocolVersion: Int = ModeContract.supportedProtocolVersion, tsMs: Int, sessionId: String, frameHz: Int = 10, mode: Int,
          buttons: Buttons, features: Features, state: HarnessState? = nil) {
         self.protocolVersion = protocolVersion
         self.tsMs = tsMs
@@ -208,6 +224,94 @@ struct Flags: Codable, Equatable {
         self.preferStability = try c.decodeIfPresent(Bool.self, forKey: .preferStability) ?? true
         self.thinEvents = try c.decodeIfPresent(Bool.self, forKey: .thinEvents) ?? false
         self.resetVoices = try c.decodeIfPresent(Bool.self, forKey: .resetVoices) ?? false
+    }
+}
+
+struct VisualOut: Codable, Equatable {
+    let sceneId: String
+    let density: Double
+    let cohesion: Double
+    let disruption: Double
+    let tokenSalience: Double
+    let wordmarkIntegrity: Double
+    let decayMs: Int
+    let flashBias: Double
+    let anchorWeights: [Double]
+    let thought: String
+    let thoughtLog: [String]
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case sceneId, density, cohesion, disruption, tokenSalience, wordmarkIntegrity, decayMs, flashBias, anchorWeights, thought, thoughtLog
+    }
+
+    init(
+        sceneId: String,
+        density: Double,
+        cohesion: Double,
+        disruption: Double,
+        tokenSalience: Double,
+        wordmarkIntegrity: Double,
+        decayMs: Int,
+        flashBias: Double,
+        anchorWeights: [Double],
+        thought: String = "idle",
+        thoughtLog: [String] = []
+    ) {
+        self.sceneId = sceneId
+        self.density = density
+        self.cohesion = cohesion
+        self.disruption = disruption
+        self.tokenSalience = tokenSalience
+        self.wordmarkIntegrity = wordmarkIntegrity
+        self.decayMs = decayMs
+        self.flashBias = flashBias
+        self.anchorWeights = anchorWeights
+        self.thought = thought
+        self.thoughtLog = thoughtLog
+    }
+
+    init(from decoder: Decoder) throws {
+        try assertNoUnknownKeys(VisualOut.self, decoder: decoder, allowedKeys: Set(CodingKeys.allCases.map(\.rawValue)))
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.sceneId = try c.decode(String.self, forKey: .sceneId)
+        self.density = try c.decode(Double.self, forKey: .density)
+        self.cohesion = try c.decode(Double.self, forKey: .cohesion)
+        self.disruption = try c.decode(Double.self, forKey: .disruption)
+        self.tokenSalience = try c.decode(Double.self, forKey: .tokenSalience)
+        self.wordmarkIntegrity = try c.decode(Double.self, forKey: .wordmarkIntegrity)
+        self.decayMs = try c.decode(Int.self, forKey: .decayMs)
+        self.flashBias = try c.decode(Double.self, forKey: .flashBias)
+        self.anchorWeights = try c.decode([Double].self, forKey: .anchorWeights)
+        self.thought = try c.decode(String.self, forKey: .thought)
+        self.thoughtLog = try c.decodeIfPresent([String].self, forKey: .thoughtLog) ?? []
+    }
+
+    static func defaultForMode(_ mode: Int) -> VisualOut {
+        let normalized = max(0, min(10, mode))
+        switch normalized {
+        case 0:
+            return VisualOut(sceneId: "quiet_watch", density: 0.20, cohesion: 0.78, disruption: 0.16, tokenSalience: 0.26, wordmarkIntegrity: 0.88, decayMs: 1_700, flashBias: 0.18, anchorWeights: [0.56, 0.22, 0.22], thought: "idle")
+        case 1:
+            return VisualOut(sceneId: "relay_mesh", density: 0.58, cohesion: 0.62, disruption: 0.48, tokenSalience: 0.62, wordmarkIntegrity: 0.58, decayMs: 980, flashBias: 0.52, anchorWeights: [0.34, 0.32, 0.34], thought: "idle")
+        case 2:
+            return VisualOut(sceneId: "memory_drift", density: 0.62, cohesion: 0.46, disruption: 0.52, tokenSalience: 0.54, wordmarkIntegrity: 0.44, decayMs: 1_100, flashBias: 0.34, anchorWeights: [0.18, 0.52, 0.30], thought: "idle")
+        case 3:
+            return VisualOut(sceneId: "fault_lattice", density: 0.44, cohesion: 0.50, disruption: 0.68, tokenSalience: 0.48, wordmarkIntegrity: 0.50, decayMs: 920, flashBias: 0.44, anchorWeights: [0.24, 0.28, 0.48], thought: "idle")
+        case 4:
+            return VisualOut(sceneId: "fault_lattice", density: 0.70, cohesion: 0.34, disruption: 0.82, tokenSalience: 0.74, wordmarkIntegrity: 0.36, decayMs: 760, flashBias: 0.68, anchorWeights: [0.18, 0.24, 0.58], thought: "idle")
+        case 5:
+            return VisualOut(sceneId: "relay_mesh", density: 0.52, cohesion: 0.74, disruption: 0.28, tokenSalience: 0.56, wordmarkIntegrity: 0.72, decayMs: 1_250, flashBias: 0.24, anchorWeights: [0.42, 0.36, 0.22], thought: "idle")
+        case 6:
+            return VisualOut(sceneId: "grid_lock", density: 0.30, cohesion: 0.82, disruption: 0.18, tokenSalience: 0.38, wordmarkIntegrity: 0.84, decayMs: 1_450, flashBias: 0.14, anchorWeights: [0.16, 0.58, 0.26], thought: "idle")
+        case 7:
+            return VisualOut(sceneId: "memory_drift", density: 0.60, cohesion: 0.48, disruption: 0.40, tokenSalience: 0.62, wordmarkIntegrity: 0.60, decayMs: 1_020, flashBias: 0.30, anchorWeights: [0.33, 0.34, 0.33], thought: "idle")
+        case 8:
+            return VisualOut(sceneId: "quiet_watch", density: 0.24, cohesion: 0.84, disruption: 0.12, tokenSalience: 0.22, wordmarkIntegrity: 0.90, decayMs: 1_900, flashBias: 0.12, anchorWeights: [0.28, 0.24, 0.48], thought: "idle")
+        case 9:
+            return VisualOut(sceneId: "alarm_splay", density: 0.72, cohesion: 0.28, disruption: 0.70, tokenSalience: 0.80, wordmarkIntegrity: 0.42, decayMs: 780, flashBias: 0.74, anchorWeights: [0.46, 0.18, 0.36], thought: "idle")
+        default:
+            return VisualOut(sceneId: "alarm_splay", density: 0.78, cohesion: 0.22, disruption: 0.88, tokenSalience: 0.86, wordmarkIntegrity: 0.34, decayMs: 680, flashBias: 0.90, anchorWeights: [0.36, 0.28, 0.36], thought: "idle")
+        }
     }
 }
 
@@ -290,9 +394,10 @@ struct ModelOut: Codable, Equatable {
     let params: [String: Double]
     let picks: Picks
     let flags: Flags
+    let visual: VisualOut
 
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case protocolVersion, tsMs, mode, params, picks, flags
+        case protocolVersion, tsMs, mode, params, picks, flags, visual
     }
 
     init(
@@ -301,7 +406,8 @@ struct ModelOut: Codable, Equatable {
         mode: Int,
         params: [String: Double],
         picks: Picks,
-        flags: Flags
+        flags: Flags,
+        visual: VisualOut? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.tsMs = tsMs
@@ -309,6 +415,7 @@ struct ModelOut: Codable, Equatable {
         self.params = params
         self.picks = picks
         self.flags = flags
+        self.visual = visual ?? VisualOut.defaultForMode(mode)
     }
 
     init(from decoder: Decoder) throws {
@@ -328,5 +435,15 @@ struct ModelOut: Codable, Equatable {
         self.params = try c.decodeIfPresent([String: Double].self, forKey: .params) ?? [:]
         self.picks = try c.decodeIfPresent(Picks.self, forKey: .picks) ?? Picks()
         self.flags = try c.decodeIfPresent(Flags.self, forKey: .flags) ?? Flags()
+        self.visual = try c.decode(VisualOut.self, forKey: .visual)
     }
+}
+
+struct ModelMonitorContext: Equatable {
+    let rawPacket: ModelOut?
+    let resolvedPacket: ModelOut
+    let latencyMs: Int
+    let contractViolations: [String]
+    let pickNotes: [String]
+    let receivedAt: Date
 }

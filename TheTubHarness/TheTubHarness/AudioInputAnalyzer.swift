@@ -307,6 +307,119 @@ enum InputChannelRouter {
     }
 }
 
+struct RawInputChannelSlot {
+    let base: UnsafePointer<Float>
+    let stride: Int
+
+    func sample(frameIndex: Int) -> Float {
+        base[frameIndex * stride]
+    }
+}
+
+struct RawInputChannelBinding {
+    let slots: [RawInputChannelSlot]
+
+    init(audioBuffers: UnsafePointer<AudioBufferList>) {
+        let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: audioBuffers))
+        var built: [RawInputChannelSlot] = []
+        built.reserveCapacity(buffers.reduce(0) { $0 + max(1, Int($1.mNumberChannels)) })
+        for buffer in buffers {
+            guard let data = buffer.mData else { continue }
+            let base = UnsafePointer<Float>(data.assumingMemoryBound(to: Float.self))
+            let channelCount = max(1, Int(buffer.mNumberChannels))
+            if channelCount == 1 {
+                built.append(RawInputChannelSlot(base: base, stride: 1))
+            } else {
+                for channel in 0..<channelCount {
+                    built.append(RawInputChannelSlot(base: base.advanced(by: channel), stride: channelCount))
+                }
+            }
+        }
+        slots = built
+    }
+
+    var channelCount: Int { slots.count }
+
+    func sample(channelIndex: Int, frameIndex: Int) -> Float {
+        guard channelIndex >= 0, channelIndex < slots.count else { return 0 }
+        return slots[channelIndex].sample(frameIndex: frameIndex)
+    }
+}
+
+nonisolated private final class CoreAudioLiveInputDriver {
+    typealias InputBlock = (Int, UnsafePointer<AudioBufferList>, Double) -> Void
+
+    private var deviceID: AudioDeviceID = 0
+    private var ioProcID: AudioDeviceIOProcID?
+    private var sampleRate: Double = 48_000
+    private var inputBlock: InputBlock?
+
+    deinit {
+        stop()
+    }
+
+    func start(inputUID: String, inputBlock: @escaping InputBlock) throws {
+        stop()
+        guard !inputUID.isEmpty, let resolvedDeviceID = CoreAudioInputCatalog.deviceID(forUID: inputUID) else {
+            throw NSError(domain: "AudioInputDriver", code: 1, userInfo: [NSLocalizedDescriptionKey: "Input device not found"])
+        }
+        self.deviceID = resolvedDeviceID
+        self.sampleRate = CoreAudioInputCatalog.nominalSampleRate(forUID: inputUID) ?? 48_000
+        self.inputBlock = inputBlock
+
+        var maybeProcID: AudioDeviceIOProcID?
+        let createStatus = AudioDeviceCreateIOProcID(
+            resolvedDeviceID,
+            coreAudioLiveInputIOProc,
+            UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
+            &maybeProcID
+        )
+        guard createStatus == noErr, let maybeProcID else {
+            stop()
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(createStatus), userInfo: [NSLocalizedDescriptionKey: "Failed to create input device callback (OSStatus \(createStatus))"])
+        }
+
+        ioProcID = maybeProcID
+        let startStatus = AudioDeviceStart(resolvedDeviceID, maybeProcID)
+        guard startStatus == noErr else {
+            stop()
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(startStatus), userInfo: [NSLocalizedDescriptionKey: "Failed to start input device callback (OSStatus \(startStatus))"])
+        }
+    }
+
+    func stop() {
+        guard let ioProcID else { return }
+        AudioDeviceStop(deviceID, ioProcID)
+        AudioDeviceDestroyIOProcID(deviceID, ioProcID)
+        self.ioProcID = nil
+        self.deviceID = 0
+        self.inputBlock = nil
+    }
+
+    fileprivate func handle(inputData: UnsafePointer<AudioBufferList>, outputData: UnsafeMutablePointer<AudioBufferList>) -> OSStatus {
+        let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+        guard let first = buffers.first else { return noErr }
+        let bytesPerFrame = max(Int(MemoryLayout<Float>.size), Int(MemoryLayout<Float>.size) * max(1, Int(first.mNumberChannels)))
+        let frameCount = Int(first.mDataByteSize) / max(1, bytesPerFrame)
+        if frameCount > 0 {
+            inputBlock?(frameCount, inputData, sampleRate)
+        }
+        let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
+        for buffer in outputBuffers {
+            if let data = buffer.mData {
+                memset(data, 0, Int(buffer.mDataByteSize))
+            }
+        }
+        return noErr
+    }
+}
+
+nonisolated private let coreAudioLiveInputIOProc: AudioDeviceIOProc = { _, _, inInputData, _, outOutputData, _, inClientData in
+    guard let inClientData else { return noErr }
+    let driver = Unmanaged<CoreAudioLiveInputDriver>.fromOpaque(inClientData).takeUnretainedValue()
+    return driver.handle(inputData: inInputData, outputData: outOutputData)
+}
+
 enum InputRoutingPersistence {
     static func loadState(appName: String = "TheTubHarness", fileURL: URL? = nil) -> InputRoutingStore {
         let url: URL?
@@ -438,6 +551,7 @@ struct FeaturePacketSnapshot {
 final class AudioInputAnalyzer: ObservableObject {
     private let lock = NSLock()
     private let analysisQueue = DispatchQueue(label: "tub.audio.analysis", qos: .userInitiated)
+    private let deviceRefreshQueue = DispatchQueue(label: "tub.audio.input.devices", qos: .userInitiated)
 
     private let audioIn = AudioInService()
     private var extractor = FeatureExtractor(sampleRate: 48_000)
@@ -458,6 +572,9 @@ final class AudioInputAnalyzer: ObservableObject {
         source: "dummy",
         fallbackReason: "audio_input_stopped"
     )
+    private var inputRefreshGeneration: UInt64 = 0
+    private var lastUIPublishUptimeNs: UInt64 = 0
+    private let uiPublishMinimumIntervalNs: UInt64 = 250_000_000
 
     @Published private(set) var latestFeatures: Features = .silence
     @Published private(set) var inputStatus: AudioInStatus = .stopped
@@ -471,6 +588,16 @@ final class AudioInputAnalyzer: ObservableObject {
     var onLiveInputBuffer: ((AVAudioPCMBuffer, AVAudioTime?) -> Void)? {
         didSet {
             audioIn.onInputBuffer = onLiveInputBuffer
+        }
+    }
+    var onLiveInputRawBuffers: ((UnsafePointer<AudioBufferList>, Int, Double) -> Void)? {
+        didSet {
+            audioIn.onRawInputAudioBuffers = onLiveInputRawBuffers
+        }
+    }
+    var onLiveStageAudioSnapshot: ((StageAudioSnapshot) -> Void)? {
+        didSet {
+            audioIn.onStageAudioSnapshot = onLiveStageAudioSnapshot
         }
     }
 
@@ -564,46 +691,57 @@ final class AudioInputAnalyzer: ObservableObject {
         audioIn.ingestExternalBuffer(buffer, time: time)
     }
 
-    func refreshInputDevices() {
-        let devices = CoreAudioInputCatalog.listInputDevices()
-        let selected = audioIn.selectedInputUID() ?? CoreAudioInputCatalog.defaultInputUID() ?? devices.first?.uid ?? ""
-        let route = resolveInputRoute(uid: selected, devices: devices)
+    func ingestExternalAudioBuffers(_ audioBufferList: UnsafePointer<AudioBufferList>, frameCount: Int, sampleRate: Double) {
+        audioIn.ingestExternalAudioBuffers(audioBufferList, frameCount: frameCount, sampleRate: sampleRate)
+    }
 
-        DispatchQueue.main.async {
-            self.inputDevices = devices
-            self.selectedInputUID = selected
-            if let d = devices.first(where: { $0.uid == selected }) {
-                self.activeInputName = d.name
-            } else if devices.isEmpty {
-                self.activeInputName = "No Input Device"
+    func refreshInputDevices() {
+        inputRefreshGeneration &+= 1
+        let refreshGeneration = inputRefreshGeneration
+
+        deviceRefreshQueue.async { [weak self] in
+            guard let self else { return }
+            let devices = CoreAudioInputCatalog.listInputDevices()
+            let selected = self.audioIn.selectedInputUID() ?? CoreAudioInputCatalog.defaultInputUID() ?? devices.first?.uid ?? ""
+
+            DispatchQueue.main.async {
+                guard refreshGeneration == self.inputRefreshGeneration else { return }
+                self.applyInputDeviceRefresh(devices: devices, selectedUID: selected)
             }
-            self.inputRouteProfile = route.profile
-            self.inputRouteWarning = route.warning
-            self.inputRouteState = route.info
         }
-        audioIn.setInputRouteProfile(route.profile)
-        persistInputRoutingStore(selectedUID: selected)
     }
 
     func selectInputDevice(uid: String) {
         guard !uid.isEmpty else { return }
 
-        do {
-            try audioIn.selectInputDevice(uid: uid)
-            let devices = CoreAudioInputCatalog.listInputDevices()
-            let route = resolveInputRoute(uid: uid, devices: devices)
-            audioIn.setInputRouteProfile(route.profile)
-            DispatchQueue.main.async {
-                self.inputDevices = devices
-                self.selectedInputUID = uid
-                self.inputRouteProfile = route.profile
-                self.inputRouteWarning = route.warning
-                self.inputRouteState = route.info
-            }
-            persistInputRoutingStore(selectedUID: uid)
-        } catch {
-            DispatchQueue.main.async {
-                self.fallbackReason = "audio_input_select_failed:\(error.localizedDescription)"
+        let immediateRoute = resolveInputRoute(uid: uid, devices: inputDevices)
+        inputRouteProfile = immediateRoute.profile
+        inputRouteWarning = immediateRoute.warning
+        inputRouteState = immediateRoute.info
+        selectedInputUID = uid
+        if !immediateRoute.info.inputName.isEmpty {
+            activeInputName = immediateRoute.info.inputName
+        }
+        audioIn.setInputRouteProfile(immediateRoute.profile)
+        persistInputRoutingStore(selectedUID: uid)
+
+        inputRefreshGeneration &+= 1
+        let refreshGeneration = inputRefreshGeneration
+        deviceRefreshQueue.async { [weak self] in
+            guard let self else { return }
+
+            do {
+                try self.audioIn.selectInputDevice(uid: uid)
+                let devices = CoreAudioInputCatalog.listInputDevices()
+                DispatchQueue.main.async {
+                    guard refreshGeneration == self.inputRefreshGeneration else { return }
+                    self.applyInputDeviceRefresh(devices: devices, selectedUID: uid)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard refreshGeneration == self.inputRefreshGeneration else { return }
+                    self.fallbackReason = "audio_input_select_failed:\(error.localizedDescription)"
+                }
             }
         }
     }
@@ -707,7 +845,9 @@ final class AudioInputAnalyzer: ObservableObject {
                     features: .silence,
                     source: "dummy",
                     fallbackReason: status.fallbackReason ?? "audio_input_unavailable"
-                )
+                ),
+                meters: Array(repeating: 0, count: max(0, inputRouteState.inputChannels)),
+                forceUI: true
             )
             return
         }
@@ -718,7 +858,9 @@ final class AudioInputAnalyzer: ObservableObject {
                     features: .silence,
                     source: "dummy",
                     fallbackReason: "audio_input_stale_\(Int(staleMs))ms"
-                )
+                ),
+                meters: Array(repeating: 0, count: max(0, inputRouteState.inputChannels)),
+                forceUI: true
             )
             return
         }
@@ -736,22 +878,58 @@ final class AudioInputAnalyzer: ObservableObject {
                 features: features,
                 source: "audio_in",
                 fallbackReason: nil
-            )
+            ),
+            meters: meters
         )
-        DispatchQueue.main.async { [weak self] in
-            self?.inputChannelLevels = meters
-        }
     }
 
-    private func publish(_ frame: FeaturePacketSnapshot) {
+    private func publish(_ frame: FeaturePacketSnapshot, meters: [Float]? = nil, forceUI: Bool = false) {
         lock.lock()
         latestStorage = frame
         lock.unlock()
 
+        let now = DispatchTime.now().uptimeNanoseconds
+        let shouldPublishUI = forceUI || now &- lastUIPublishUptimeNs >= uiPublishMinimumIntervalNs
+        guard shouldPublishUI else { return }
+        lastUIPublishUptimeNs = now
+
         DispatchQueue.main.async { [weak self] in
-            self?.latestFeatures = frame.features
-            self?.fallbackReason = frame.fallbackReason
+            guard let self else { return }
+            if self.latestFeatures != frame.features {
+                self.latestFeatures = frame.features
+            }
+            if self.fallbackReason != frame.fallbackReason {
+                self.fallbackReason = frame.fallbackReason
+            }
+            if let meters,
+               !Self.approximatelyEqual(self.inputChannelLevels, meters, tolerance: 0.012) {
+                self.inputChannelLevels = meters
+            }
         }
+    }
+
+    private func applyInputDeviceRefresh(devices: [AudioInputDevice], selectedUID: String) {
+        let route = resolveInputRoute(uid: selectedUID, devices: devices)
+        inputDevices = devices
+        selectedInputUID = selectedUID
+        if let device = devices.first(where: { $0.uid == selectedUID }) {
+            activeInputName = device.name
+        } else if devices.isEmpty {
+            activeInputName = "No Input Device"
+        }
+        inputRouteProfile = route.profile
+        inputRouteWarning = route.warning
+        inputRouteState = route.info
+        audioIn.setInputRouteProfile(route.profile)
+        persistInputRoutingStore(selectedUID: selectedUID)
+    }
+
+    private static func approximatelyEqual(_ lhs: [Float], _ rhs: [Float], tolerance: Float) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for idx in lhs.indices where abs(lhs[idx] - rhs[idx]) > tolerance {
+            return false
+        }
+        return true
     }
 
     private func profileForInputUID(_ uid: String, inputChannels: Int) -> InputRoutingProfile {
@@ -798,6 +976,7 @@ private final class AudioInService: ObservableObject {
     @Published private(set) var status: AudioInStatus = .stopped
     @Published private(set) var activeInputName: String = "System Default"
 
+    private let liveInputDriver = CoreAudioLiveInputDriver()
     private let engine = AVAudioEngine()
     private let lock = NSLock()
 
@@ -812,7 +991,11 @@ private final class AudioInService: ObservableObject {
     private var activeChannelMask: [Bool] = [true]
     private var activeChannelGainDb: [Double] = [0]
     private var channelLevelsStorage: [Float] = []
+    private var lastStageSnapshotNs: UInt64 = 0
+    private let stageSnapshotIntervalNs: UInt64 = 83_000_000
     var onInputBuffer: ((AVAudioPCMBuffer, AVAudioTime?) -> Void)?
+    var onRawInputAudioBuffers: ((UnsafePointer<AudioBufferList>, Int, Double) -> Void)?
+    var onStageAudioSnapshot: ((StageAudioSnapshot) -> Void)?
 
     var sampleRate: Double {
         lock.lock(); defer { lock.unlock() }
@@ -908,6 +1091,7 @@ private final class AudioInService: ObservableObject {
         lock.lock()
         usesExternalFeed = false
         lock.unlock()
+        liveInputDriver.stop()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         DispatchQueue.main.async {
@@ -921,6 +1105,7 @@ private final class AudioInService: ObservableObject {
         lastIngestNs = 0
         lock.unlock()
         refreshActiveInputName()
+        liveInputDriver.stop()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         DispatchQueue.main.async {
@@ -934,6 +1119,14 @@ private final class AudioInService: ObservableObject {
         lock.unlock()
         guard allowed else { return }
         ingest(buffer, time: time)
+    }
+
+    func ingestExternalAudioBuffers(_ audioBufferList: UnsafePointer<AudioBufferList>, frameCount: Int, sampleRate: Double) {
+        lock.lock()
+        let allowed = usesExternalFeed
+        lock.unlock()
+        guard allowed else { return }
+        ingest(audioBufferList: audioBufferList, frameCount: frameCount, sampleRate: sampleRate)
     }
 
     func snapshotLastSamples(count: Int) -> [Float] {
@@ -982,27 +1175,21 @@ private final class AudioInService: ObservableObject {
             self.status = .starting
         }
 
+        liveInputDriver.stop()
         if engine.isRunning {
             engine.stop()
         }
+        engine.inputNode.removeTap(onBus: 0)
 
-        let input = engine.inputNode
         lock.lock()
         let preferredUID = preferredInputUID
         lock.unlock()
 
-        if let preferredUID, !preferredUID.isEmpty {
-            do {
-                try CoreAudioInputCatalog.setCurrentInputDevice(on: input, uid: preferredUID)
-            } catch {
-                print("[audio_in] warning: failed to bind input device \(preferredUID): \(error)")
-            }
-        }
+        let routeUID = preferredUID ?? CoreAudioInputCatalog.defaultInputUID() ?? ""
+        let sampleRate = max(8_000, CoreAudioInputCatalog.nominalSampleRate(forUID: routeUID) ?? 48_000)
+        let channels = max(0, CoreAudioInputCatalog.inputChannels(forUID: routeUID) ?? 0)
 
-        let format = input.outputFormat(forBus: 0)
-        let channels = Int(format.channelCount)
-
-        guard channels > 0 else {
+        guard !routeUID.isEmpty, channels > 0 else {
             DispatchQueue.main.async {
                 self.status = .noDevice
             }
@@ -1010,22 +1197,20 @@ private final class AudioInService: ObservableObject {
         }
 
         lock.lock()
-        sampleRateStorage = max(8_000, format.sampleRate)
+        sampleRateStorage = sampleRate
         let cap = max(8_192, Int(sampleRateStorage * ringSeconds))
         ring = Array(repeating: 0, count: cap)
         writeIndex = 0
         filled = false
         lastIngestNs = 0
+        lastStageSnapshotNs = 0
         channelLevelsStorage = Array(repeating: 0, count: channels)
         lock.unlock()
 
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, time in
-            self?.ingest(buffer, time: time)
-        }
-
         do {
-            try engine.start()
+            try liveInputDriver.start(inputUID: routeUID) { [weak self] frameCount, audioBufferList, sampleRate in
+                self?.ingest(audioBufferList: audioBufferList, frameCount: frameCount, sampleRate: sampleRate)
+            }
             DispatchQueue.main.async {
                 self.status = .running
             }
@@ -1091,6 +1276,101 @@ private final class AudioInService: ObservableObject {
         }
         lock.unlock()
         onInputBuffer?(buffer, time)
+
+        if let onStageAudioSnapshot {
+            let shouldEmit: Bool = lock.withLock {
+                let due = now &- lastStageSnapshotNs >= stageSnapshotIntervalNs
+                if due {
+                    lastStageSnapshotNs = now
+                }
+                return due
+            }
+            if shouldEmit {
+                onStageAudioSnapshot(
+                    StageAudioAnalyzer.summarize(
+                        buffer: buffer,
+                        activeMask: effectiveMask,
+                        channelGainDb: configuredGains
+                    )
+                )
+            }
+        }
+    }
+
+    private func ingest(audioBufferList: UnsafePointer<AudioBufferList>, frameCount: Int, sampleRate: Double) {
+        let binding = RawInputChannelBinding(audioBuffers: audioBufferList)
+        let channelCount = binding.channelCount
+        guard frameCount > 0, channelCount > 0 else { return }
+
+        var mono = [Float](repeating: 0, count: frameCount)
+        var absSums = [Float](repeating: 0, count: channelCount)
+        lock.lock()
+        let configuredMask = activeChannelMask
+        let configuredGains = activeChannelGainDb
+        lock.unlock()
+        let effectiveMask = InputChannelRouter.sanitizedMask(configuredMask, channelCount: channelCount)
+
+        for frameIndex in 0..<frameCount {
+            for ch in 0..<channelCount {
+                let sample = binding.sample(channelIndex: ch, frameIndex: frameIndex)
+                absSums[ch] += abs(sample)
+            }
+            mono[frameIndex] = InputChannelRouter.mixedSample(
+                channelCount: channelCount,
+                activeMask: effectiveMask,
+                channelGainDb: configuredGains
+            ) { ch in
+                binding.sample(channelIndex: ch, frameIndex: frameIndex)
+            }
+        }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+
+        lock.lock()
+        let cap = ring.count
+        var w = writeIndex
+        sampleRateStorage = max(8_000, sampleRate)
+        for s in mono {
+            ring[w] = s
+            w += 1
+            if w >= cap {
+                w = 0
+                filled = true
+            }
+        }
+        writeIndex = w
+        lastIngestNs = now
+        if channelLevelsStorage.count != channelCount {
+            channelLevelsStorage = Array(repeating: 0, count: channelCount)
+        }
+        for ch in 0..<channelCount {
+            let avgAbs = absSums[ch] / Float(frameCount)
+            let previous = channelLevelsStorage[ch]
+            channelLevelsStorage[ch] = effectiveMask[ch] ? max(avgAbs, previous * 0.90) : 0
+        }
+        lock.unlock()
+        onRawInputAudioBuffers?(audioBufferList, frameCount, sampleRate)
+
+        if let onStageAudioSnapshot {
+            let shouldEmit: Bool = lock.withLock {
+                let due = now &- lastStageSnapshotNs >= stageSnapshotIntervalNs
+                if due {
+                    lastStageSnapshotNs = now
+                }
+                return due
+            }
+            if shouldEmit {
+                onStageAudioSnapshot(
+                    StageAudioAnalyzer.summarize(
+                        audioBufferList: audioBufferList,
+                        frameCount: frameCount,
+                        activeMask: effectiveMask,
+                        channelGainDb: configuredGains,
+                        sampleRate: sampleRate
+                    )
+                )
+            }
+        }
     }
 
     private func refreshActiveInputName() {
@@ -1113,7 +1393,29 @@ private final class AudioInService: ObservableObject {
     }
 }
 
-enum CoreAudioInputCatalog {
+nonisolated enum CoreAudioInputCatalog {
+    private static func systemDeviceIDs() -> [AudioDeviceID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        let sysObject = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyDataSize(sysObject, &address, 0, nil, &size) == noErr else {
+            return []
+        }
+
+        let count = Int(size) / MemoryLayout<AudioDeviceID>.size
+        guard count > 0 else { return [] }
+
+        var ids = [AudioDeviceID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(sysObject, &address, 0, nil, &size, &ids) == noErr else {
+            return []
+        }
+        return ids
+    }
+
     private static func copyCFStringProperty(
         id: AudioObjectID,
         selector: AudioObjectPropertySelector
@@ -1133,26 +1435,7 @@ enum CoreAudioInputCatalog {
     }
 
     static func listInputDevices() -> [AudioInputDevice] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var size: UInt32 = 0
-        let sysObject = AudioObjectID(kAudioObjectSystemObject)
-        guard AudioObjectGetPropertyDataSize(sysObject, &address, 0, nil, &size) == noErr else {
-            return []
-        }
-
-        let count = Int(size) / MemoryLayout<AudioDeviceID>.size
-        guard count > 0 else { return [] }
-
-        var ids = [AudioDeviceID](repeating: 0, count: count)
-        guard AudioObjectGetPropertyData(sysObject, &address, 0, nil, &size, &ids) == noErr else {
-            return []
-        }
-
-        return ids.compactMap { id in
+        return systemDeviceIDs().compactMap { id in
             let inputChannels = inputChannelCount(id)
             guard inputChannels > 0 else { return nil }
             guard let uid = deviceUID(id), !uid.isEmpty else { return nil }
@@ -1181,6 +1464,11 @@ enum CoreAudioInputCatalog {
         guard let id = deviceID(forUID: uid) else { return nil }
         let count = inputChannelCount(id)
         return count > 0 ? count : nil
+    }
+
+    static func nominalSampleRate(forUID uid: String) -> Double? {
+        guard let id = deviceID(forUID: uid) else { return nil }
+        return nominalSampleRate(id)
     }
 
     static func setCurrentInputDevice(on inputNode: AVAudioInputNode, uid: String) throws {
@@ -1230,28 +1518,7 @@ enum CoreAudioInputCatalog {
     }
 
     static func deviceID(forUID uid: String) -> AudioDeviceID? {
-        listInputDevices()
-            .first(where: { $0.uid == uid })
-            .flatMap { _ in
-                var address = AudioObjectPropertyAddress(
-                    mSelector: kAudioHardwarePropertyDevices,
-                    mScope: kAudioObjectPropertyScopeGlobal,
-                    mElement: kAudioObjectPropertyElementMain
-                )
-                var size: UInt32 = 0
-                let sysObject = AudioObjectID(kAudioObjectSystemObject)
-                guard AudioObjectGetPropertyDataSize(sysObject, &address, 0, nil, &size) == noErr else {
-                    return nil
-                }
-
-                let count = Int(size) / MemoryLayout<AudioDeviceID>.size
-                var ids = [AudioDeviceID](repeating: 0, count: count)
-                guard AudioObjectGetPropertyData(sysObject, &address, 0, nil, &size, &ids) == noErr else {
-                    return nil
-                }
-
-                return ids.first(where: { deviceUID($0) == uid })
-            }
+        systemDeviceIDs().first(where: { deviceUID($0) == uid })
     }
 
     private static func deviceUID(_ id: AudioDeviceID) -> String? {
@@ -1287,9 +1554,42 @@ enum CoreAudioInputCatalog {
         let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
         return buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
+
+    private static func nominalSampleRate(_ id: AudioDeviceID) -> Double? {
+        var rate = Float64(0)
+        var size = UInt32(MemoryLayout<Float64>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectGetPropertyData(id, &address, 0, nil, &size, &rate)
+        guard status == noErr, rate > 0 else { return nil }
+        return rate
+    }
 }
 
-enum CoreAudioOutputCatalog {
+nonisolated enum CoreAudioOutputCatalog {
+    private static func systemDeviceIDs() -> [AudioDeviceID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        let sysObject = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyDataSize(sysObject, &address, 0, nil, &size) == noErr else {
+            return []
+        }
+        let count = Int(size) / MemoryLayout<AudioDeviceID>.size
+        guard count > 0 else { return [] }
+        var ids = [AudioDeviceID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(sysObject, &address, 0, nil, &size, &ids) == noErr else {
+            return []
+        }
+        return ids
+    }
+
     private static func copyCFStringProperty(
         id: AudioObjectID,
         selector: AudioObjectPropertySelector
@@ -1310,25 +1610,7 @@ enum CoreAudioOutputCatalog {
 
     static func listOutputDevices() -> [AudioOutputDevice] {
         let defaultID = defaultOutputDeviceID()
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var size: UInt32 = 0
-        let sysObject = AudioObjectID(kAudioObjectSystemObject)
-        guard AudioObjectGetPropertyDataSize(sysObject, &address, 0, nil, &size) == noErr else {
-            return []
-        }
-
-        let count = Int(size) / MemoryLayout<AudioDeviceID>.size
-        guard count > 0 else { return [] }
-        var ids = [AudioDeviceID](repeating: 0, count: count)
-        guard AudioObjectGetPropertyData(sysObject, &address, 0, nil, &size, &ids) == noErr else {
-            return []
-        }
-
-        return ids.compactMap { id in
+        return systemDeviceIDs().compactMap { id in
             let outputChannels = outputChannelCount(id)
             guard outputChannels > 0 else { return nil }
             guard let uid = deviceUID(id), !uid.isEmpty else { return nil }
@@ -1390,26 +1672,7 @@ enum CoreAudioOutputCatalog {
     }
 
     static func deviceID(forUID uid: String) -> AudioDeviceID? {
-        listOutputDevices()
-            .first(where: { $0.uid == uid })
-            .flatMap { _ in
-                var address = AudioObjectPropertyAddress(
-                    mSelector: kAudioHardwarePropertyDevices,
-                    mScope: kAudioObjectPropertyScopeGlobal,
-                    mElement: kAudioObjectPropertyElementMain
-                )
-                var size: UInt32 = 0
-                let sysObject = AudioObjectID(kAudioObjectSystemObject)
-                guard AudioObjectGetPropertyDataSize(sysObject, &address, 0, nil, &size) == noErr else {
-                    return nil
-                }
-                let count = Int(size) / MemoryLayout<AudioDeviceID>.size
-                var ids = [AudioDeviceID](repeating: 0, count: count)
-                guard AudioObjectGetPropertyData(sysObject, &address, 0, nil, &size, &ids) == noErr else {
-                    return nil
-                }
-                return ids.first(where: { deviceUID($0) == uid })
-            }
+        systemDeviceIDs().first(where: { deviceUID($0) == uid })
     }
 
     static func deviceName(forUID uid: String) -> String? {
@@ -1788,20 +2051,4 @@ final class FeatureExtractor {
         if !value.isFinite { return lo }
         return Swift.max(lo, Swift.min(hi, value))
     }
-}
-
-private extension Features {
-    static let silence = Features(
-        loudnessLufs: -80,
-        onsetRateHz: 0,
-        specCentroidHz: 0,
-        bandLow: 0,
-        bandMid: 0,
-        bandHigh: 0,
-        noisiness: 0,
-        pitchHz: nil,
-        pitchConf: 0,
-        keyEstimate: "unknown",
-        keyConf: 0
-    )
 }

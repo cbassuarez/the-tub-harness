@@ -1,18 +1,20 @@
-# THE TUB Mode Contract (Protocol v1, Locked)
+# THE TUB Mode Contract (Protocol v2, Locked)
 
 ## Locking
-- `protocol_version`: `1`
-- `contract_version`: `control_surface_v1`
-- `contract_fingerprint`: emitted in every run bundle (`bundles/*.json`) and startup banner.
-- Startup banner also emits `lock=ok|mismatch` by checking runtime fingerprint against `ModeContract.lockedContractFingerprint`.
-- Fingerprint source: deterministic hash of mode params, aliases, required picks, bounds, and safe defaults in `ModeContract`.
-- Change policy: if contract tables change, intentionally update lock/fingerprint and coordinate with model repo before merge.
+- `protocol_version`: `2`
+- `contract_version`: `control_surface_v2`
+- `contract_fingerprint`: `dfea0b1c7c4e6014487acc3afa826b558aba3621b84ca30181e2b5cc77986d97`
+- Startup emits `lock=ok|mismatch` by checking runtime fingerprint against `ModeContract.lockedContractFingerprint`.
+- Fingerprint source: deterministic hash of mode params, aliases, required picks, bounds, safe defaults, and visual-head schema in `ModeContract`.
+- Change policy: if contract tables or visual schema change, intentionally bump protocol/contract and update the fingerprint in lockstep with the model repo.
 
 ## Protocol Rules
 - `ModelIn` and `ModelOut` require `protocol_version`.
 - Unsupported protocol versions are rejected.
 - Unknown JSON keys are rejected in strict packet decode.
 - `mode` must be in `0...10`.
+- `ModelOut.visual` is required in protocol v2.
+- Legacy v1 model outputs are rejected with a protocol error instead of being silently inferred on the stage path.
 
 ## Canonical Params By Mode
 - `0`: `dry_level`, `reverb_mix`, `reverb_decay_s`, `pre_delay_ms`, `tone_db`
@@ -27,6 +29,25 @@
 - `9`: `particle_density`, `particle_voice_cap`, `particle_decay_s`, `particle_brightness`, `motion_speed`, `spread`
 - `10`: `scene_len_s`, `chaos`, `blend`, `stability`
 
+## Required Visual Head (`ModelOut.visual`)
+- `scene_id`
+- `density`
+- `cohesion`
+- `disruption`
+- `token_salience`
+- `wordmark_integrity`
+- `decay_ms`
+- `flash_bias`
+- `anchor_weights` with exactly 3 weights
+
+## Visual Scene IDs
+- `grid_lock`
+- `relay_mesh`
+- `fault_lattice`
+- `memory_drift`
+- `alarm_splay`
+- `quiet_watch`
+
 ## Legacy Alias Support (Examples)
 - Mode `1`: `repeat_prob -> fracture`, `jitter_ms -> mutation`, `stutter_len_ms -> scene_rate_hz`, `feedback -> hold_len_s`
 - Mode `3`: `bit_depth -> bit_depth_bits`, `downsample -> downsample_amt`, `resonance -> res_shift`
@@ -39,11 +60,13 @@
 - Mode `4`: `bank_id`, `sample_id`
 - Mode `5`: `midi_inst_id`, `chord_set_id`
 - Mode `6`: `midi_inst_id`, `chord_set_id`
-- Mode `9`: `bank_id`, `midi_inst_id`
 - Mode `10`: `scene_id`
 
 ## Bounds / Clamping
 - Params are clamped per-mode (`ModeContract.modeBounds`).
+- Visual-head values are clamped in `ModeContract.visualBounds`.
+- `scene_id` falls back to a valid scene if unknown.
+- `anchor_weights` are normalized deterministically; invalid arrays fall back to `[0.34, 0.33, 0.33]`.
 - Non-finite params are rejected.
 - Unknown params are rejected.
 - Hard violations trigger deterministic safe defaults for current mode.

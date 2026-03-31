@@ -237,6 +237,48 @@ extension View {
     }
 }
 
+struct ShellPressAndHoldButton<Label: View>: View {
+    @Environment(\.isEnabled) private var isEnabled
+
+    let role: ShellActionRole
+    var accent: Color? = nil
+    var size: ShellActionSize = .regular
+    var isActive: Bool = false
+    let onPressChanged: (Bool) -> Void
+    @ViewBuilder let label: () -> Label
+
+    @State private var isPressed: Bool = false
+
+    var body: some View {
+        ShellActionButtonBody(
+            label: label(),
+            role: role,
+            size: size,
+            accent: accent,
+            isPressed: isPressed || isActive
+        )
+        .contentShape(RoundedRectangle(cornerRadius: size.cornerRadius, style: .continuous))
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard isEnabled, !isPressed else { return }
+                    isPressed = true
+                    onPressChanged(true)
+                }
+                .onEnded { _ in
+                    guard isPressed else { return }
+                    isPressed = false
+                    onPressChanged(false)
+                }
+        )
+        .onDisappear {
+            guard isPressed else { return }
+            isPressed = false
+            onPressChanged(false)
+        }
+    }
+}
+
 struct ShellStatusPill: View {
     let title: String
     let value: String

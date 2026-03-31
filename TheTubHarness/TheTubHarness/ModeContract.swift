@@ -2,11 +2,11 @@ import Foundation
 import CryptoKit
 
 enum ModeContract {
-    static let supportedProtocolVersion = 1
-    static let contractVersion = "control_surface_v1"
+    static let supportedProtocolVersion = 2
+    static let contractVersion = "control_surface_v2"
     // This is intentionally pinned. If contract tables change, bump protocol/contract
     // strategy explicitly and update this fingerprint with test coverage.
-    static let lockedContractFingerprint = "22f406ef941be4597779a8eb594a22db355c36073747492f431e5872ba95699c"
+    static let lockedContractFingerprint = "3394bcdfa3c207eb33da3679ee7d15d9f017bba1ab2da6567a930947f9fb586f"
 
     struct ContractLockStatus: Equatable {
         let lockedFingerprint: String
@@ -25,7 +25,52 @@ enum ModeContract {
         let requiredPicksByMode: [String: [String]]
         let modeBounds: [String: [String: [Double]]]
         let safeModeParams: [String: [String: Double]]
+        let visualSceneIds: [String]
+        let visualBounds: [String: [Double]]
+        let visualThoughtVocab: [String]
     }
+
+    static let visualSceneIds = [
+        "grid_lock",
+        "relay_mesh",
+        "fault_lattice",
+        "memory_drift",
+        "alarm_splay",
+        "quiet_watch",
+    ]
+
+    static let visualThoughtVocab = [
+        "idle",
+        "listening",
+        "tracking_bass",
+        "tracking_mids",
+        "tracking_highs",
+        "following_brightness",
+        "responding_to_transient",
+        "building_density",
+        "holding_pattern",
+        "pushing_disruption",
+        "restoring_integrity",
+        "favoring_structure",
+        "releasing_tension",
+        "cooling_down",
+        "overload_detected",
+        "shifting_scene",
+        "sampling_texture",
+        "routing_signal",
+        "particle_bloom",
+        "stabilizing",
+    ]
+
+    static let visualBounds: [String: Bounds] = [
+        "density": (0.0, 1.0),
+        "cohesion": (0.0, 1.0),
+        "disruption": (0.0, 1.0),
+        "token_salience": (0.0, 1.0),
+        "wordmark_integrity": (0.0, 1.0),
+        "flash_bias": (0.0, 1.0),
+        "decay_ms": (120.0, 2_400.0),
+    ]
 
     // Control Surface v1 per-mode canonical params.
     static let modeSpecificParams: [Int: Set<String>] = [
@@ -430,6 +475,73 @@ enum ModeContract {
         return violations.sorted()
     }
 
+    static func sanitize(visual: VisualOut, mode: Int) -> (visual: VisualOut, violations: [String]) {
+        let fallback = VisualOut.defaultForMode(mode)
+        var violations: [String] = []
+
+        let sceneId: String
+        if visualSceneIds.contains(visual.sceneId) {
+            sceneId = visual.sceneId
+        } else {
+            sceneId = fallback.sceneId
+            violations.append("visual_scene_fallback:\(visual.sceneId)")
+        }
+
+        let density = clampVisual(visual.density, key: "density", violations: &violations)
+        let cohesion = clampVisual(visual.cohesion, key: "cohesion", violations: &violations)
+        let disruption = clampVisual(visual.disruption, key: "disruption", violations: &violations)
+        let tokenSalience = clampVisual(visual.tokenSalience, key: "token_salience", violations: &violations)
+        let wordmarkIntegrity = clampVisual(visual.wordmarkIntegrity, key: "wordmark_integrity", violations: &violations)
+        let flashBias = clampVisual(visual.flashBias, key: "flash_bias", violations: &violations)
+
+        let decayRange = visualBounds["decay_ms"] ?? (120.0, 2400.0)
+        let decayMs: Int
+        if decayRange.0...decayRange.1 ~= Double(visual.decayMs) {
+            decayMs = visual.decayMs
+        } else {
+            decayMs = Int(max(decayRange.0, min(decayRange.1, Double(visual.decayMs))))
+            violations.append("visual_clamped:decay_ms")
+        }
+
+        let thought: String
+        if visualThoughtVocab.contains(visual.thought) {
+            thought = visual.thought
+        } else {
+            thought = "idle"
+            violations.append("visual_invalid_thought:\(visual.thought)")
+        }
+
+        var weights = visual.anchorWeights
+        if weights.count != 3 {
+            violations.append("visual_anchor_weight_count:\(weights.count)")
+            weights = fallback.anchorWeights
+        } else if weights.contains(where: { !$0.isFinite || $0 < 0 }) {
+            violations.append("visual_anchor_weights_invalid")
+            weights = fallback.anchorWeights
+        }
+        let weightTotal = weights.reduce(0, +)
+        let anchorWeights = weightTotal > 0.0001
+            ? weights.map { max(0, $0) / weightTotal }
+            : fallback.anchorWeights
+
+        return (
+            VisualOut(
+                sceneId: sceneId,
+                density: density,
+                cohesion: cohesion,
+                disruption: disruption,
+                tokenSalience: tokenSalience,
+                wordmarkIntegrity: wordmarkIntegrity,
+                decayMs: decayMs,
+                flashBias: flashBias,
+                anchorWeights: anchorWeights,
+                thought: thought,
+                thoughtLog: visual.thoughtLog
+            ),
+            violations.sorted()
+        )
+    }
+
     static func enforceIncoming(modelOut: ModelOut, currentMode: Int) -> (ModelOut, [String]) {
         let mode = clampMode(currentMode)
         var violations: [String] = []
@@ -443,8 +555,10 @@ enum ModeContract {
 
         let clamped = clamp(params: modelOut.params, mode: mode)
         let pickViolations = validate(picks: modelOut.picks, mode: mode)
+        let sanitizedVisual = sanitize(visual: modelOut.visual, mode: mode)
         violations.append(contentsOf: clamped.violations)
         violations.append(contentsOf: pickViolations)
+        violations.append(contentsOf: sanitizedVisual.violations)
 
         let hasHardViolation = violations.contains(where: {
             $0.hasPrefix("protocol_version_mismatch:")
@@ -464,7 +578,8 @@ enum ModeContract {
             mode: mode,
             params: clamped.clamped,
             picks: modelOut.picks,
-            flags: modelOut.flags
+            flags: modelOut.flags,
+            visual: sanitizedVisual.visual
         )
         return (sanitized, violations)
     }
@@ -502,7 +617,8 @@ enum ModeContract {
             mode: m,
             params: params,
             picks: picks,
-            flags: Flags(requestCooldown: false, preferStability: true, thinEvents: contractViolation)
+            flags: Flags(requestCooldown: false, preferStability: true, thinEvents: contractViolation),
+            visual: VisualOut.defaultForMode(m)
         )
     }
 
@@ -529,6 +645,7 @@ enum ModeContract {
         let safe: [String: [String: Double]] = Dictionary(uniqueKeysWithValues: modeKeys.map { mode in
             (String(mode), safeModeParams[mode, default: [:]])
         })
+        let visualBoundsPayload = visualBounds.mapValues { [$0.0, $0.1] }
 
         return ContractLockPayload(
             protocolVersion: supportedProtocolVersion,
@@ -537,7 +654,10 @@ enum ModeContract {
             legacyParamAliases: aliases,
             requiredPicksByMode: required,
             modeBounds: bounds,
-            safeModeParams: safe
+            safeModeParams: safe,
+            visualSceneIds: visualSceneIds,
+            visualBounds: visualBoundsPayload,
+            visualThoughtVocab: visualThoughtVocab
         )
     }
 
@@ -571,6 +691,20 @@ enum ModeContract {
     private static func defaultForKey(mode: Int, key: String) -> Double {
         guard let b = modeBounds[mode]?[key] else { return 0.5 }
         return (b.0 + b.1) * 0.5
+    }
+
+    private static func clampVisual(_ value: Double, key: String, violations: inout [String]) -> Double {
+        guard value.isFinite else {
+            violations.append("visual_not_finite:\(key)")
+            let bounds = visualBounds[key] ?? (0.0, 1.0)
+            return (bounds.0 + bounds.1) * 0.5
+        }
+        let bounds = visualBounds[key] ?? (0.0, 1.0)
+        if bounds.0...bounds.1 ~= value {
+            return value
+        }
+        violations.append("visual_clamped:\(key)")
+        return max(bounds.0, min(bounds.1, value))
     }
 
     private nonisolated static func clamp01(_ value: Double) -> Double {

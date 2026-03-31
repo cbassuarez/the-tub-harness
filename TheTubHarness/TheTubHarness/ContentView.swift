@@ -1,6 +1,82 @@
 import SwiftUI
 import Combine
 
+final class ModelServerProcess: ObservableObject {
+    @Published private(set) var isRunning: Bool = false
+    @Published private(set) var statusMessage: String = "stopped"
+
+    private var process: Process?
+    private let tubMlRoot = "/Users/seb/the-tub-ml"
+    private let configRelPath = "configs/stub_policy_v1.yaml"
+
+    func start() {
+        guard process == nil else { return }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        let venvBin = "\(tubMlRoot)/.venv/bin/tub-ml"
+        let fallback = "source \(tubMlRoot)/.venv/bin/activate && tub-ml"
+        let cmd = [
+            "cd \(tubMlRoot)",
+            "if [ -x \(venvBin) ]; then \(venvBin) serve --config \(configRelPath); else \(fallback) serve --config \(configRelPath); fi"
+        ].joined(separator: " && ")
+        proc.arguments = ["-lc", cmd]
+        proc.currentDirectoryURL = URL(fileURLWithPath: tubMlRoot)
+
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        proc.terminationHandler = { [weak self] p in
+            DispatchQueue.main.async {
+                self?.isRunning = false
+                self?.statusMessage = p.terminationStatus == 0 ? "exited" : "exited(\(p.terminationStatus))"
+                self?.process = nil
+            }
+        }
+
+        do {
+            try proc.run()
+            process = proc
+            isRunning = true
+            statusMessage = "running (pid \(proc.processIdentifier))"
+        } catch {
+            statusMessage = "launch failed: \(error.localizedDescription)"
+        }
+    }
+
+    func stop() {
+        guard let proc = process, proc.isRunning else { return }
+        proc.interrupt()  // SIGINT — clean shutdown like Ctrl-C
+        statusMessage = "stopping..."
+    }
+
+    deinit {
+        process?.interrupt()
+    }
+}
+
+enum HarnessRunMode: String, Identifiable, CaseIterable {
+    case training
+    case performance
+
+    var id: String { rawValue }
+    var title: String { self == .training ? "Training" : "Performance" }
+    var subtitle: String {
+        self == .training
+            ? "Full logging, rubric, replay, human feedback"
+            : "Live DSP only — no logging, no training UI"
+    }
+}
+
+enum HarnessRunModeStorage {
+    private static let key = "lastHarnessRunMode"
+    static var last: HarnessRunMode? {
+        UserDefaults.standard.string(forKey: key).flatMap(HarnessRunMode.init(rawValue:))
+    }
+    static func save(_ mode: HarnessRunMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: key)
+    }
+}
+
 enum HarnessRunProfile: String, Identifiable {
     case audioAndFeatures
 
@@ -159,10 +235,206 @@ struct TelemetrySample: Identifiable {
     let replayAlignmentDeltaS: Double
 }
 
+// MARK: - Throttled Telemetry Subviews
+// These structs take ObservableObject references as plain `let` (NOT @ObservedObject),
+// so their body only re-evaluates when their @State changes via timer — not on every
+// parent re-evaluation. This prevents 10Hz+ layout churn from breaking ScrollView gestures.
+
+private struct TelemetryDisplaySnap: Equatable {
+    var sent = "0"
+    var recv = "0"
+    var timeout = "0"
+    var latency = "na"
+    var tick = "na"
+    var audioIn = "—"
+    var fallbackReason: String?
+    var lastError: String?
+    var roundTrip: String?
+    var features = ""
+    var diag = ""
+}
+
+struct TelemetryReadoutView: View {
+    let client: TubMLClient
+    let analyzer: AudioInputAnalyzer
+    let audio: AudioEngineController
+
+    @State private var snap = TelemetryDisplaySnap()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 10)], spacing: 10) {
+                metricCard("Sent", value: snap.sent)
+                metricCard("Recv", value: snap.recv)
+                metricCard("Timeout", value: snap.timeout)
+                metricCard("Latency", value: snap.latency)
+                metricCard("Tick", value: snap.tick)
+                metricCard("AudioIn", value: snap.audioIn)
+            }
+
+            if let reason = snap.fallbackReason {
+                Text("Feature fallback: \(reason)")
+                    .foregroundStyle(Color.orange)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+            }
+
+            if let err = snap.lastError {
+                Text("Error: \(err)")
+                    .foregroundStyle(Color(red: 0.94, green: 0.39, blue: 0.37))
+            }
+
+            if let rt = snap.roundTrip {
+                Text(rt)
+                    .foregroundStyle(Color.black.opacity(0.82))
+                    .lineLimit(2)
+            }
+
+            Text(snap.features)
+                .foregroundStyle(Color.black.opacity(0.72))
+                .lineLimit(2)
+
+            if !snap.diag.isEmpty {
+                Text(snap.diag)
+                    .foregroundStyle(Color.orange.opacity(0.92))
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .lineLimit(3)
+            }
+        }
+        .onReceive(Timer.publish(every: 0.35, on: .main, in: .common).autoconnect()) { _ in
+            refresh()
+        }
+        .onAppear { refresh() }
+    }
+
+    private func refresh() {
+        var next = TelemetryDisplaySnap()
+        next.sent = "\(client.sentCount)"
+        next.recv = "\(client.recvCount)"
+        next.timeout = "\(client.timeoutCount)"
+        next.latency = client.lastLatencyMs.map { "\($0)ms" } ?? "na"
+        next.tick = client.lastTickIntervalMs.map { String(format: "%.1fms", $0) } ?? "na"
+        next.audioIn = analyzer.inputStatus.label
+        next.fallbackReason = analyzer.fallbackReason
+        next.lastError = client.lastError
+        if let out = client.lastOut {
+            next.roundTrip = Self.formatRoundTrip(out)
+        }
+        next.features = Self.formatFeatures(analyzer.latestFeatures)
+        if let out = client.lastOut, out.mode == 5 || out.mode == 6 {
+            next.diag = Self.formatDiag(mode: out.mode, interventions: audio.snapshotSafetyInterventions())
+        }
+        if next != snap { snap = next }
+    }
+
+    private func metricCard(_ label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(ShellChromePalette.inkSoft)
+            Text(value)
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundStyle(ShellChromePalette.ink)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(ShellChromePalette.surfaceMuted, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(ShellChromePalette.border, lineWidth: 1)
+        }
+    }
+
+    private static func formatRoundTrip(_ out: ModelOut) -> String {
+        func fmt(_ v: Double?) -> String { v.map { String(format: "%.2f", $0) } ?? "na" }
+        let preset = out.picks.presetId ?? "nil"
+        let spatial = out.picks.spatialPatternId ?? "nil"
+        return "RoundTrip mode=\(out.mode) preset=\(preset) level=\(fmt(out.params["level"])) bright=\(fmt(out.params["brightness"])) dens=\(fmt(out.params["density"])) spatial=\(spatial) proto=\(out.protocolVersion)"
+    }
+
+    private static func formatFeatures(_ f: Features) -> String {
+        let pitchPart: String
+        if let hz = f.pitchHz, f.pitchConf > 0.2 {
+            pitchPart = String(format: " pitch=%.1fHz(%.2f)", hz, f.pitchConf)
+        } else {
+            pitchPart = " pitch=na"
+        }
+        let keyPart = " key=\(f.keyEstimate ?? "unknown")(\(String(format: "%.2f", f.keyConf)))"
+        return String(
+            format: "Features loud=%.1f onset=%.2f cent=%.0f bands=[%.2f %.2f %.2f] noise=%.2f%@",
+            f.loudnessLufs, f.onsetRateHz, f.specCentroidHz,
+            f.bandLow, f.bandMid, f.bandHigh, f.noisiness,
+            pitchPart + keyPart
+        )
+    }
+
+    private static func formatDiag(mode: Int, interventions: [String]) -> String {
+        let modePrefix = "mode\(mode)_"
+        let relevant = interventions.filter { $0.hasPrefix(modePrefix) || $0.hasPrefix("mode56_") || $0.hasPrefix("render_mode:") }
+        guard !relevant.isEmpty else { return "" }
+        return "AudioDiag " + relevant.suffix(8).joined(separator: " | ")
+    }
+}
+
+struct ChannelMetersView: View {
+    let analyzer: AudioInputAnalyzer
+    let channelCount: Int
+
+    @State private var levels: [Float] = []
+    @State private var gains: [Double] = []
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
+            ForEach(0..<min(channelCount, 4), id: \.self) { idx in
+                let meter = levels[safe: idx] ?? 0
+                let gain = gains[safe: idx] ?? 0
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(idx == 0 ? "Input 1 • Primary" : "Input \(idx + 1)")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(meter > 0.015 ? Color(red: 0.16, green: 0.70, blue: 0.34) : Color.black.opacity(0.14))
+                            .frame(width: 10, height: 10)
+                            .overlay {
+                                Circle().stroke(Color.black.opacity(0.18), lineWidth: 1)
+                            }
+                        Text(String(format: "%.3f", meter))
+                            .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        Text(String(format: "%+.1f dB", gain))
+                            .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    }
+                    .foregroundStyle(Color.black.opacity(0.70))
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.black.opacity(0.12), lineWidth: 1)
+                }
+            }
+        }
+        .onReceive(Timer.publish(every: 0.15, on: .main, in: .common).autoconnect()) { _ in
+            refreshMeters()
+        }
+        .onAppear { refreshMeters() }
+    }
+
+    private func refreshMeters() {
+        levels = Array(analyzer.inputChannelLevels.prefix(4))
+        gains = Array(analyzer.inputRouteProfile.channelGainDb.prefix(4))
+    }
+}
+
 private enum ShellVisibilityPanel: String, Hashable {
     case left
     case right
     case timeline
+}
+
+private enum JoltHoldSource: Hashable {
+    case mouse
+    case keyboard
 }
 
 private enum TimelineMetricToggle: String, Hashable {
@@ -549,11 +821,949 @@ private struct TelemetryTimelineView: View {
     }
 }
 
+struct MLMonitorKnob: Identifiable, Equatable {
+    let id: String
+    let canonicalKey: String
+    let title: String
+    let displayValue: String
+    let normalizedValue: Double
+    let rawNormalizedValue: Double?
+    let rawDisplayValue: String?
+    let changedByHarness: Bool
+    let recentlyUpdated: Bool
+    let debugCaption: String?
+}
+
+struct MLMonitorPick: Identifiable, Equatable {
+    let id: String
+    let pickKey: String
+    let title: String
+    let resolvedValue: String
+    let rawValue: String?
+    let changedByHarness: Bool
+    let required: Bool
+    let recentlyUpdated: Bool
+}
+
+struct MLMonitorSnapshot: Equatable {
+    let mode: Int
+    let modeTitle: String
+    let waitingReason: String?
+    let updatedAt: Date?
+    let latencyMs: Int?
+    let mismatchCount: Int
+    let contractViolations: [String]
+    let pickNotes: [String]
+    let resolvedKnobs: [MLMonitorKnob]
+    let commonKnobs: [MLMonitorKnob]
+    let picks: [MLMonitorPick]
+
+    var isWaiting: Bool { waitingReason != nil }
+
+    var hasAdjustments: Bool {
+        mismatchCount > 0 || !contractViolations.isEmpty || !pickNotes.isEmpty
+    }
+
+    var summaryNote: String? {
+        if !contractViolations.isEmpty {
+            return "Harness corrected one or more controls to fit the active mode."
+        }
+        if !pickNotes.isEmpty {
+            return "Harness resolved one or more categorical picks for the active mode."
+        }
+        if mismatchCount > 0 {
+            return "Harness normalized \(mismatchCount) live control\(mismatchCount == 1 ? "" : "s")."
+        }
+        return nil
+    }
+
+    static func waiting(for mode: Int, reason: String? = nil) -> MLMonitorSnapshot {
+        MLMonitorSnapshot(
+            mode: mode,
+            modeTitle: "Mode \(mode)",
+            waitingReason: reason ?? "Awaiting the next packet for Mode \(mode).",
+            updatedAt: nil,
+            latencyMs: nil,
+            mismatchCount: 0,
+            contractViolations: [],
+            pickNotes: [],
+            resolvedKnobs: [],
+            commonKnobs: [],
+            picks: []
+        )
+    }
+}
+
+enum MLMonitorMapper {
+    private static let orderedParamsByMode: [Int: [String]] = [
+        0: ["dry_level", "reverb_mix", "reverb_decay_s", "pre_delay_ms", "tone_db"],
+        1: ["fracture", "mutation", "pitch_lock", "hold_len_s", "tail_fade_ms", "scene_rate_hz", "motion_speed", "spread"],
+        2: ["grain_size_ms", "grain_density", "scan_rate", "freeze_prob", "freeze_len_s", "pitch_spread_cents"],
+        3: ["drive", "bit_depth_bits", "downsample_amt", "res_shift", "tone_db"],
+        4: ["density", "gesture_rate_hz", "sample_mix", "dry_level", "stability"],
+        5: ["note_rate_notes_per_s", "voice_cap", "pitch_follow", "velocity_bias", "level", "stability"],
+        6: ["note_rate_notes_per_s", "voice_cap", "pitch_follow", "velocity_bias", "level", "stability", "dry_level"],
+        7: ["swap_rate_hz", "crossfade_ms", "bucket_sharpness", "mapping_entropy", "mix"],
+        8: ["reverb_rand_amt", "reverb_decay_base_s", "reverb_decay_range_s", "reverb_color", "twitchiness", "motion_speed", "spread"],
+        9: ["particle_density", "particle_voice_cap", "particle_decay_s", "particle_brightness", "motion_speed", "spread"],
+        10: ["scene_len_s", "chaos", "blend", "stability"],
+    ]
+
+    private static let paramTitles: [String: String] = [
+        "dry_level": "Dry",
+        "reverb_mix": "Reverb Mix",
+        "reverb_decay_s": "Decay",
+        "pre_delay_ms": "Pre-Delay",
+        "tone_db": "Tone",
+        "fracture": "Fracture",
+        "mutation": "Mutation",
+        "pitch_lock": "Pitch Lock",
+        "hold_len_s": "Hold",
+        "tail_fade_ms": "Fade",
+        "scene_rate_hz": "Scene Rate",
+        "motion_speed": "Motion",
+        "spread": "Spread",
+        "grain_size_ms": "Grain Size",
+        "grain_density": "Density",
+        "scan_rate": "Scan",
+        "freeze_prob": "Freeze",
+        "freeze_len_s": "Freeze Len",
+        "pitch_spread_cents": "Pitch Spread",
+        "drive": "Drive",
+        "bit_depth_bits": "Bit Depth",
+        "downsample_amt": "Downsample",
+        "res_shift": "Res Shift",
+        "density": "Density",
+        "gesture_rate_hz": "Gesture Rate",
+        "sample_mix": "Sample Mix",
+        "stability": "Stability",
+        "note_rate_notes_per_s": "Note Rate",
+        "voice_cap": "Voices",
+        "pitch_follow": "Pitch Follow",
+        "velocity_bias": "Velocity",
+        "level": "Level",
+        "swap_rate_hz": "Swap Rate",
+        "crossfade_ms": "Crossfade",
+        "bucket_sharpness": "Sharpness",
+        "mapping_entropy": "Entropy",
+        "mix": "Mix",
+        "reverb_rand_amt": "Reverb Rand",
+        "reverb_decay_base_s": "Base Decay",
+        "reverb_decay_range_s": "Decay Range",
+        "reverb_color": "Color",
+        "twitchiness": "Twitch",
+        "particle_density": "Particles",
+        "particle_voice_cap": "Particle Voices",
+        "particle_decay_s": "Particle Decay",
+        "particle_brightness": "Brightness",
+        "scene_len_s": "Scene Len",
+        "chaos": "Chaos",
+        "blend": "Blend",
+    ]
+
+    private static let pickTitles: [String: String] = [
+        "preset_id": "Preset",
+        "bank_id": "Bank",
+        "sample_id": "Sample",
+        "midi_inst_id": "Instrument",
+        "chord_set_id": "Chord Set",
+        "motif_id": "Motif",
+        "articulation_id": "Articulation",
+        "spatial_pattern_id": "Spatial Pattern",
+        "scene_id": "Scene",
+        "grid_div": "Grid",
+        "repeat_style_id": "Repeat Style",
+        "category_id": "Category",
+        "gesture_type_id": "Gesture Type",
+        "mapping_id": "Mapping",
+        "variance_amt": "Variance",
+        "variant_seed": "Variant Seed",
+        "mapping_family": "Mapping Family",
+    ]
+
+    private static let pickOrder: [String] = [
+        "preset_id", "bank_id", "sample_id", "midi_inst_id", "chord_set_id", "motif_id",
+        "articulation_id", "spatial_pattern_id", "scene_id", "grid_div", "repeat_style_id",
+        "category_id", "gesture_type_id", "mapping_id", "variance_amt", "variant_seed", "mapping_family"
+    ]
+
+    static func buildSnapshot(
+        currentMode: Int,
+        context: ModelMonitorContext?,
+        modeEngine: ModeEngine,
+        previous: MLMonitorSnapshot?
+    ) -> MLMonitorSnapshot {
+        guard let context else {
+            return MLMonitorSnapshot.waiting(for: currentMode)
+        }
+
+        guard context.resolvedPacket.mode == currentMode else {
+            return MLMonitorSnapshot.waiting(
+                for: currentMode,
+                reason: "Last packet was Mode \(context.resolvedPacket.mode). Waiting for Mode \(currentMode)."
+            )
+        }
+
+        let resolvedPacket = context.resolvedPacket
+        let rawPacket = context.rawPacket
+        let rawProjected = rawPacket.map { ModeContract.clamp(params: $0.params, mode: currentMode).clamped } ?? [:]
+        let rawSourceKeys = rawPacket.map { rawCanonicalSourceKeys(params: $0.params, mode: currentMode) } ?? [:]
+        let resolvedKeys = orderedParams(for: currentMode).filter { resolvedPacket.params[$0] != nil }
+
+        var resolvedKnobs = resolvedKeys.map { key in
+            makeResolvedKnob(
+                key: key,
+                resolvedValue: resolvedPacket.params[key] ?? 0,
+                rawValue: rawProjected[key],
+                rawSourceKey: rawSourceKeys[key],
+                currentMode: currentMode,
+                rawPacketAvailable: rawPacket != nil
+            )
+        }
+
+        let resolvedControl = modeEngine.makeControl(out: resolvedPacket, sentButtons: Buttons())
+        var commonKnobs = commonOutputKnobs(control: resolvedControl, mode: currentMode)
+        var picks = visiblePickKeys(mode: currentMode, resolved: resolvedPacket.picks, raw: rawPacket?.picks).map { key in
+            makePick(
+                key: key,
+                resolved: resolvedPacket.picks,
+                raw: rawPacket?.picks,
+                required: ModeContract.requiredPicks(for: currentMode).contains(key)
+            )
+        }
+
+        let previousKnobs = Dictionary(uniqueKeysWithValues: previous?.resolvedKnobs.map { ($0.id, $0) } ?? [])
+        resolvedKnobs = resolvedKnobs.map { knob in
+            var updated = knob
+            if let prior = previousKnobs[knob.id] {
+                updated = MLMonitorKnob(
+                    id: knob.id,
+                    canonicalKey: knob.canonicalKey,
+                    title: knob.title,
+                    displayValue: knob.displayValue,
+                    normalizedValue: knob.normalizedValue,
+                    rawNormalizedValue: knob.rawNormalizedValue,
+                    rawDisplayValue: knob.rawDisplayValue,
+                    changedByHarness: knob.changedByHarness,
+                    recentlyUpdated: prior.displayValue != knob.displayValue || prior.rawDisplayValue != knob.rawDisplayValue,
+                    debugCaption: knob.debugCaption
+                )
+            }
+            return updated
+        }
+
+        let previousCommonKnobs = Dictionary(uniqueKeysWithValues: previous?.commonKnobs.map { ($0.id, $0) } ?? [])
+        commonKnobs = commonKnobs.map { knob in
+            var updated = knob
+            if let prior = previousCommonKnobs[knob.id] {
+                updated = MLMonitorKnob(
+                    id: knob.id,
+                    canonicalKey: knob.canonicalKey,
+                    title: knob.title,
+                    displayValue: knob.displayValue,
+                    normalizedValue: knob.normalizedValue,
+                    rawNormalizedValue: knob.rawNormalizedValue,
+                    rawDisplayValue: knob.rawDisplayValue,
+                    changedByHarness: knob.changedByHarness,
+                    recentlyUpdated: prior.displayValue != knob.displayValue,
+                    debugCaption: knob.debugCaption
+                )
+            }
+            return updated
+        }
+
+        let previousPicks = Dictionary(uniqueKeysWithValues: previous?.picks.map { ($0.id, $0) } ?? [])
+        picks = picks.map { pick in
+            var updated = pick
+            if let prior = previousPicks[pick.id] {
+                updated = MLMonitorPick(
+                    id: pick.id,
+                    pickKey: pick.pickKey,
+                    title: pick.title,
+                    resolvedValue: pick.resolvedValue,
+                    rawValue: pick.rawValue,
+                    changedByHarness: pick.changedByHarness,
+                    required: pick.required,
+                    recentlyUpdated: prior.resolvedValue != pick.resolvedValue || prior.rawValue != pick.rawValue
+                )
+            }
+            return updated
+        }
+
+        let mismatchCount = resolvedKnobs.filter(\.changedByHarness).count + picks.filter(\.changedByHarness).count
+
+        return MLMonitorSnapshot(
+            mode: currentMode,
+            modeTitle: "Mode \(currentMode)",
+            waitingReason: nil,
+            updatedAt: context.receivedAt,
+            latencyMs: context.latencyMs,
+            mismatchCount: mismatchCount,
+            contractViolations: context.contractViolations,
+            pickNotes: context.pickNotes,
+            resolvedKnobs: resolvedKnobs,
+            commonKnobs: commonKnobs,
+            picks: picks
+        )
+    }
+
+    static func orderedParams(for mode: Int) -> [String] {
+        orderedParamsByMode[mode] ?? Array(ModeContract.canonicalAllowedParams(for: mode)).sorted()
+    }
+
+    private static func visiblePickKeys(mode: Int, resolved: Picks, raw: Picks?) -> [String] {
+        let required = ModeContract.requiredPicks(for: mode)
+        return pickOrder.filter { key in
+            required.contains(key) || pickValue(for: key, picks: resolved) != nil || (raw.flatMap { pickValue(for: key, picks: $0) } != nil)
+        }
+    }
+
+    private static func rawCanonicalSourceKeys(params: [String: Double], mode: Int) -> [String: String] {
+        let allowed = ModeContract.canonicalAllowedParams(for: mode)
+        var sources: [String: String] = [:]
+        for key in params.keys.sorted() {
+            let canonical = ModeContract.canonicalParamKey(mode: mode, key: key)
+            guard allowed.contains(canonical), sources[canonical] == nil else { continue }
+            sources[canonical] = key
+        }
+        return sources
+    }
+
+    private static func makeResolvedKnob(
+        key: String,
+        resolvedValue: Double,
+        rawValue: Double?,
+        rawSourceKey: String?,
+        currentMode: Int,
+        rawPacketAvailable: Bool
+    ) -> MLMonitorKnob {
+        let bounds = ModeContract.bounds(for: currentMode, param: key) ?? (0.0, 1.0)
+        let normalized = normalize(resolvedValue, bounds: bounds)
+        let rawNormalized = rawValue.map { normalize($0, bounds: bounds) }
+        let changedByHarness: Bool = {
+            guard rawPacketAvailable else { return false }
+            guard let rawSourceKey else { return true }
+            if rawSourceKey != key { return true }
+            guard let rawValue else { return false }
+            return abs(rawValue - resolvedValue) > diffTolerance(bounds: bounds)
+        }()
+        let debugCaption: String? = {
+            guard rawPacketAvailable, changedByHarness else { return nil }
+            guard let rawSourceKey else { return "Defaulted by harness" }
+            if rawSourceKey != key {
+                return "\(humanizeIdentifier(rawSourceKey)) -> \(humanizeIdentifier(key))"
+            }
+            return humanizeIdentifier(key)
+        }()
+
+        return MLMonitorKnob(
+            id: key,
+            canonicalKey: key,
+            title: paramTitles[key] ?? humanizeIdentifier(key),
+            displayValue: formatValue(key: key, value: resolvedValue, bounds: bounds),
+            normalizedValue: normalized,
+            rawNormalizedValue: rawSourceKey == nil ? nil : rawNormalized,
+            rawDisplayValue: rawSourceKey == nil ? nil : rawValue.map { formatValue(key: key, value: $0, bounds: bounds) },
+            changedByHarness: changedByHarness,
+            recentlyUpdated: false,
+            debugCaption: debugCaption
+        )
+    }
+
+    private static func commonOutputKnobs(control: AudioControl, mode: Int) -> [MLMonitorKnob] {
+        [
+            MLMonitorKnob(
+                id: "common_level",
+                canonicalKey: "level",
+                title: "Level",
+                displayValue: formatPercent(control.level),
+                normalizedValue: clampToUnit(control.level),
+                rawNormalizedValue: nil,
+                rawDisplayValue: nil,
+                changedByHarness: false,
+                recentlyUpdated: false,
+                debugCaption: nil
+            ),
+            MLMonitorKnob(
+                id: "common_dry",
+                canonicalKey: "dry_level",
+                title: "Dry",
+                displayValue: formatPercent(control.dryLevel),
+                normalizedValue: clampToUnit(control.dryLevel),
+                rawNormalizedValue: nil,
+                rawDisplayValue: nil,
+                changedByHarness: false,
+                recentlyUpdated: false,
+                debugCaption: nil
+            ),
+            MLMonitorKnob(
+                id: "common_wet",
+                canonicalKey: "wet_level",
+                title: "Wet",
+                displayValue: formatPercent(control.wetLevel),
+                normalizedValue: clampToUnit(control.wetLevel),
+                rawNormalizedValue: nil,
+                rawDisplayValue: nil,
+                changedByHarness: false,
+                recentlyUpdated: false,
+                debugCaption: nil
+            ),
+            MLMonitorKnob(
+                id: "common_spread",
+                canonicalKey: "spread",
+                title: "Spread",
+                displayValue: formatPercent(control.spread),
+                normalizedValue: clampToUnit(control.spread),
+                rawNormalizedValue: nil,
+                rawDisplayValue: nil,
+                changedByHarness: false,
+                recentlyUpdated: false,
+                debugCaption: nil
+            ),
+            MLMonitorKnob(
+                id: "common_motion",
+                canonicalKey: "motion_speed",
+                title: "Motion",
+                displayValue: formatPercent(control.motionSpeed),
+                normalizedValue: clampToUnit(control.motionSpeed),
+                rawNormalizedValue: nil,
+                rawDisplayValue: nil,
+                changedByHarness: false,
+                recentlyUpdated: false,
+                debugCaption: nil
+            ),
+            MLMonitorKnob(
+                id: "common_reverb",
+                canonicalKey: "reverb_mix",
+                title: "Reverb",
+                displayValue: formatPercent(min(max(control.reverb.wet / 0.5, 0.0), 1.0)),
+                normalizedValue: min(max(control.reverb.wet / 0.5, 0.0), 1.0),
+                rawNormalizedValue: nil,
+                rawDisplayValue: nil,
+                changedByHarness: false,
+                recentlyUpdated: false,
+                debugCaption: nil
+            ),
+        ].filter { knob in
+            mode != 0 || knob.canonicalKey != "wet_level"
+        }
+    }
+
+    private static func makePick(key: String, resolved: Picks, raw: Picks?, required: Bool) -> MLMonitorPick {
+        let resolvedRaw = pickValue(for: key, picks: resolved)
+        let rawRaw = raw.flatMap { pickValue(for: key, picks: $0) }
+        let changed = raw != nil && normalizePick(rawRaw) != normalizePick(resolvedRaw)
+
+        return MLMonitorPick(
+            id: key,
+            pickKey: key,
+            title: pickTitles[key] ?? humanizeIdentifier(key),
+            resolvedValue: humanizeIdentifier(resolvedRaw ?? "Not set"),
+            rawValue: changed ? rawRaw : nil,
+            changedByHarness: changed,
+            required: required,
+            recentlyUpdated: false
+        )
+    }
+
+    private static func normalize(_ value: Double, bounds: ModeContract.Bounds) -> Double {
+        let span = bounds.1 - bounds.0
+        guard span > 0.000_001 else { return 0.0 }
+        return min(max((value - bounds.0) / span, 0.0), 1.0)
+    }
+
+    private static func diffTolerance(bounds: ModeContract.Bounds) -> Double {
+        max(0.005, (bounds.1 - bounds.0) * 0.01)
+    }
+
+    private static func formatValue(key: String, value: Double, bounds: ModeContract.Bounds) -> String {
+        switch key {
+        case _ where key.hasSuffix("_hz"):
+            return String(format: "%.1f Hz", value)
+        case _ where key.hasSuffix("_ms"):
+            return String(format: "%.0f ms", value)
+        case _ where key.hasSuffix("_s"):
+            return String(format: "%.1f s", value)
+        case _ where key.hasSuffix("_db"):
+            return String(format: "%+.1f dB", value)
+        case _ where key.hasSuffix("_cents"):
+            return String(format: "%.0f ct", value)
+        case _ where key.hasSuffix("_bits"):
+            return String(format: "%.0f bit", value)
+        case "voice_cap", "particle_voice_cap", "variant_seed":
+            return String(format: "%.0f", value)
+        default:
+            if bounds.0 >= 0.0 && bounds.1 <= 1.0 {
+                return formatPercent(value)
+            }
+            return String(format: "%.2f", value)
+        }
+    }
+
+    private static func formatPercent(_ value: Double) -> String {
+        String(format: "%.0f%%", min(max(value, 0.0), 1.0) * 100.0)
+    }
+
+    private static func normalizePick(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value.lowercased()
+    }
+
+    private static func clampToUnit(_ value: Double) -> Double {
+        min(max(value, 0.0), 1.0)
+    }
+
+    static func humanizeIdentifier(_ key: String) -> String {
+        key
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(separator: " ")
+            .map { part in
+                if part.count <= 3 {
+                    return part.uppercased()
+                }
+                return part.prefix(1).uppercased() + part.dropFirst()
+            }
+            .joined(separator: " ")
+    }
+
+    static func pickValue(for key: String, picks: Picks) -> String? {
+        switch key {
+        case "preset_id": return picks.presetId
+        case "bank_id": return picks.bankId
+        case "sample_id": return picks.sampleId
+        case "midi_inst_id": return picks.midiInstId
+        case "chord_set_id": return picks.chordSetId
+        case "motif_id": return picks.motifId
+        case "articulation_id": return picks.articulationId
+        case "spatial_pattern_id": return picks.spatialPatternId
+        case "scene_id": return picks.sceneId
+        case "grid_div": return picks.gridDiv
+        case "repeat_style_id": return picks.repeatStyleId
+        case "category_id": return picks.categoryId
+        case "gesture_type_id": return picks.gestureTypeId
+        case "mapping_id": return picks.mappingId
+        case "variance_amt":
+            guard let value = picks.varianceAmt else { return nil }
+            return String(format: "%.2f", value)
+        case "variant_seed":
+            guard let value = picks.variantSeed else { return nil }
+            return String(value)
+        case "mapping_family": return picks.mappingFamily
+        default: return nil
+        }
+    }
+}
+
+@MainActor
+final class MLMonitorStore: ObservableObject {
+    @Published private(set) var snapshot: MLMonitorSnapshot = .waiting(for: 0)
+
+    private var currentMode: Int = 0
+    private var context: ModelMonitorContext?
+    private let modeEngine = ModeEngine()
+    private var contextCancellable: AnyCancellable?
+    private var boundClientID: ObjectIdentifier?
+
+    func bind(client: TubMLClient) {
+        let objectID = ObjectIdentifier(client)
+        guard objectID != boundClientID else { return }
+        boundClientID = objectID
+        context = client.lastMonitorContext
+        contextCancellable = client.$lastMonitorContext
+            .removeDuplicates()
+            .sink { [weak self] context in
+                self?.context = context
+                self?.rebuildSnapshot()
+            }
+        rebuildSnapshot()
+    }
+
+    func setMode(_ mode: Int) {
+        currentMode = max(0, min(10, mode))
+        rebuildSnapshot()
+    }
+
+    private func rebuildSnapshot() {
+        let next = MLMonitorMapper.buildSnapshot(
+            currentMode: currentMode,
+            context: context,
+            modeEngine: modeEngine,
+            previous: snapshot
+        )
+        if next != snapshot {
+            snapshot = next
+        } else if next.updatedAt != snapshot.updatedAt || next.latencyMs != snapshot.latencyMs {
+            snapshot = next
+        }
+    }
+}
+
+private extension Optional where Wrapped == String {
+    var nilIfEmpty: String? {
+        switch self?.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case .some(let value) where !value.isEmpty:
+            return value
+        default:
+            return nil
+        }
+    }
+}
+
+private struct MLMonitorSummaryView: View {
+    let snapshot: MLMonitorSnapshot
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.0)) { context in
+            let ageSeconds = snapshot.updatedAt.map { max(0, context.date.timeIntervalSince($0)) }
+            let live = ageSeconds.map { $0 < 1.2 } ?? false
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(live ? ShellChromePalette.startGreen : Color.black.opacity(0.18))
+                        .frame(width: 10, height: 10)
+                    Text(live ? "Packet Live" : "Waiting")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.ink)
+                    Spacer()
+                    if snapshot.hasAdjustments {
+                        Text(snapshot.mismatchCount > 0 ? "Adjusted \(snapshot.mismatchCount)" : "Adjusted")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(Color(red: 0.45, green: 0.28, blue: 0.03))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(ShellChromePalette.warmAmberSoft, in: Capsule())
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    summaryMetric(title: "Mode", value: snapshot.modeTitle)
+                    summaryMetric(title: "Latency", value: snapshot.latencyMs.map { "\($0) ms" } ?? "—")
+                    summaryMetric(title: "Age", value: ageLabel(ageSeconds))
+                }
+
+                if let note = snapshot.summaryNote {
+                    Text(note)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.inkSoft)
+                }
+                if let waitingReason = snapshot.waitingReason {
+                    Text(waitingReason)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.inkSoft)
+                }
+            }
+            .padding(10)
+            .background(ShellChromePalette.surfaceMuted, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(ShellChromePalette.border, lineWidth: 1)
+            }
+        }
+    }
+
+    private func summaryMetric(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title.uppercased())
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(ShellChromePalette.inkSoft)
+            Text(value)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(ShellChromePalette.ink)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func ageLabel(_ ageSeconds: Double?) -> String {
+        guard let ageSeconds else { return "No packet" }
+        if ageSeconds < 0.5 { return "Just now" }
+        if ageSeconds < 10 { return String(format: "%.1f s", ageSeconds) }
+        return String(format: "%.0f s", ageSeconds)
+    }
+}
+
+private struct MLMonitorKnobView: View {
+    let knob: MLMonitorKnob
+    let compact: Bool
+
+    private var diameter: CGFloat { compact ? 58 : 82 }
+    private var cardFill: Color {
+        if knob.changedByHarness {
+            return ShellChromePalette.warmAmberSoft
+        }
+        if knob.recentlyUpdated {
+            return ShellChromePalette.accentBlueSoft
+        }
+        return Color.white
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 6 : 8) {
+            HStack(alignment: .top, spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(knob.title)
+                        .font(.system(size: compact ? 11 : 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.ink)
+                        .lineLimit(2)
+                    if let debugCaption = knob.debugCaption {
+                        Text(debugCaption)
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                if knob.changedByHarness {
+                    Circle()
+                        .fill(ShellChromePalette.warmAmber)
+                        .frame(width: 8, height: 8)
+                } else if knob.recentlyUpdated {
+                    Circle()
+                        .fill(ShellChromePalette.accentBlue)
+                        .frame(width: 8, height: 8)
+                }
+            }
+
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .stroke(Color.black.opacity(0.08), lineWidth: compact ? 7 : 8)
+                    if let rawNormalizedValue = knob.rawNormalizedValue {
+                        Circle()
+                            .trim(from: rawTickStart(rawNormalizedValue), to: rawTickEnd(rawNormalizedValue))
+                            .stroke(
+                                ShellChromePalette.warmAmber,
+                                style: StrokeStyle(lineWidth: compact ? 7 : 8, lineCap: .round)
+                            )
+                            .rotationEffect(.degrees(-90))
+                    }
+                    Circle()
+                        .trim(from: 0, to: max(0.02, knob.normalizedValue))
+                        .stroke(
+                            ShellChromePalette.accentBlue,
+                            style: StrokeStyle(lineWidth: compact ? 7 : 8, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                        .animation(.easeOut(duration: 0.18), value: knob.normalizedValue)
+                    Circle()
+                        .fill(Color.white.opacity(0.94))
+                        .padding(compact ? 10 : 12)
+                    VStack(spacing: 2) {
+                        Text(knob.displayValue)
+                            .font(.system(size: compact ? 11 : 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(ShellChromePalette.ink)
+                        if let rawDisplayValue = knob.rawDisplayValue, knob.changedByHarness {
+                            Text("ML \(rawDisplayValue)")
+                                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                .foregroundStyle(Color(red: 0.45, green: 0.28, blue: 0.03))
+                                .lineLimit(1)
+                        }
+                    }
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 6)
+                }
+                .frame(width: diameter, height: diameter)
+
+                if !compact {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(knob.changedByHarness ? "Resolved" : "Current")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                        Text(knob.displayValue)
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(ShellChromePalette.ink)
+                        if let rawDisplayValue = knob.rawDisplayValue, knob.changedByHarness {
+                            Text("ML suggested \(rawDisplayValue)")
+                                .font(.system(size: 10, weight: .medium, design: .rounded))
+                                .foregroundStyle(Color(red: 0.45, green: 0.28, blue: 0.03))
+                                .lineLimit(2)
+                        } else {
+                            Text(" ")
+                                .font(.system(size: 10, weight: .medium, design: .rounded))
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(compact ? 8 : 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(cardFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(knob.changedByHarness ? ShellChromePalette.warmAmber.opacity(0.55) : ShellChromePalette.border, lineWidth: 1)
+        }
+    }
+
+    private func rawTickStart(_ value: Double) -> Double {
+        max(0.0, min(value - 0.018, 0.98))
+    }
+
+    private func rawTickEnd(_ value: Double) -> Double {
+        min(1.0, max(value + 0.018, 0.02))
+    }
+}
+
+private struct MLMonitorPickCardView: View {
+    let pick: MLMonitorPick
+
+    private var fill: Color {
+        if pick.changedByHarness {
+            return ShellChromePalette.warmAmberSoft
+        }
+        if pick.recentlyUpdated {
+            return ShellChromePalette.accentBlueSoft
+        }
+        return Color.white
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(pick.title)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.ink)
+                if pick.required {
+                    Text("Required")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(ShellChromePalette.accentBlue)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(ShellChromePalette.accentBlueSoft, in: Capsule())
+                }
+                Spacer()
+            }
+
+            Text(pick.resolvedValue)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(ShellChromePalette.ink)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if let rawValue = pick.rawValue, pick.changedByHarness {
+                Text("ML \(MLMonitorMapper.humanizeIdentifier(rawValue)) -> Harness \(pick.resolvedValue)")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color(red: 0.45, green: 0.28, blue: 0.03))
+                    .lineLimit(2)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(fill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(pick.changedByHarness ? ShellChromePalette.warmAmber.opacity(0.55) : ShellChromePalette.border, lineWidth: 1)
+        }
+    }
+}
+
+// MARK: - Mode Chooser
+
+struct ModeChooserView: View {
+    let onChoose: (HarnessRunMode) -> Void
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.94, green: 0.96, blue: 0.99),
+                    Color(red: 0.89, green: 0.93, blue: 0.98)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 32) {
+                VStack(spacing: 6) {
+                    Text("THE TUB")
+                        .font(.system(size: 28, weight: .bold, design: .monospaced))
+                        .foregroundStyle(ShellChromePalette.ink)
+                        .tracking(6)
+                    Text("CONTROL ROOM")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.inkSoft)
+                        .tracking(2)
+                }
+
+                HStack(spacing: 20) {
+                    modeCard(
+                        mode: .training,
+                        icon: "brain",
+                        accent: ShellChromePalette.startGreen
+                    )
+                    modeCard(
+                        mode: .performance,
+                        icon: "waveform.path",
+                        accent: ShellChromePalette.accentBlue
+                    )
+                }
+
+                Text("Mode is locked for the session. Use the Harness menu to switch.")
+                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.inkSoft)
+            }
+            .padding(40)
+        }
+        .frame(minWidth: 600, minHeight: 340)
+    }
+
+    private func modeCard(mode: HarnessRunMode, icon: String, accent: Color) -> some View {
+        let isLast = HarnessRunModeStorage.last == mode
+        return Button {
+            onChoose(mode)
+        } label: {
+            VStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 32, weight: .light))
+                    .foregroundStyle(accent)
+                Text(mode.title)
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.ink)
+                Text(mode.subtitle)
+                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.inkSoft)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                if isLast {
+                    Text("LAST USED")
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(accent)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(accent.opacity(0.12), in: Capsule())
+                }
+            }
+            .frame(width: 240, height: 200)
+            .background(ShellChromePalette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(isLast ? accent.opacity(0.4) : ShellChromePalette.border, lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Content View
+
 struct ContentView: View {
+    let runMode: HarnessRunMode
+
+    @StateObject private var modelServer = ModelServerProcess()
     @StateObject private var client = TubMLClient(host: "127.0.0.1", port: 9910)
     @StateObject private var audio = AudioEngineController()
     @StateObject private var analyzer = AudioInputAnalyzer()
     @StateObject private var controlRoom = ControlRoomState()
+    @StateObject private var mlMonitor = MLMonitorStore()
+    @StateObject private var videoStage = VideoStageStore()
+    @StateObject private var videoOutput = VideoOutputController()
+    private let webcamPool = USGSWebcamPool()
+    private let videoClipPool = JoltVideoClipPool()
+    @StateObject private var speechTranscriber = SpeechTranscriber()
 
     private let modeEngine = ModeEngine()
 
@@ -578,8 +1788,10 @@ struct ContentView: View {
     @State private var showInputRoutingModal: Bool = false
     @State private var showOutputRoutingModal: Bool = false
     @State private var showManualReplayEntry: Bool = false
+    @State private var joltHoldSources: Set<JoltHoldSource> = []
 
-    init(defaultRecordInputAudio: Bool = false) {
+    init(runMode: HarnessRunMode = .training, defaultRecordInputAudio: Bool = false) {
+        self.runMode = runMode
         _recordInputAudio = State(initialValue: defaultRecordInputAudio)
     }
 
@@ -598,7 +1810,7 @@ struct ContentView: View {
             VStack(spacing: 10) {
                 topBar
 
-                if controlRoom.shell.showBottomTimeline {
+                if runMode == .training && controlRoom.shell.showBottomTimeline {
                     VSplitView {
                         workspaceDeck
                             .frame(minHeight: 420, maxHeight: .infinity, alignment: .top)
@@ -613,6 +1825,11 @@ struct ContentView: View {
             .padding(12)
             .foregroundStyle(Color.black.opacity(0.88))
             .font(.system(size: 13, weight: .medium, design: .rounded))
+
+            CommandKeyHoldMonitor(key: "j", modifiers: [.command]) { active in
+                setJoltHold(.keyboard, active: active && !isReplayRunning)
+            }
+            .frame(width: 0, height: 0)
         }
         .sheet(isPresented: Binding(
             get: { controlRoom.shell.showCommandPalette },
@@ -634,9 +1851,32 @@ struct ContentView: View {
         }
         .environment(\.colorScheme, .light)
         .onAppear {
+            modelServer.start()
             client.setMode(mode)
+            mlMonitor.bind(client: client)
+            mlMonitor.setMode(mode)
+            videoStage.bind(client: client)
+            videoStage.bind(analyzer: analyzer)
+            videoStage.setMode(mode)
+            webcamPool.startFilling()
+            Task { await videoClipPool.load(from: URL(fileURLWithPath: "/Users/seb/Desktop/video-for-modes4-7")) }
+            videoOutput.bind(webcamPool: webcamPool)
+            videoOutput.bind(videoClipPool: videoClipPool)
+            videoOutput.bind(store: videoStage)
+            videoStage.bind(speechTranscriber: speechTranscriber)
             analyzer.onLiveInputBuffer = { [weak audio] buffer, time in
                 audio?.ingestLiveInputBuffer(buffer, time: time)
+            }
+            speechTranscriber.requestAuthorization()
+            speechTranscriber.start()
+            analyzer.onLiveInputRawBuffers = { [weak audio, weak speechTranscriber] audioBufferList, frameCount, sampleRate in
+                audio?.ingestLiveInputAudioBuffers(audioBufferList, frameCount: frameCount, sampleRate: sampleRate)
+                speechTranscriber?.appendRawAudio(audioBufferList, frameCount: frameCount, sampleRate: sampleRate)
+            }
+            analyzer.onLiveStageAudioSnapshot = { snapshot in
+                DispatchQueue.main.async {
+                    videoStage.ingestStageAudioSnapshot(snapshot)
+                }
             }
             analyzer.refreshInputDevices()
             audio.refreshInputRouting()
@@ -664,6 +1904,19 @@ struct ContentView: View {
         .onChange(of: audio.outputRouteMode) { _, _ in
             syncSessionOutputRouteMetadata()
         }
+        .onChange(of: mode) { _, newMode in
+            mlMonitor.setMode(newMode)
+            videoStage.setMode(newMode)
+        }
+        .onChange(of: isReplayRunning) { _, running in
+            if running {
+                releaseAllJoltHolds()
+            }
+        }
+        .onDisappear {
+            releaseAllJoltHolds()
+            modelServer.stop()
+        }
     }
 
     private var workspaceDeck: some View {
@@ -677,7 +1930,7 @@ struct ContentView: View {
             centerStage
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
-            if controlRoom.shell.showRightRail {
+            if runMode == .training && controlRoom.shell.showRightRail {
                 rightRail
                     .frame(width: 360)
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -730,7 +1983,7 @@ struct ContentView: View {
             Text("The Tub Control Room")
                 .font(.system(size: 20, weight: .bold, design: .rounded))
                 .foregroundStyle(ShellChromePalette.ink)
-            Text("Live DSP harness")
+            Text("Live DSP harness \u{00B7} \(runMode.title)")
                 .font(.system(size: 11, weight: .medium, design: .rounded))
                 .foregroundStyle(ShellChromePalette.inkSoft)
         }
@@ -822,12 +2075,16 @@ struct ContentView: View {
     }
 
     private var headerVisibilityToggleGroup: some View {
-        ShellSegmentedToggleGroup(
-            items: [
-                ShellSegmentedToggleItem(value: ShellVisibilityPanel.left, title: "Left Panel", systemImage: nil),
-                ShellSegmentedToggleItem(value: ShellVisibilityPanel.right, title: "Right Panel", systemImage: nil),
-                ShellSegmentedToggleItem(value: ShellVisibilityPanel.timeline, title: "Timeline", systemImage: nil)
-            ],
+        let items: [ShellSegmentedToggleItem<ShellVisibilityPanel>] = {
+            var list = [ShellSegmentedToggleItem(value: ShellVisibilityPanel.left, title: "Left Panel", systemImage: nil)]
+            if runMode == .training {
+                list.append(ShellSegmentedToggleItem(value: ShellVisibilityPanel.right, title: "Right Panel", systemImage: nil))
+                list.append(ShellSegmentedToggleItem(value: ShellVisibilityPanel.timeline, title: "Timeline", systemImage: nil))
+            }
+            return list
+        }()
+        return ShellSegmentedToggleGroup(
+            items: items,
             isActive: isHeaderPanelVisible,
             toggle: toggleHeaderPanel,
             size: .compact
@@ -846,31 +2103,117 @@ struct ContentView: View {
     private var leftRail: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .center) {
-                    panelTitle("Modes")
-                    Spacer()
-                    Text("Mode \(mode) Active")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .foregroundStyle(ShellChromePalette.accentBlue)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(ShellChromePalette.accentBlueSoft, in: Capsule())
-                }
-
-                Text("Switch the live model mode directly. The DSP path stays on; only the active mode changes.")
-                    .font(.system(size: 11, weight: .regular, design: .rounded))
-                    .foregroundStyle(ShellChromePalette.inkSoft)
-
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                    ForEach(0...10, id: \.self) { m in
-                        modeSelectorButton(m)
-                    }
-                }
+                modeRailSection
+                Divider()
+                    .background(Color.black.opacity(0.10))
+                mlMonitorRailSection
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .shellPanelCard(fill: ShellChromePalette.surface, borderOpacity: 0.18)
+    }
+
+    private var modeRailSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center) {
+                panelTitle("Modes")
+                Spacer()
+                Text("Mode \(mode) Active")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(ShellChromePalette.accentBlue)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(ShellChromePalette.accentBlueSoft, in: Capsule())
+            }
+
+            Text("Switch the live model mode directly. The DSP path stays on; only the active mode changes.")
+                .font(.system(size: 11, weight: .regular, design: .rounded))
+                .foregroundStyle(ShellChromePalette.inkSoft)
+
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                ForEach(0...10, id: \.self) { m in
+                    modeSelectorButton(m)
+                }
+            }
+        }
+    }
+
+    private var mlMonitorRailSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center) {
+                panelTitle("ML Monitor")
+                Spacer()
+                Text(mlMonitor.snapshot.modeTitle)
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(mlMonitor.snapshot.hasAdjustments ? ShellChromePalette.warmAmber : ShellChromePalette.accentBlue)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        (mlMonitor.snapshot.hasAdjustments ? ShellChromePalette.warmAmberSoft : ShellChromePalette.accentBlueSoft),
+                        in: Capsule()
+                    )
+            }
+
+            Text("Read-only view of what the model is asking for now, with harness-resolved controls shown as the primary surface.")
+                .font(.system(size: 11, weight: .regular, design: .rounded))
+                .foregroundStyle(ShellChromePalette.inkSoft)
+
+            MLMonitorSummaryView(snapshot: mlMonitor.snapshot)
+
+            if mlMonitor.snapshot.isWaiting {
+                Text(mlMonitor.snapshot.waitingReason ?? "Awaiting the next control packet.")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.inkSoft)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(ShellChromePalette.surfaceMuted, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(ShellChromePalette.border, lineWidth: 1)
+                    }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Resolved Controls")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(ShellChromePalette.inkSoft)
+
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                        ForEach(mlMonitor.snapshot.resolvedKnobs) { knob in
+                            MLMonitorKnobView(knob: knob, compact: false)
+                        }
+                    }
+                }
+
+                if !mlMonitor.snapshot.commonKnobs.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Output Shape")
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                            ForEach(mlMonitor.snapshot.commonKnobs) { knob in
+                                MLMonitorKnobView(knob: knob, compact: true)
+                            }
+                        }
+                    }
+                }
+
+                if !mlMonitor.snapshot.picks.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Active Picks")
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(mlMonitor.snapshot.picks) { pick in
+                                MLMonitorPickCardView(pick: pick)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private func modeSelectorButton(_ candidate: Int) -> some View {
@@ -968,7 +2311,7 @@ struct ContentView: View {
     private var centerStage: some View {
         GeometryReader { proxy in
             ScrollView(.vertical, showsIndicators: true) {
-                LazyVStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 12) {
                     panelTitle("Live Operations")
 
                     HStack(spacing: 10) {
@@ -985,9 +2328,11 @@ struct ContentView: View {
 
                         Spacer()
 
-                        Toggle("Record Input Audio", isOn: $recordInputAudio)
-                            .toggleStyle(.switch)
-                            .accessibilityIdentifier("control_room.record_toggle")
+                        if runMode == .training {
+                            Toggle("Record Input Audio", isOn: $recordInputAudio)
+                                .toggleStyle(.switch)
+                                .accessibilityIdentifier("control_room.record_toggle")
+                        }
                     }
                     .padding(.horizontal, 2)
 
@@ -1018,9 +2363,17 @@ struct ContentView: View {
                             }
                         }()
 
-                        Button("Jolt") { client.pulseJolt() }
-                            .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.warmAmber, size: .compact)
-                            .keyboardShortcut("j", modifiers: [.command])
+                        ShellPressAndHoldButton(
+                            role: .secondaryAction,
+                            accent: ShellChromePalette.warmAmber,
+                            size: .compact,
+                            isActive: client.isJoltHeld,
+                            onPressChanged: { isPressed in
+                                setJoltHold(.mouse, active: isPressed && !isReplayRunning)
+                            }
+                        ) {
+                            Label(client.isJoltHeld ? "Jolt Held" : "Hold Jolt", systemImage: client.isJoltHeld ? "bolt.fill" : "bolt")
+                        }
                             .disabled(isReplayRunning)
 
                         Button("Clear") { client.pulseClear() }
@@ -1032,98 +2385,68 @@ struct ContentView: View {
                             .shellActionButton(role: .utilityAction, size: .compact)
                             .disabled(isReplayRunning)
 
-                        Divider().frame(height: 18)
+                        if runMode == .training {
+                            Divider().frame(height: 18)
 
-                        Button("Good") { client.setHumanLabel(.good) }
-                            .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.startGreen, size: .compact)
-                            .keyboardShortcut("1", modifiers: [])
-                            .disabled(feedbackDisabled)
-                        Button("Too Much") { client.setHumanLabel(.tooMuch) }
-                            .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.dangerRed, size: .compact)
-                            .keyboardShortcut("2", modifiers: [])
-                            .disabled(feedbackDisabled)
-                        Button("Too Flat") { client.setHumanLabel(.tooFlat) }
-                            .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.warmAmber, size: .compact)
-                            .keyboardShortcut("3", modifiers: [])
-                            .disabled(feedbackDisabled)
-                        Button("Clear Label") { client.setHumanLabel(nil) }
-                            .shellActionButton(role: .utilityAction, size: .compact)
-                            .keyboardShortcut("0", modifiers: [])
-                            .disabled(feedbackDisabled)
+                            Button("Good") { client.setHumanLabel(.good) }
+                                .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.startGreen, size: .compact)
+                                .keyboardShortcut("1", modifiers: [])
+                                .disabled(feedbackDisabled)
+                            Button("Too Much") { client.setHumanLabel(.tooMuch) }
+                                .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.dangerRed, size: .compact)
+                                .keyboardShortcut("2", modifiers: [])
+                                .disabled(feedbackDisabled)
+                            Button("Too Flat") { client.setHumanLabel(.tooFlat) }
+                                .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.warmAmber, size: .compact)
+                                .keyboardShortcut("3", modifiers: [])
+                                .disabled(feedbackDisabled)
+                            Button("Clear Label") { client.setHumanLabel(nil) }
+                                .shellActionButton(role: .utilityAction, size: .compact)
+                                .keyboardShortcut("0", modifiers: [])
+                                .disabled(feedbackDisabled)
 
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 2) {
-                            Text("Label: \(client.currentLabel?.rawValue ?? "none")")
-                                .foregroundStyle(Color.black.opacity(0.74))
-                            Text("Feedback target: \(feedbackTargetText)")
-                                .foregroundStyle(client.feedbackTargetState == .none ? Color.orange : Color.black.opacity(0.74))
-                                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text("Label: \(client.currentLabel?.rawValue ?? "none")")
+                                    .foregroundStyle(Color.black.opacity(0.74))
+                                Text("Feedback target: \(feedbackTargetText)")
+                                    .foregroundStyle(client.feedbackTargetState == .none ? Color.orange : Color.black.opacity(0.74))
+                                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            }
                         }
                     }
 
-                    Divider().background(Color.black.opacity(0.16))
-
-                    replayOperationsCard
-
-                    Divider().background(Color.black.opacity(0.16))
-
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 10)], spacing: 10) {
-                        metricCard("Sent", value: "\(client.sentCount)")
-                        metricCard("Recv", value: "\(client.recvCount)")
-                        metricCard("Timeout", value: "\(client.timeoutCount)")
-                        metricCard("Latency", value: client.lastLatencyMs.map { "\($0)ms" } ?? "na")
-                        metricCard("Tick", value: client.lastTickIntervalMs.map { String(format: "%.1fms", $0) } ?? "na")
-                        metricCard("AudioIn", value: analyzer.inputStatus.label)
-                    }
-
-                    if let reason = analyzer.fallbackReason {
-                        Text("Feature fallback: \(reason)")
-                            .foregroundStyle(Color.orange)
-                            .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    }
-
-                    if let err = client.lastError {
-                        Text("Error: \(err)")
-                            .foregroundStyle(Color(red: 0.94, green: 0.39, blue: 0.37))
-                    }
-
-                    if let out = client.lastOut {
-                        Text(roundTripLine(out))
-                            .foregroundStyle(Color.black.opacity(0.82))
-                            .lineLimit(2)
-                    }
-
-                    Text(featuresLine(analyzer.latestFeatures))
-                        .foregroundStyle(Color.black.opacity(0.72))
-                        .lineLimit(2)
-                    if let out = client.lastOut, out.mode == 5 || out.mode == 6 {
-                        let diag = mode56DiagLine(mode: out.mode, interventions: audio.snapshotSafetyInterventions())
-                        if !diag.isEmpty {
-                            Text(diag)
-                                .foregroundStyle(Color.orange.opacity(0.92))
-                                .font(.system(size: 11, weight: .regular, design: .monospaced))
-                                .lineLimit(3)
-                        }
+                    if runMode == .training {
+                        Divider().background(Color.black.opacity(0.16))
+                        replayOperationsCard
                     }
 
                     Divider().background(Color.black.opacity(0.16))
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Control Room Event Log")
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(controlRoom.events.prefix(12)) { event in
-                                HStack(alignment: .top, spacing: 6) {
-                                    Text(timeString(event.timestamp))
-                                        .foregroundStyle(Color.black.opacity(0.60))
-                                        .frame(width: 72, alignment: .leading)
-                                    Circle()
-                                        .fill(event.severity.color)
-                                        .frame(width: 6, height: 6)
-                                        .padding(.top, 5)
-                                    Text(event.message)
-                                        .foregroundStyle(Color.black.opacity(0.86))
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+                    TelemetryReadoutView(client: client, analyzer: analyzer, audio: audio)
+
+                    if runMode == .training {
+                        Divider().background(Color.black.opacity(0.16))
+                    }
+
+                    if runMode == .training {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Control Room Event Log")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(controlRoom.events.prefix(12)) { event in
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Text(timeString(event.timestamp))
+                                            .foregroundStyle(Color.black.opacity(0.60))
+                                            .frame(width: 72, alignment: .leading)
+                                        Circle()
+                                            .fill(event.severity.color)
+                                            .frame(width: 6, height: 6)
+                                            .padding(.top, 5)
+                                        Text(event.message)
+                                            .foregroundStyle(Color.black.opacity(0.86))
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
                                 }
                             }
                         }
@@ -1201,36 +2524,7 @@ struct ContentView: View {
                 }
                 .foregroundStyle(Color.black.opacity(0.72))
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
-                    ForEach(0..<min(activeInput?.inputChannels ?? 0, 4), id: \.self) { idx in
-                        let meter = analyzer.inputChannelLevels[safe: idx] ?? 0
-                        let gain = analyzer.inputRouteProfile.channelGainDb[safe: idx] ?? 0
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(idx == 0 ? "Input 1 • Primary" : "Input \(idx + 1)")
-                                .font(.system(size: 11, weight: .bold, design: .rounded))
-                            HStack(spacing: 6) {
-                                Circle()
-                                    .fill(meter > 0.015 ? Color(red: 0.16, green: 0.70, blue: 0.34) : Color.black.opacity(0.14))
-                                    .frame(width: 10, height: 10)
-                                    .overlay {
-                                        Circle().stroke(Color.black.opacity(0.18), lineWidth: 1)
-                                    }
-                                Text(String(format: "%.3f", meter))
-                                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                                Text(String(format: "%+.1f dB", gain))
-                                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                            }
-                            .foregroundStyle(Color.black.opacity(0.70))
-                        }
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Color.black.opacity(0.12), lineWidth: 1)
-                        }
-                    }
-                }
+                ChannelMetersView(analyzer: analyzer, channelCount: activeInput?.inputChannels ?? 0)
             }
             .padding(10)
             .background(Color(red: 0.96, green: 0.98, blue: 1.0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -1376,6 +2670,8 @@ struct ContentView: View {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(Color.black.opacity(0.14), lineWidth: 1)
             }
+
+            videoOutputOperatorBlock
         }
         .padding(12)
         .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -2057,7 +3353,7 @@ struct ContentView: View {
             Text("Space: Start/Stop")
             Text("Cmd+K: Command palette")
             Text("1/2/3/0: Label controls")
-            Text("Cmd+J: Jolt")
+            Text("Hold Cmd+J: Hold Jolt")
             Text("Cmd+L: Clear")
             Spacer()
         }
@@ -2096,6 +3392,136 @@ struct ContentView: View {
 
     private var outputRouteSummary: String {
         "\(audio.activeOutputName) • \(audio.activeOutputChannels)ch"
+    }
+
+    private var videoOutputOperatorBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Video Output")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                    Text("Windowed preview, fullscreen presentation, and the live brain-view field.")
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.inkSoft)
+                }
+                Spacer()
+                videoOutputStatusChip
+            }
+
+            HStack(spacing: 8) {
+                videoDisplayMenu
+                Button(videoOutput.isPreviewEnabled ? "Hide Preview" : "Show Preview") {
+                    videoOutput.setPreviewEnabled(!videoOutput.isPreviewEnabled)
+                }
+                .shellActionButton(
+                    role: videoOutput.isPreviewEnabled ? .destructiveAction : .secondaryAction,
+                    accent: videoOutput.isPreviewEnabled ? nil : ShellChromePalette.accentBlue,
+                    size: .compact
+                )
+
+                Button("Reveal Preview") {
+                    videoOutput.revealPreviewWindow()
+                }
+                .shellActionButton(role: .utilityAction, size: .compact)
+                .disabled(videoOutput.displays.isEmpty || !videoOutput.isPreviewEnabled)
+
+                Button(videoOutput.isPresenting ? "Exit Presentation" : "Present Fullscreen") {
+                    videoOutput.setPresentationEnabled(!videoOutput.isPresenting)
+                }
+                .shellActionButton(
+                    role: videoOutput.isPresenting ? .destructiveAction : .secondaryAction,
+                    accent: videoOutput.isPresenting ? nil : ShellChromePalette.startGreen,
+                    size: .compact
+                )
+                .disabled(videoOutput.displays.isEmpty)
+            }
+
+            if let warning = videoOutput.warningText, !warning.isEmpty {
+                Text(warning)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color(red: 0.46, green: 0.27, blue: 0.04))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(ShellChromePalette.warmAmberSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            } else {
+                Text("Preview and presentation target: \(videoOutput.selectedDisplayTitle)")
+                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                    .foregroundStyle(ShellChromePalette.inkSoft)
+            }
+        }
+        .padding(10)
+        .background(Color(red: 0.96, green: 0.98, blue: 1.0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.black.opacity(0.14), lineWidth: 1)
+        }
+    }
+
+    private var videoDisplayMenu: some View {
+        Group {
+            if videoOutput.displays.isEmpty {
+                Text("No display available")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.orange)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 34, alignment: .leading)
+                    .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+                    }
+            } else {
+                Menu {
+                    ForEach(videoOutput.displays) { display in
+                        Button {
+                            videoOutput.selectDisplay(display.id)
+                        } label: {
+                            if display.id == videoOutput.selectedDisplayID {
+                                Label(display.title, systemImage: "checkmark")
+                            } else {
+                                Text(display.title)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Video Display")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(ShellChromePalette.inkSoft)
+                            Text(videoOutput.selectedDisplayTitle)
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(ShellChromePalette.ink)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .shellActionButton(role: .utilityAction)
+            }
+        }
+    }
+
+    private var videoOutputStatusChip: some View {
+        let tone: ShellStatusTone = {
+            switch videoOutput.status {
+            case .hidden:
+                return .idle
+            case .previewing, .presenting:
+                return .positive
+            case .fallback, .missingDisplay:
+                return .warning
+            }
+        }()
+
+        return ShellStatusPill(
+            title: "Video",
+            value: videoOutput.status.label,
+            tone: tone
+        )
     }
 
     private var currentReplayCandidateId: String? {
@@ -2417,8 +3843,15 @@ struct ContentView: View {
         let preDb = levelText(diag.preRoutePeak)
         let postDb = levelText(diag.postRoutePeak)
         let mismatch = diag.slotCount > 0 && diag.configuredHardwareChannels > 0 && diag.slotCount != diag.configuredHardwareChannels
+        let audioError = audio.audioError?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let driverValue = diag.driverCallbackActive ? "Live" : (diag.driverCallbackCount > 0 ? "Seen" : "Idle")
 
         return HStack(spacing: 8) {
+            outputRenderBadge(
+                title: "Driver",
+                value: driverValue,
+                tint: diag.driverCallbackActive ? ShellChromePalette.startGreen : (diag.driverCallbackCount > 0 ? ShellChromePalette.warmAmber : Color.black.opacity(0.12))
+            )
             outputRenderBadge(
                 title: "Render",
                 value: diag.callbackActive ? "Live" : "Idle",
@@ -2438,6 +3871,14 @@ struct ContentView: View {
             Text(expectedText)
                 .font(.system(size: 10, weight: .regular, design: .monospaced))
                 .foregroundStyle(Color.black.opacity(0.60))
+            if let audioError, !audioError.isEmpty {
+                Text(audioError)
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Color.black.opacity(0.88))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.orange.opacity(0.22), in: Capsule())
+            }
             Spacer()
         }
     }
@@ -2546,6 +3987,24 @@ struct ContentView: View {
         }
     }
 
+    private func setJoltHold(_ source: JoltHoldSource, active: Bool) {
+        if active {
+            joltHoldSources.insert(source)
+        } else {
+            joltHoldSources.remove(source)
+        }
+        client.setJoltHeld(!joltHoldSources.isEmpty)
+    }
+
+    private func releaseAllJoltHolds() {
+        guard !joltHoldSources.isEmpty || client.isJoltHeld else {
+            client.setJoltHeld(false)
+            return
+        }
+        joltHoldSources.removeAll()
+        client.setJoltHeld(false)
+    }
+
     private func isHeaderPanelVisible(_ panel: ShellVisibilityPanel) -> Bool {
         switch panel {
         case .left:
@@ -2640,10 +4099,12 @@ struct ContentView: View {
     }
 
     private func setInputDevice(uid: String) {
-        analyzer.selectInputDevice(uid: uid)
-        audio.selectInputDevice(uid: uid)
-        syncLiveInputCaptureInfo()
-        syncSessionInputRouteMetadata()
+        DispatchQueue.main.async {
+            analyzer.selectInputDevice(uid: uid)
+            audio.selectInputDevice(uid: uid)
+            syncLiveInputCaptureInfo()
+            syncSessionInputRouteMetadata()
+        }
     }
 
     private func setInputChannelActive(index: Int, active: Bool) {
@@ -2675,8 +4136,10 @@ struct ContentView: View {
     }
 
     private func setOutputDevice(uid: String) {
-        audio.selectOutputDevice(uid: uid)
-        syncSessionOutputRouteMetadata()
+        DispatchQueue.main.async {
+            audio.selectOutputDevice(uid: uid)
+            syncSessionOutputRouteMetadata()
+        }
     }
 
     private func syncSessionOutputRouteMetadata() {
@@ -2804,8 +4267,12 @@ struct ContentView: View {
                 fallbackReason: "analyzer_unavailable"
             )
         }
-        client.interventionsProvider = { [weak audio] in
-            audio?.snapshotSafetyInterventions() ?? []
+        if runMode == .training {
+            client.interventionsProvider = { [weak audio] in
+                audio?.snapshotSafetyInterventions() ?? []
+            }
+        } else {
+            client.interventionsProvider = nil
         }
 
         client.onModelOut = { [weak audio, modeEngine] out, _, sentButtons in
@@ -2819,9 +4286,10 @@ struct ContentView: View {
         client.setMode(mode)
 
         client.startLoop(
-            recordInputAudio: recordInputAudio,
+            recordInputAudio: runMode == .training ? recordInputAudio : false,
             replayMode: false,
-            replayedSessionId: nil
+            replayedSessionId: nil,
+            runMode: runMode
         )
         syncLiveInputCaptureInfo()
         syncSessionInputRouteMetadata()
@@ -2829,7 +4297,7 @@ struct ContentView: View {
         client.setReplayContext(replayMode: false, replayedSessionId: nil)
         client.setReplayAudioMissing(false)
 
-        if recordInputAudio, let path = client.inputAudioPath {
+        if runMode == .training && recordInputAudio, let path = client.inputAudioPath {
             do {
                 let info = try audio.startInputRecording(to: URL(fileURLWithPath: path), fileFormat: "caf")
                 client.configureSessionInputAudio(sampleRate: info.sampleRate, channels: info.channels, format: info.format, path: path)
@@ -2843,29 +4311,34 @@ struct ContentView: View {
         } else {
             let inputInfo = analyzer.currentCaptureInfo()
             client.configureSessionInputAudio(sampleRate: inputInfo.sampleRate, channels: inputInfo.channels, format: inputInfo.format, path: nil)
-            controlRoom.appendEvent("Started live audio/features run.", severity: .info)
+            controlRoom.appendEvent("Started \(runMode.title.lowercased()) run.", severity: .info)
         }
     }
 
     private func stopAll() {
+        releaseAllJoltHolds()
         if isReplayRunning {
             stopReplay()
         }
-        if let summary = audio.stopInputRecording() {
-            client.configureSessionInputAudio(sampleRate: summary.sampleRate, channels: summary.channels, format: summary.fileFormat, path: summary.outputURL.path)
-            if let alignment = summary.alignment {
-                client.noteSessionAudioAlignment(hostTime: alignment.hostTime, sampleIndex: alignment.sampleIndex)
+        if runMode == .training {
+            if let summary = audio.stopInputRecording() {
+                client.configureSessionInputAudio(sampleRate: summary.sampleRate, channels: summary.channels, format: summary.fileFormat, path: summary.outputURL.path)
+                if let alignment = summary.alignment {
+                    client.noteSessionAudioAlignment(hostTime: alignment.hostTime, sampleIndex: alignment.sampleIndex)
+                }
             }
         }
         client.stopLoop()
         audio.stop()
         analyzer.stop()
 
-        if let sid = client.activeSessionId {
-            replaySessionId = sid
-        }
-        if let p = client.logPath {
-            replayPath = p
+        if runMode == .training {
+            if let sid = client.activeSessionId {
+                replaySessionId = sid
+            }
+            if let p = client.logPath {
+                replayPath = p
+            }
         }
         controlRoom.appendEvent("Run stopped.", severity: .info)
     }
@@ -2874,6 +4347,7 @@ struct ContentView: View {
         let sessionId = replayResolvedSessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !sessionId.isEmpty else { return }
         guard !isReplayRunning else { return }
+        releaseAllJoltHolds()
         replaySessionId = sessionId
 
         analyzer.stop()

@@ -29,9 +29,22 @@
 		96607F8B2F71D626001440A1 /* TheTubHarnessUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TheTubHarnessUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		965BBC1B2F7A79F10048C8AB /* Exceptions for "TheTubHarness" folder in "TheTubHarness" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 96607F6E2F71D624001440A1 /* TheTubHarness */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		96607F712F71D624001440A1 /* TheTubHarness */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				965BBC1B2F7A79F10048C8AB /* Exceptions for "TheTubHarness" folder in "TheTubHarness" target */,
+			);
 			path = TheTubHarness;
 			sourceTree = "<group>";
 		};
@@ -408,7 +421,10 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = TheTubHarness/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "THE TUB";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "session requires microphone.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "TUB uses speech recognition";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -423,7 +439,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.6;
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -463,7 +479,10 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = TheTubHarness/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "THE TUB";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "session requires microphone.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "TUB uses speech recognition";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -478,7 +497,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.6;
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

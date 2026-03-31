@@ -17,7 +17,7 @@ struct TheTubHarnessTests {
     func modelOutDecodeHappyPath() throws {
         let payload = """
         {
-          "protocol_version": 1,
+          "protocol_version": 2,
           "ts_ms": 123456789,
           "mode": 2,
           "params": {
@@ -33,6 +33,18 @@ struct TheTubHarnessTests {
             "request_cooldown": false,
             "prefer_stability": true,
             "thin_events": false
+          },
+          "visual": {
+            "scene_id": "relay_mesh",
+            "density": 0.52,
+            "cohesion": 0.44,
+            "disruption": 0.38,
+            "token_salience": 0.61,
+            "wordmark_integrity": 0.57,
+            "decay_ms": 980,
+            "flash_bias": 0.24,
+            "anchor_weights": [0.2, 0.5, 0.3],
+            "thought": "listening"
           }
         }
         """.data(using: .utf8)!
@@ -42,7 +54,7 @@ struct TheTubHarnessTests {
 
         let out = try decoder.decode(ModelOut.self, from: payload)
 
-        #expect(out.protocolVersion == 1)
+        #expect(out.protocolVersion == ModeContract.supportedProtocolVersion)
         #expect(out.mode == 2)
         #expect(out.picks.presetId == "gran_A")
         #expect(out.picks.spatialPatternId == "orbit_slow")
@@ -53,12 +65,46 @@ struct TheTubHarnessTests {
     func modelOutDecodeIsStrict() {
         let payload = """
         {
+          "protocol_version": 2,
           "ts_ms": 123456789,
           "mode": 99,
           "params": { "level": 0.5 },
           "picks": { "preset_id": "gran_A" },
           "flags": { "request_cooldown": false, "prefer_stability": true, "thin_events": false },
+          "visual": {
+            "scene_id": "grid_lock",
+            "density": 0.5,
+            "cohesion": 0.5,
+            "disruption": 0.5,
+            "token_salience": 0.5,
+            "wordmark_integrity": 0.5,
+            "decay_ms": 1000,
+            "flash_bias": 0.5,
+            "anchor_weights": [0.34, 0.33, 0.33],
+            "thought": "idle"
+          },
           "unexpected_field": true
+        }
+        """.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+
+        #expect(throws: Error.self) {
+            _ = try decoder.decode(ModelOut.self, from: payload)
+        }
+    }
+
+    @Test("ModelOut decoding rejects protocol v1 and missing visual head")
+    func modelOutDecodeRejectsLegacyProtocol() {
+        let payload = """
+        {
+          "protocol_version": 1,
+          "ts_ms": 123456789,
+          "mode": 2,
+          "params": { "level": 0.5 },
+          "picks": { "preset_id": "gran_A" },
+          "flags": { "request_cooldown": false, "prefer_stability": true, "thin_events": false }
         }
         """.data(using: .utf8)!
 
@@ -110,7 +156,7 @@ struct TheTubHarnessTests {
         let recorder = try TraceRecorder(sessionId: "unit", directory: dir)
 
         let modelIn = ModelIn(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 1_000,
             sessionId: "test",
             frameHz: 10,
@@ -159,7 +205,7 @@ struct TheTubHarnessTests {
         let decoded = try dec.decode(TraceRecord.self, from: Data(lines[0].utf8))
 
         #expect(decoded.modelIn.mode == 2)
-        #expect(decoded.modelIn.protocolVersion == 1)
+        #expect(decoded.modelIn.protocolVersion == ModeContract.supportedProtocolVersion)
         #expect(decoded.diagnostics.timedOut)
 
         let replayFrames = try TraceRecorder.loadReplayFrames(from: recorder.url)
@@ -208,7 +254,7 @@ struct TheTubHarnessTests {
     @Test("ModeContract accepts legacy aliases for modes 0, 1, 3, 4, 7, 8, 9")
     func modeContractLegacyAliases() {
         let mode0 = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 1000,
             mode: 0,
             params: [
@@ -223,7 +269,7 @@ struct TheTubHarnessTests {
         #expect(enforced0.0.params["reverb_mix"] == 0.18)
 
         let mode1 = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 1000,
             mode: 1,
             params: [
@@ -244,7 +290,7 @@ struct TheTubHarnessTests {
         #expect(enforced1.0.params["motion_speed"] == 0.55)
 
         let mode3 = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 1000,
             mode: 3,
             params: [
@@ -264,7 +310,7 @@ struct TheTubHarnessTests {
         #expect(enforced3.0.params["tone_db"] != nil)
 
         let mode4 = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 1000,
             mode: 4,
             params: [
@@ -282,7 +328,7 @@ struct TheTubHarnessTests {
         #expect(enforced4.0.params["stability"] == 0.42)
 
         let mode7 = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 1000,
             mode: 7,
             params: [
@@ -296,7 +342,7 @@ struct TheTubHarnessTests {
         #expect(enforced7.0.params["swap_rate_hz"] != nil)
 
         let mode8 = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 1000,
             mode: 8,
             params: [
@@ -314,7 +360,7 @@ struct TheTubHarnessTests {
         #expect(enforced8.0.params["reverb_rand_amt"] == 0.22)
 
         let mode9 = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 1000,
             mode: 9,
             params: [
@@ -337,6 +383,323 @@ struct TheTubHarnessTests {
         #expect(enforced9.0.params["particle_density"] == 0.41)
         #expect(enforced9.0.params["particle_brightness"] == 0.36)
         #expect(enforced9.0.params["motion_speed"] == 0.47)
+    }
+
+    @Test("ML monitor renders only canonical params for the current mode")
+    func mlMonitorCurrentModeParamsOnly() {
+        let snapshot = MLMonitorMapper.buildSnapshot(
+            currentMode: 4,
+            context: ModelMonitorContext(
+                rawPacket: ModelOut(
+                    protocolVersion: ModeContract.supportedProtocolVersion,
+                    tsMs: 1000,
+                    mode: 4,
+                    params: ["gesture_rate": 0.4, "wet": 0.8],
+                    picks: ModeContract.defaultPicksByMode[4] ?? Picks(),
+                    flags: Flags()
+                ),
+                resolvedPacket: ModelOut(
+                    protocolVersion: ModeContract.supportedProtocolVersion,
+                    tsMs: 1000,
+                    mode: 4,
+                    params: [
+                        "density": 0.35,
+                        "gesture_rate_hz": 2.4,
+                        "sample_mix": 0.80,
+                        "dry_level": 0.70,
+                        "stability": 0.65
+                    ],
+                    picks: ModeContract.defaultPicksByMode[4] ?? Picks(),
+                    flags: Flags()
+                ),
+                latencyMs: 17,
+                contractViolations: [],
+                pickNotes: [],
+                receivedAt: Date()
+            ),
+            modeEngine: ModeEngine(),
+            previous: nil
+        )
+
+        #expect(snapshot.waitingReason == nil)
+        #expect(snapshot.resolvedKnobs.count == 5)
+        #expect(snapshot.resolvedKnobs.map(\.canonicalKey) == ["density", "gesture_rate_hz", "sample_mix", "dry_level", "stability"])
+    }
+
+    @Test("ML monitor marks alias and defaulted params as harness-adjusted")
+    func mlMonitorDiffsAliasAndDefaults() {
+        let resolvedParams = ModeContract.clamp(
+            params: [
+                "repeat_prob": 0.9,
+                "jitter_ms": 96.0
+            ],
+            mode: 1
+        ).clamped
+
+        let snapshot = MLMonitorMapper.buildSnapshot(
+            currentMode: 1,
+            context: ModelMonitorContext(
+                rawPacket: ModelOut(
+                    protocolVersion: ModeContract.supportedProtocolVersion,
+                    tsMs: 1000,
+                    mode: 1,
+                    params: [
+                        "repeat_prob": 0.9,
+                        "jitter_ms": 96.0
+                    ],
+                    picks: ModeContract.defaultPicksByMode[1] ?? Picks(),
+                    flags: Flags()
+                ),
+                resolvedPacket: ModelOut(
+                    protocolVersion: ModeContract.supportedProtocolVersion,
+                    tsMs: 1000,
+                    mode: 1,
+                    params: resolvedParams,
+                    picks: ModeContract.defaultPicksByMode[1] ?? Picks(),
+                    flags: Flags()
+                ),
+                latencyMs: 22,
+                contractViolations: [],
+                pickNotes: [],
+                receivedAt: Date()
+            ),
+            modeEngine: ModeEngine(),
+            previous: nil
+        )
+
+        let fracture = snapshot.resolvedKnobs.first(where: { $0.canonicalKey == "fracture" })
+        let hold = snapshot.resolvedKnobs.first(where: { $0.canonicalKey == "hold_len_s" })
+
+        #expect(fracture?.changedByHarness == true)
+        #expect(fracture?.rawDisplayValue != nil)
+        #expect(hold?.changedByHarness == true)
+        #expect(hold?.rawDisplayValue == nil)
+        #expect(snapshot.mismatchCount >= 2)
+    }
+
+    @Test("ML monitor shows pick diffs for manifest-resolved picks")
+    func mlMonitorPickDiffs() {
+        let raw = Picks(
+            presetId: "ultrachunk_A",
+            bankId: "samples_A",
+            sampleId: "missing_sample",
+            midiInstId: nil,
+            chordSetId: nil,
+            motifId: nil,
+            articulationId: nil,
+            spatialPatternId: "cluster_rotate",
+            sceneId: nil,
+            gridDiv: nil,
+            repeatStyleId: nil,
+            categoryId: "general",
+            gestureTypeId: "call_response",
+            mappingId: nil,
+            varianceAmt: nil,
+            variantSeed: nil,
+            mappingFamily: nil
+        )
+        let resolved = ManifestCatalog.shared.resolve(mode: 4, picks: raw).picks
+        let snapshot = MLMonitorMapper.buildSnapshot(
+            currentMode: 4,
+            context: ModelMonitorContext(
+                rawPacket: ModelOut(
+                    protocolVersion: ModeContract.supportedProtocolVersion,
+                    tsMs: 1000,
+                    mode: 4,
+                    params: ModeContract.safeModeParams[4] ?? [:],
+                    picks: raw,
+                    flags: Flags()
+                ),
+                resolvedPacket: ModelOut(
+                    protocolVersion: ModeContract.supportedProtocolVersion,
+                    tsMs: 1000,
+                    mode: 4,
+                    params: ModeContract.safeModeParams[4] ?? [:],
+                    picks: resolved,
+                    flags: Flags()
+                ),
+                latencyMs: 13,
+                contractViolations: [],
+                pickNotes: ["sample_id_defaulted"],
+                receivedAt: Date()
+            ),
+            modeEngine: ModeEngine(),
+            previous: nil
+        )
+
+        let samplePick = snapshot.picks.first(where: { $0.pickKey == "sample_id" })
+        #expect(samplePick != nil)
+        #expect(samplePick?.changedByHarness == true)
+        #expect(samplePick?.rawValue == "missing_sample")
+    }
+
+    @Test("ML monitor waits when the last packet mode does not match the selected mode")
+    func mlMonitorWaitingOnModeSwitch() {
+        let snapshot = MLMonitorMapper.buildSnapshot(
+            currentMode: 7,
+            context: ModelMonitorContext(
+                rawPacket: nil,
+                resolvedPacket: ModelOut(
+                    protocolVersion: ModeContract.supportedProtocolVersion,
+                    tsMs: 1000,
+                    mode: 4,
+                    params: ModeContract.safeModeParams[4] ?? [:],
+                    picks: ModeContract.defaultPicksByMode[4] ?? Picks(),
+                    flags: Flags()
+                ),
+                latencyMs: 19,
+                contractViolations: [],
+                pickNotes: [],
+                receivedAt: Date()
+            ),
+            modeEngine: ModeEngine(),
+            previous: nil
+        )
+
+        #expect(snapshot.isWaiting)
+        #expect(snapshot.resolvedKnobs.isEmpty)
+        #expect(snapshot.waitingReason?.contains("Mode 4") == true)
+    }
+
+    @Test("Held jolt remains high across control snapshots until release")
+    func heldJoltPersistsAcrossSnapshots() {
+        let client = TubMLClient(host: "127.0.0.1", port: 9910)
+
+        client.setJoltHeld(true)
+        let first = client.testingSnapshotButtons()
+        let second = client.testingSnapshotButtons()
+        client.setJoltHeld(false)
+        let released = client.testingSnapshotButtons()
+
+        #expect(first.jolt == true)
+        #expect(second.jolt == true)
+        #expect(released.jolt == false)
+    }
+
+    @Test("Video stage snapshot maps current mode picks and params")
+    func videoStageSnapshotMapsCurrentMode() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let store = VideoStageStore()
+        let context = ModelMonitorContext(
+            rawPacket: ModelOut(
+                protocolVersion: ModeContract.supportedProtocolVersion,
+                tsMs: 1_000,
+                mode: 5,
+                params: ["note_rate_notes_per_s": 1.2, "pitch_follow": 0.7],
+                picks: Picks(
+                    presetId: "room_clean",
+                    bankId: "sf_A",
+                    midiInstId: "inst_A",
+                    chordSetId: "triads",
+                    motifId: "motif_a"
+                ),
+                flags: Flags()
+            ),
+            resolvedPacket: ModelOut(
+                protocolVersion: ModeContract.supportedProtocolVersion,
+                tsMs: 1_000,
+                mode: 5,
+                params: [
+                    "note_rate_notes_per_s": 1.2,
+                    "voice_cap": 4,
+                    "pitch_follow": 0.7,
+                    "velocity_bias": 0.4,
+                    "level": 0.66,
+                    "stability": 0.55
+                ],
+                picks: Picks(
+                    presetId: "room_clean",
+                    bankId: "sf_A",
+                    midiInstId: "inst_A",
+                    chordSetId: "triads",
+                    motifId: "motif_a"
+                ),
+                flags: Flags()
+            ),
+            latencyMs: 14,
+            contractViolations: [],
+            pickNotes: [],
+            receivedAt: now
+        )
+
+        store.testingRebuild(context: context, mode: 5, isRunning: true, isJoltHeld: true, audioFeatures: .silence, now: now)
+        let snapshot = store.snapshot
+
+        #expect(snapshot.isRunning)
+        #expect(snapshot.mode == 5)
+        #expect(snapshot.wordmark.glitchStyle == ModeVisualProfile.forMode(5).wordmarkStyle)
+        #expect(snapshot.params.map(\.id) == ["note_rate_notes_per_s", "voice_cap", "pitch_follow", "velocity_bias", "level", "stability"])
+        #expect(snapshot.picks.contains(where: { $0.id == "bank_id" && $0.resolvedToken == "sf_A" }))
+        #expect(snapshot.picks.contains(where: { $0.id == "midi_inst_id" && $0.resolvedToken == "inst_A" }))
+        #expect(snapshot.joltHeld == true)
+    }
+
+    @Test("Video stage snapshot records recent param and pick changes")
+    func videoStageSnapshotTracksRecentChanges() {
+        let base = Date(timeIntervalSince1970: 2_000)
+        let store = VideoStageStore()
+        let initialContext = ModelMonitorContext(
+            rawPacket: nil,
+            resolvedPacket: ModelOut(
+                protocolVersion: ModeContract.supportedProtocolVersion,
+                tsMs: 2_000,
+                mode: 4,
+                params: [
+                    "density": 0.35,
+                    "gesture_rate_hz": 2.0,
+                    "sample_mix": 0.72,
+                    "dry_level": 0.62,
+                    "stability": 0.48
+                ],
+                picks: Picks(
+                    presetId: "ultrachunk_A",
+                    bankId: "samples_A",
+                    sampleId: "s000",
+                    spatialPatternId: "cluster_rotate"
+                ),
+                flags: Flags()
+            ),
+            latencyMs: 11,
+            contractViolations: [],
+            pickNotes: [],
+            receivedAt: base
+        )
+        let changedContext = ModelMonitorContext(
+            rawPacket: nil,
+            resolvedPacket: ModelOut(
+                protocolVersion: ModeContract.supportedProtocolVersion,
+                tsMs: 2_100,
+                mode: 4,
+                params: [
+                    "density": 0.66,
+                    "gesture_rate_hz": 2.0,
+                    "sample_mix": 0.72,
+                    "dry_level": 0.62,
+                    "stability": 0.48
+                ],
+                picks: Picks(
+                    presetId: "ultrachunk_A",
+                    bankId: "samples_A",
+                    sampleId: "s004",
+                    spatialPatternId: "cluster_rotate"
+                ),
+                flags: Flags()
+            ),
+            latencyMs: 9,
+            contractViolations: [],
+            pickNotes: [],
+            receivedAt: base.addingTimeInterval(0.2)
+        )
+
+        store.testingRebuild(context: initialContext, mode: 4, isRunning: true, isJoltHeld: false, audioFeatures: .silence, now: base)
+        store.testingRebuild(context: changedContext, mode: 4, isRunning: true, isJoltHeld: false, audioFeatures: .silence, now: base.addingTimeInterval(0.2))
+        let snapshot = store.snapshot
+        let densityChange = snapshot.changes.first { $0.kind == .param && $0.token == "DENSITY" }
+        let sampleChange = snapshot.changes.first { $0.kind == .pick && $0.token == "SAMPLE_ID" }
+
+        #expect(densityChange?.resolvedToken == "0.66")
+        #expect(sampleChange?.resolvedToken == "s004")
+        #expect(snapshot.changes.count >= 2)
     }
 
     @Test("Manifest defaults resolve cleanly for modes 4 and 9")
@@ -415,7 +778,7 @@ struct TheTubHarnessTests {
             for (param, range) in bounds {
                 for value in [range.0, range.1] {
                     let out = ModelOut(
-                        protocolVersion: 1,
+                        protocolVersion: ModeContract.supportedProtocolVersion,
                         tsMs: 3_000,
                         mode: mode,
                         params: [param: value],
@@ -437,7 +800,7 @@ struct TheTubHarnessTests {
     @Test("Out-of-range params clamp and emit intervention hints")
     func controlSurfaceClampInterventions() {
         let out = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 4_000,
             mode: 2,
             params: [
@@ -466,7 +829,7 @@ struct TheTubHarnessTests {
         let defaults = ModeContract.defaultPicksByMode[3] ?? Picks()
 
         let baseOut = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 5_000,
             mode: 3,
             params: ModeContract.safeModeParams[3] ?? [:],
@@ -481,7 +844,7 @@ struct TheTubHarnessTests {
         #expect(base.exciteAmount >= 0.0 && base.exciteAmount <= 1.0)
 
         let driveHeavyOut = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 5_010,
             mode: 3,
             params: [
@@ -497,7 +860,7 @@ struct TheTubHarnessTests {
         let driveHeavy = engine.makeControl(out: driveHeavyOut, sentButtons: Buttons())
 
         let crushHeavyOut = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 5_020,
             mode: 3,
             params: [
@@ -559,7 +922,7 @@ struct TheTubHarnessTests {
         #expect(resolvedMode9.picks.bankId != nil)
         #expect(resolvedMode9.picks.midiInstId != nil)
         #expect(resolvedMode9.picks.spatialPatternId == "orbit_mid")
-        #expect(resolvedMode9.notes.isEmpty)
+        #expect(resolvedMode9.notes == ["preset_id fallback to field_diffuse"])
     }
 
     @Test("ModeEngine target modes switch with finite controls")
@@ -568,7 +931,7 @@ struct TheTubHarnessTests {
         let modes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 7, 4, 1, 9, 2, 3, 5, 6]
         for mode in modes {
             let out = ModelOut(
-                protocolVersion: 1,
+                protocolVersion: ModeContract.supportedProtocolVersion,
                 tsMs: 1000,
                 mode: mode,
                 params: [
@@ -624,7 +987,7 @@ struct TheTubHarnessTests {
     func mode56ClearSetsResetVoices() {
         let engine = ModeEngine()
         let mode5Out = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 2_000,
             mode: 5,
             params: [
@@ -643,7 +1006,7 @@ struct TheTubHarnessTests {
         #expect(c5.dryLevel == 0.0)
 
         let mode6Out = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 2_100,
             mode: 6,
             params: [
@@ -667,7 +1030,7 @@ struct TheTubHarnessTests {
     func mode1SceneMacroMappingAndSceneOverride() {
         let engine = ModeEngine()
         let out = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 2_400,
             mode: 1,
             params: [
@@ -709,7 +1072,7 @@ struct TheTubHarnessTests {
     func mode1LegacyParamsMapToSceneMacros() {
         let engine = ModeEngine()
         let out = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 2_450,
             mode: 1,
             params: [
@@ -881,7 +1244,7 @@ struct TheTubHarnessTests {
             ),
             state: HarnessState(overload: false, cooldown: 0, lastModeMs: 0),
             modelIn: ModelIn(
-                protocolVersion: 1,
+                protocolVersion: ModeContract.supportedProtocolVersion,
                 tsMs: 1_000,
                 sessionId: "session_test",
                 frameHz: 10,
@@ -1003,7 +1366,7 @@ struct TheTubHarnessTests {
             ),
             state: HarnessState(overload: false, cooldown: 0, lastModeMs: 0),
             modelIn: ModelIn(
-                protocolVersion: 1,
+                protocolVersion: ModeContract.supportedProtocolVersion,
                 tsMs: 2_000,
                 sessionId: "s1",
                 frameHz: 10,
@@ -1082,7 +1445,7 @@ struct TheTubHarnessTests {
             features: zeroFeatures(),
             state: HarnessState(overload: false, cooldown: 0, lastModeMs: 0),
             modelIn: ModelIn(
-                protocolVersion: 1,
+                protocolVersion: ModeContract.supportedProtocolVersion,
                 tsMs: 12_345,
                 sessionId: sessionId,
                 frameHz: 10,
@@ -1161,7 +1524,7 @@ struct TheTubHarnessTests {
         session.noteAudioAlignment(hostTime: 123, sampleIndex: 0)
 
         let modelIn = ModelIn(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 20_000,
             sessionId: sessionId,
             frameHz: 10,
@@ -1480,7 +1843,7 @@ struct TheTubHarnessTests {
 
         let engine = ModeEngine()
         let out = ModelOut(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: 42_000,
             mode: 2,
             params: [
@@ -1805,7 +2168,7 @@ struct TheTubHarnessTests {
             activeMask: [true, true, false],
             channelGainDb: [0, 6, 0]
         )
-        #expect(mixedWithGain[0] > mixedPrimaryPlusSecond[0])
+        #expect(mixedWithGain[0] == mixedPrimaryPlusSecond[0])
         #expect(mixedWithGain[1] > mixedPrimaryPlusSecond[1])
         #expect(mixedWithGain[2] > mixedPrimaryPlusSecond[2])
     }

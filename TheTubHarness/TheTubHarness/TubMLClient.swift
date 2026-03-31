@@ -37,10 +37,12 @@ final class TubMLClient: ObservableObject {
     @Published var timeoutCount: Int = 0
 
     @Published var lastOut: ModelOut?
+    @Published private(set) var lastMonitorContext: ModelMonitorContext?
     @Published var lastError: String?
     @Published var lastLatencyMs: Int?
     @Published var lastTickIntervalMs: Double?
     @Published var isReady: Bool = false
+    @Published private(set) var isJoltHeld: Bool = false
     @Published private(set) var endpointHost: String
     @Published private(set) var endpointPort: UInt16
 
@@ -77,6 +79,7 @@ final class TubMLClient: ObservableObject {
     private let controlsLock = NSLock()
     private var controlsMode: Int = 0
     private var controlsButtons = Buttons(jolt: false, clear: false)
+    private var controlsHeldJolt: Bool = false
     private let manifests = ManifestCatalog.shared
     private var lastResolvedOutputMode: Int?
     private var picksFallbackLoggedForMode: Int?
@@ -121,6 +124,21 @@ final class TubMLClient: ObservableObject {
         return try decoded!.get()
     }
 
+    private func protocolErrorDescription(for error: Error) -> String? {
+        if case DecodingError.keyNotFound(let key, _) = error, key.stringValue == "visual" {
+            return "protocol v2 required: model output is missing visual head"
+        }
+        if case DecodingError.dataCorrupted(let context) = error,
+           context.debugDescription.contains("Unsupported protocolVersion") {
+            return "protocol v2 required: incompatible model protocol"
+        }
+        let description = error.localizedDescription.lowercased()
+        if description.contains("unsupported protocolversion") {
+            return "protocol v2 required: incompatible model protocol"
+        }
+        return nil
+    }
+
     init(host: String = "127.0.0.1", port: UInt16 = 9910) {
         self.host = NWEndpoint.Host(host)
         self.port = NWEndpoint.Port(rawValue: port)!
@@ -147,6 +165,16 @@ final class TubMLClient: ObservableObject {
     func pulseJolt() {
         controlsLock.lock(); defer { controlsLock.unlock() }
         controlsButtons = Buttons(jolt: true, clear: controlsButtons.clear)
+    }
+
+    func setJoltHeld(_ held: Bool) {
+        controlsLock.lock()
+        controlsHeldJolt = held
+        controlsLock.unlock()
+
+        DispatchQueue.main.async {
+            self.isJoltHeld = held
+        }
     }
 
     /// Momentary: consumed on the next send tick.
@@ -203,8 +231,13 @@ final class TubMLClient: ObservableObject {
         controlsLock.lock(); defer { controlsLock.unlock() }
         let m = controlsMode
         let b = controlsButtons
+        let heldJolt = controlsHeldJolt
         controlsButtons = Buttons(jolt: false, clear: false)
-        return (m, b)
+        return (m, Buttons(jolt: b.jolt || heldJolt, clear: b.clear))
+    }
+
+    func testingSnapshotButtons() -> Buttons {
+        snapshotControlsAndConsumeMomentaries().buttons
     }
 
     private func updateFeedbackTarget() {
@@ -237,7 +270,8 @@ final class TubMLClient: ObservableObject {
     func startLoop(
         recordInputAudio: Bool = false,
         replayMode: Bool = false,
-        replayedSessionId: String? = nil
+        replayedSessionId: String? = nil,
+        runMode: HarnessRunMode = .training
     ) {
         guard !isRunning else { return }
         isRunning = true
@@ -252,36 +286,51 @@ final class TubMLClient: ObservableObject {
         activeSessionId = sessionId
         updateFeedbackTarget()
 
-        do {
-            let bundleBuild = try RunBundleFactory.create()
-            activeBundle = bundleBuild.bundle
-            activeBundleId = bundleBuild.bundle.bundleId
-            bundlePath = bundleBuild.fileURL.path
-            print("[app] \(RunBundleFactory.startupBanner(bundle: bundleBuild.bundle))")
-            print("[app] bundle file: \(bundleBuild.fileURL.path)")
-            let lockStatus = ModeContract.contractLockStatus()
-            if !lockStatus.matched {
-                print("[app][contract_lock] mismatch locked=\(lockStatus.lockedFingerprint) computed=\(lockStatus.computedFingerprint)")
-            }
+        if runMode == .training {
+            do {
+                let bundleBuild = try RunBundleFactory.create()
+                activeBundle = bundleBuild.bundle
+                activeBundleId = bundleBuild.bundle.bundleId
+                bundlePath = bundleBuild.fileURL.path
+                print("[app] \(RunBundleFactory.startupBanner(bundle: bundleBuild.bundle))")
+                print("[app] bundle file: \(bundleBuild.fileURL.path)")
+                let lockStatus = ModeContract.contractLockStatus()
+                if !lockStatus.matched {
+                    print("[app][contract_lock] mismatch locked=\(lockStatus.lockedFingerprint) computed=\(lockStatus.computedFingerprint)")
+                }
 
-            let logger = try TrainingLogSession(
-                bundle: bundleBuild.bundle,
-                sessionId: sessionId,
-                recordInputAudioEnabled: recordInputAudio,
-                inputAudioFormat: "caf",
-                replayMode: replayMode,
-                replayedSessionId: replayedSessionId
-            )
-            self.trainingLogSession = logger
-            self.logPath = logger.frameURL.path
-            self.eventLogPath = logger.eventURL.path
-            self.sessionMetaPath = logger.metaURL.path
-            self.sessionDirectoryPath = logger.sessionDirectoryURL.path
-            self.inputAudioPath = logger.inputAudioURL?.path
-            self.lastFeedbackTarget = nil
-            self.updateFeedbackTarget()
-        } catch {
-            self.lastError = "trace init error: \(error)"
+                let logger = try TrainingLogSession(
+                    bundle: bundleBuild.bundle,
+                    sessionId: sessionId,
+                    recordInputAudioEnabled: recordInputAudio,
+                    inputAudioFormat: "caf",
+                    replayMode: replayMode,
+                    replayedSessionId: replayedSessionId
+                )
+                self.trainingLogSession = logger
+                self.logPath = logger.frameURL.path
+                self.eventLogPath = logger.eventURL.path
+                self.sessionMetaPath = logger.metaURL.path
+                self.sessionDirectoryPath = logger.sessionDirectoryURL.path
+                self.inputAudioPath = logger.inputAudioURL?.path
+                self.lastFeedbackTarget = nil
+                self.updateFeedbackTarget()
+            } catch {
+                self.lastError = "trace init error: \(error)"
+                self.trainingLogSession = nil
+                self.activeBundle = nil
+                self.activeBundleId = nil
+                self.logPath = nil
+                self.eventLogPath = nil
+                self.bundlePath = nil
+                self.sessionMetaPath = nil
+                self.sessionDirectoryPath = nil
+                self.inputAudioPath = nil
+                self.activeSessionId = nil
+                self.updateFeedbackTarget()
+            }
+        } else {
+            // Performance mode: no logging, no bundle tracking
             self.trainingLogSession = nil
             self.activeBundle = nil
             self.activeBundleId = nil
@@ -291,8 +340,6 @@ final class TubMLClient: ObservableObject {
             self.sessionMetaPath = nil
             self.sessionDirectoryPath = nil
             self.inputAudioPath = nil
-            self.activeSessionId = nil
-            self.updateFeedbackTarget()
         }
 
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -326,7 +373,12 @@ final class TubMLClient: ObservableObject {
 
         DispatchQueue.main.async {
             self.lastTickIntervalMs = nil
+            self.isJoltHeld = false
         }
+        controlsLock.lock()
+        controlsHeldJolt = false
+        controlsButtons = Buttons(jolt: false, clear: false)
+        controlsLock.unlock()
 
         if let trainingLogSession {
             lastFeedbackTarget = FeedbackTargetRef(
@@ -581,6 +633,37 @@ final class TubMLClient: ObservableObject {
         return labelState
     }
 
+    private func publishResolvedMonitorContext(
+        rawPacket: ModelOut?,
+        resolvedPacket: ModelOut,
+        latencyMs: Int,
+        contractViolations: [String],
+        pickNotes: [String],
+        errorText: String?,
+        incrementRecv: Bool = false,
+        incrementTimeout: Bool = false
+    ) {
+        DispatchQueue.main.async {
+            if incrementTimeout {
+                self.timeoutCount += 1
+            }
+            if incrementRecv {
+                self.recvCount += 1
+            }
+            self.lastOut = resolvedPacket
+            self.lastLatencyMs = latencyMs
+            self.lastMonitorContext = ModelMonitorContext(
+                rawPacket: rawPacket,
+                resolvedPacket: resolvedPacket,
+                latencyMs: latencyMs,
+                contractViolations: contractViolations,
+                pickNotes: pickNotes,
+                receivedAt: Date()
+            )
+            self.lastError = errorText
+        }
+    }
+
     private func sendTick() {
         let nowTickNs = DispatchTime.now().uptimeNanoseconds
         _ = noteTick(nowTickNs)
@@ -597,7 +680,7 @@ final class TubMLClient: ObservableObject {
         let audioInterventions = interventionsProvider?() ?? []
 
         let inp = ModelIn(
-            protocolVersion: 1,
+            protocolVersion: ModeContract.supportedProtocolVersion,
             tsMs: nowMs(),
             sessionId: sessionId,
             frameHz: 10,
@@ -650,11 +733,14 @@ final class TubMLClient: ObservableObject {
             let recvTsMs = nowMs()
             let latency = max(0, recvTsMs - sendTsMs)
             let (fallback, pickInterventions) = resolvedSafeFallback(mode: mode, tsMs: recvTsMs)
-            DispatchQueue.main.async {
-                self.lastOut = fallback
-                self.lastLatencyMs = latency
-                self.lastError = "udp transport unavailable for \(self.hostString):\(self.portValue)"
-            }
+            publishResolvedMonitorContext(
+                rawPacket: nil,
+                resolvedPacket: fallback,
+                latencyMs: latency,
+                contractViolations: [],
+                pickNotes: [],
+                errorText: "udp transport unavailable for \(self.hostString):\(self.portValue)"
+            )
             self.onModelOut?(fallback, latency, buttons)
 
             var interventions = ["transport_unavailable", "fallback_safe_defaults"]
@@ -708,12 +794,15 @@ final class TubMLClient: ObservableObject {
             let recvTsMs = nowMs()
             let latency = max(0, recvTsMs - sendTsMs)
             let (fallback, pickInterventions) = self.resolvedSafeFallback(mode: mode, tsMs: recvTsMs)
-            DispatchQueue.main.async {
-                self.timeoutCount += 1
-                self.lastOut = fallback
-                self.lastLatencyMs = latency
-                self.lastError = "timeout (\(self.timeoutMs)ms) waiting for \(self.hostString):\(self.portValue)"
-            }
+            self.publishResolvedMonitorContext(
+                rawPacket: nil,
+                resolvedPacket: fallback,
+                latencyMs: latency,
+                contractViolations: [],
+                pickNotes: [],
+                errorText: "timeout (\(self.timeoutMs)ms) waiting for \(self.hostString):\(self.portValue)",
+                incrementTimeout: true
+            )
             self.onModelOut?(fallback, latency, buttons)
 
             var interventions = ["timeout", "fallback_safe_defaults"]
@@ -750,11 +839,14 @@ final class TubMLClient: ObservableObject {
                 let recvTsMs = nowMs()
                 let latency = max(0, recvTsMs - sendTsMs)
                 let (fallback, pickInterventions) = self.resolvedSafeFallback(mode: mode, tsMs: recvTsMs)
-                DispatchQueue.main.async {
-                    self.lastError = "send error: \(err)"
-                    self.lastOut = fallback
-                    self.lastLatencyMs = latency
-                }
+                self.publishResolvedMonitorContext(
+                    rawPacket: nil,
+                    resolvedPacket: fallback,
+                    latencyMs: latency,
+                    contractViolations: [],
+                    pickNotes: [],
+                    errorText: "send error: \(err)"
+                )
                 self.onModelOut?(fallback, latency, buttons)
 
                 var interventions = ["send_error", "fallback_safe_defaults"]
@@ -795,11 +887,14 @@ final class TubMLClient: ObservableObject {
                     let recvTsMs = nowMs()
                     let latency = max(0, recvTsMs - sendTsMs)
                     let (fallback, pickInterventions) = self.resolvedSafeFallback(mode: mode, tsMs: recvTsMs)
-                    DispatchQueue.main.async {
-                        self.lastError = "recv error: \(recvErr)"
-                        self.lastOut = fallback
-                        self.lastLatencyMs = latency
-                    }
+                    self.publishResolvedMonitorContext(
+                        rawPacket: nil,
+                        resolvedPacket: fallback,
+                        latencyMs: latency,
+                        contractViolations: [],
+                        pickNotes: [],
+                        errorText: "recv error: \(recvErr)"
+                    )
                     self.onModelOut?(fallback, latency, buttons)
 
                     var interventions = ["recv_error", "fallback_safe_defaults"]
@@ -830,11 +925,14 @@ final class TubMLClient: ObservableObject {
                     let recvTsMs = nowMs()
                     let latency = max(0, recvTsMs - sendTsMs)
                     let (fallback, pickInterventions) = self.resolvedSafeFallback(mode: mode, tsMs: recvTsMs)
-                    DispatchQueue.main.async {
-                        self.lastError = "recv empty"
-                        self.lastOut = fallback
-                        self.lastLatencyMs = latency
-                    }
+                    self.publishResolvedMonitorContext(
+                        rawPacket: nil,
+                        resolvedPacket: fallback,
+                        latencyMs: latency,
+                        contractViolations: [],
+                        pickNotes: [],
+                        errorText: "recv empty"
+                    )
                     self.onModelOut?(fallback, latency, buttons)
 
                     var interventions = ["recv_empty", "fallback_safe_defaults"]
@@ -895,18 +993,17 @@ final class TubMLClient: ObservableObject {
                         notes: pickNotes
                     ))
 
-                    DispatchQueue.main.async {
-                        self.lastOut = out
-                        self.lastLatencyMs = latency
-                        if !enforced.1.isEmpty {
-                            self.lastError = "contract fallback for mode \(mode)"
-                        } else if !pickNotes.isEmpty {
-                            self.lastError = "pick fallback for mode \(mode)"
-                        } else {
-                            self.lastError = nil
-                        }
-                        self.recvCount += 1
-                    }
+                    self.publishResolvedMonitorContext(
+                        rawPacket: decoded,
+                        resolvedPacket: out,
+                        latencyMs: latency,
+                        contractViolations: enforced.1,
+                        pickNotes: pickNotes,
+                        errorText: !enforced.1.isEmpty
+                            ? "contract fallback for mode \(mode)"
+                            : (!pickNotes.isEmpty ? "pick fallback for mode \(mode)" : nil),
+                        incrementRecv: true
+                    )
 
                     self.onModelOut?(out, latency, buttons)
 
@@ -926,6 +1023,7 @@ final class TubMLClient: ObservableObject {
                         sentPacketJson: sentPacketJson
                     )
                 } catch {
+                    let protocolError = self.protocolErrorDescription(for: error)
                     var fallback = ModeContract.protocolViolationFallback(mode: mode, tsMs: recvTsMs)
                     let manifestResolution = self.manifests.resolve(mode: fallback.mode, picks: fallback.picks)
                     fallback = ModelOut(
@@ -936,24 +1034,30 @@ final class TubMLClient: ObservableObject {
                         picks: manifestResolution.picks,
                         flags: fallback.flags
                     )
-                    DispatchQueue.main.async {
-                        self.lastOut = fallback
-                        self.lastLatencyMs = latency
-                        self.lastError = "decode/protocol fallback: \(error.localizedDescription)"
-                    }
+                    let pickNotes = self.significantPickResolutionNotes(
+                        mode: fallback.mode,
+                        notes: manifestResolution.notes
+                    )
+                    self.publishResolvedMonitorContext(
+                        rawPacket: nil,
+                        resolvedPacket: fallback,
+                        latencyMs: latency,
+                        contractViolations: protocolError == nil ? ["decode_error"] : ["protocol_v2_visual_required"],
+                        pickNotes: pickNotes,
+                        errorText: protocolError ?? "decode/protocol fallback: \(error.localizedDescription)"
+                    )
 
                     self.onModelOut?(fallback, latency, buttons)
 
                     var interventions = ["decode_error"]
+                    if protocolError != nil {
+                        interventions.append("protocol_v2_visual_required")
+                    }
                     interventions.append(contentsOf: audioInterventions)
                     if let reason = featureFrame.fallbackReason {
                         interventions.append("feature_fallback:\(reason)")
                     }
                     interventions.append("fallback_safe_defaults")
-                    let pickNotes = self.significantPickResolutionNotes(
-                        mode: fallback.mode,
-                        notes: manifestResolution.notes
-                    )
                     interventions.append(contentsOf: self.pickResolutionInterventions(
                         mode: fallback.mode,
                         notes: pickNotes
@@ -1109,18 +1213,17 @@ final class TubMLClient: ObservableObject {
                 notes: pickNotes
             ))
 
-            DispatchQueue.main.async {
-                self.lastOut = out
-                self.lastLatencyMs = latency
-                if !enforced.1.isEmpty {
-                    self.lastError = "contract fallback for mode \(mode)"
-                } else if !pickNotes.isEmpty {
-                    self.lastError = "pick fallback for mode \(mode)"
-                } else {
-                    self.lastError = nil
-                }
-                self.recvCount += 1
-            }
+            self.publishResolvedMonitorContext(
+                rawPacket: decoded,
+                resolvedPacket: out,
+                latencyMs: latency,
+                contractViolations: enforced.1,
+                pickNotes: pickNotes,
+                errorText: !enforced.1.isEmpty
+                    ? "contract fallback for mode \(mode)"
+                    : (!pickNotes.isEmpty ? "pick fallback for mode \(mode)" : nil),
+                incrementRecv: true
+            )
 
             self.onModelOut?(out, latency, buttons)
 
@@ -1141,6 +1244,7 @@ final class TubMLClient: ObservableObject {
             )
             return true
         } catch {
+            let protocolError = self.protocolErrorDescription(for: error)
             var fallback = ModeContract.protocolViolationFallback(mode: mode, tsMs: recvTsMs)
             let manifestResolution = self.manifests.resolve(mode: fallback.mode, picks: fallback.picks)
             fallback = ModelOut(
@@ -1151,24 +1255,30 @@ final class TubMLClient: ObservableObject {
                 picks: manifestResolution.picks,
                 flags: fallback.flags
             )
-
-            DispatchQueue.main.async {
-                self.lastOut = fallback
-                self.lastLatencyMs = latency
-                self.lastError = "decode/protocol fallback: \(error.localizedDescription)"
-            }
-
-            self.onModelOut?(fallback, latency, buttons)
-
-            var interventions = [interventionTag, "decode_error", "fallback_safe_defaults"]
-            interventions.append(contentsOf: audioInterventions)
-            if let reason = featureFrame.fallbackReason {
-                interventions.append("feature_fallback:\(reason)")
-            }
             let pickNotes = self.significantPickResolutionNotes(
                 mode: fallback.mode,
                 notes: manifestResolution.notes
             )
+
+            self.publishResolvedMonitorContext(
+                rawPacket: nil,
+                resolvedPacket: fallback,
+                latencyMs: latency,
+                contractViolations: protocolError == nil ? ["decode_error"] : ["protocol_v2_visual_required"],
+                pickNotes: pickNotes,
+                errorText: protocolError ?? "decode/protocol fallback: \(error.localizedDescription)"
+            )
+
+            self.onModelOut?(fallback, latency, buttons)
+
+            var interventions = [interventionTag, "decode_error", "fallback_safe_defaults"]
+            if protocolError != nil {
+                interventions.append("protocol_v2_visual_required")
+            }
+            interventions.append(contentsOf: audioInterventions)
+            if let reason = featureFrame.fallbackReason {
+                interventions.append("feature_fallback:\(reason)")
+            }
             interventions.append(contentsOf: self.pickResolutionInterventions(
                 mode: fallback.mode,
                 notes: pickNotes

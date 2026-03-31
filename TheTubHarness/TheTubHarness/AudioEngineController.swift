@@ -333,6 +333,8 @@ struct OutputRouteInfo: Equatable {
 }
 
 struct OutputRenderDiagnostics: Equatable {
+    var driverCallbackActive: Bool = false
+    var driverCallbackCount: UInt64 = 0
     var callbackActive: Bool = false
     var frameCount: Int = 0
     var bufferCount: Int = 0
@@ -352,11 +354,19 @@ private struct OutputRenderDiagnosticsSnapshot {
     var postRoutePeak: Float = 0
 }
 
-private final class CoreAudioLiveOutputDriver {
+nonisolated private final class CoreAudioLiveOutputDriver {
     typealias RenderBlock = (AVAudioFrameCount, UnsafeMutablePointer<AudioBufferList>) -> Void
+    typealias InputBlock = (Int, UnsafePointer<AudioBufferList>) -> Void
 
     private var audioUnit: AudioUnit?
     private var renderBlock: RenderBlock?
+    private var inputBlock: InputBlock?
+    private var inputCaptureBuffer: AVAudioPCMBuffer?
+    private var inputCaptureChannelCount: Int = 0
+    private var inputSampleRate: Double = 48_000
+    private let callbackLock = NSLock()
+    private var callbackCounter: UInt64 = 0
+    private var lastFrameCount: Int = 0
 
     deinit {
         stop()
@@ -366,29 +376,53 @@ private final class CoreAudioLiveOutputDriver {
         outputUID: String,
         sampleRate: Double,
         channels: Int,
+        inputBlock: InputBlock? = nil,
         renderBlock: @escaping RenderBlock
     ) throws {
         stop()
+        guard !outputUID.isEmpty, let resolvedDeviceID = CoreAudioOutputCatalog.deviceID(forUID: outputUID) else {
+            throw NSError(domain: "AudioOutputDriver", code: 1, userInfo: [NSLocalizedDescriptionKey: "Output device not found"])
+        }
 
-        var description = AudioComponentDescription(
+        self.renderBlock = renderBlock
+        self.inputBlock = inputBlock
+        self.inputSampleRate = sampleRate
+        self.inputCaptureChannelCount = inputBlock == nil ? 0 : max(1, CoreAudioInputCatalog.inputChannels(forUID: outputUID) ?? channels)
+        if let inputBlock {
+            let captureFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: sampleRate,
+                channels: AVAudioChannelCount(inputCaptureChannelCount),
+                interleaved: false
+            )
+            guard let captureFormat,
+                  let captureBuffer = AVAudioPCMBuffer(pcmFormat: captureFormat, frameCapacity: 4096) else {
+                self.inputBlock = nil
+                throw NSError(domain: "AudioOutputDriver", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate input capture buffer for shared device"])
+            }
+            self.inputCaptureBuffer = captureBuffer
+            self.inputBlock = inputBlock
+        }
+
+        var desc = AudioComponentDescription(
             componentType: kAudioUnitType_Output,
             componentSubType: kAudioUnitSubType_HALOutput,
             componentManufacturer: kAudioUnitManufacturer_Apple,
             componentFlags: 0,
             componentFlagsMask: 0
         )
-        guard let component = AudioComponentFindNext(nil, &description) else {
-            throw NSError(domain: "AudioOutputDriver", code: 1, userInfo: [NSLocalizedDescriptionKey: "HAL output component unavailable"])
+        guard let component = AudioComponentFindNext(nil, &desc) else {
+            stop()
+            throw NSError(domain: "AudioOutputDriver", code: 2, userInfo: [NSLocalizedDescriptionKey: "HAL output component unavailable"])
         }
 
-        var maybeUnit: AudioUnit?
-        var status = AudioComponentInstanceNew(component, &maybeUnit)
-        guard status == noErr, let unit = maybeUnit else {
+        var unit: AudioUnit?
+        var status = AudioComponentInstanceNew(component, &unit)
+        guard status == noErr, let unit else {
+            stop()
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to create HAL output unit (OSStatus \(status))"])
         }
-
-        self.audioUnit = unit
-        self.renderBlock = renderBlock
+        audioUnit = unit
 
         var enableOutput: UInt32 = 1
         status = AudioUnitSetProperty(
@@ -404,34 +438,44 @@ private final class CoreAudioLiveOutputDriver {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to enable HAL output (OSStatus \(status))"])
         }
 
-        if !outputUID.isEmpty {
-            guard let deviceID = CoreAudioOutputCatalog.deviceID(forUID: outputUID) else {
-                stop()
-                throw NSError(domain: "AudioOutputDriver", code: 2, userInfo: [NSLocalizedDescriptionKey: "Output device not found"])
-            }
-            var selected = deviceID
+        if inputBlock != nil {
+            var enableInput: UInt32 = 1
             status = AudioUnitSetProperty(
                 unit,
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                &selected,
-                UInt32(MemoryLayout<AudioDeviceID>.size)
+                kAudioOutputUnitProperty_EnableIO,
+                kAudioUnitScope_Input,
+                1,
+                &enableInput,
+                UInt32(MemoryLayout<UInt32>.size)
             )
             guard status == noErr else {
                 stop()
-                throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to bind HAL output device (OSStatus \(status))"])
+                throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to enable HAL input (OSStatus \(status))"])
             }
         }
 
-        var streamFormat = AudioStreamBasicDescription(
+        var selectedDevice = resolvedDeviceID
+        status = AudioUnitSetProperty(
+            unit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &selectedDevice,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard status == noErr else {
+            stop()
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to bind HAL device (OSStatus \(status))"])
+        }
+
+        var outputFormat = AudioStreamBasicDescription(
             mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian,
-            mBytesPerPacket: 4 * UInt32(max(1, channels)),
+            mBytesPerPacket: UInt32(MemoryLayout<Float>.size * channels),
             mFramesPerPacket: 1,
-            mBytesPerFrame: 4 * UInt32(max(1, channels)),
-            mChannelsPerFrame: UInt32(max(1, channels)),
+            mBytesPerFrame: UInt32(MemoryLayout<Float>.size * channels),
+            mChannelsPerFrame: UInt32(channels),
             mBitsPerChannel: 32,
             mReserved: 0
         )
@@ -440,12 +484,38 @@ private final class CoreAudioLiveOutputDriver {
             kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Input,
             0,
-            &streamFormat,
+            &outputFormat,
             UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         )
         guard status == noErr else {
             stop()
-            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to set HAL stream format (OSStatus \(status))"])
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to set HAL output format (OSStatus \(status))"])
+        }
+
+        if inputBlock != nil {
+            var inputFormat = AudioStreamBasicDescription(
+                mSampleRate: sampleRate,
+                mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsNonInterleaved | kAudioFormatFlagsNativeEndian,
+                mBytesPerPacket: UInt32(MemoryLayout<Float>.size),
+                mFramesPerPacket: 1,
+                mBytesPerFrame: UInt32(MemoryLayout<Float>.size),
+                mChannelsPerFrame: UInt32(inputCaptureChannelCount),
+                mBitsPerChannel: 32,
+                mReserved: 0
+            )
+            status = AudioUnitSetProperty(
+                unit,
+                kAudioUnitProperty_StreamFormat,
+                kAudioUnitScope_Output,
+                1,
+                &inputFormat,
+                UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            )
+            guard status == noErr else {
+                stop()
+                throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to set HAL input format (OSStatus \(status))"])
+            }
         }
 
         var callback = AURenderCallbackStruct(
@@ -479,30 +549,81 @@ private final class CoreAudioLiveOutputDriver {
     }
 
     func stop() {
-        guard let unit = audioUnit else { return }
-        AudioOutputUnitStop(unit)
-        AudioUnitUninitialize(unit)
-        AudioComponentInstanceDispose(unit)
-        audioUnit = nil
+        if let audioUnit {
+            AudioOutputUnitStop(audioUnit)
+            AudioUnitUninitialize(audioUnit)
+            AudioComponentInstanceDispose(audioUnit)
+        }
+        self.audioUnit = nil
+        inputBlock = nil
         renderBlock = nil
+        inputCaptureBuffer = nil
+        inputCaptureChannelCount = 0
+        callbackLock.lock()
+        callbackCounter = 0
+        lastFrameCount = 0
+        callbackLock.unlock()
     }
 
-    fileprivate func render(frameCount: UInt32, ioData: UnsafeMutablePointer<AudioBufferList>?) -> OSStatus {
+    func callbackSnapshot() -> (count: UInt64, frameCount: Int) {
+        callbackLock.lock()
+        let snapshot = (callbackCounter, lastFrameCount)
+        callbackLock.unlock()
+        return snapshot
+    }
+
+    fileprivate func render(
+        timeStamp: UnsafePointer<AudioTimeStamp>,
+        frameCount: UInt32,
+        ioData: UnsafeMutablePointer<AudioBufferList>?
+    ) -> OSStatus {
         guard let ioData else { return noErr }
-        renderBlock?(frameCount, ioData)
+        let buffers = UnsafeMutableAudioBufferListPointer(ioData)
+        guard let first = buffers.first else { return noErr }
+        let bytesPerFrame = max(Int(MemoryLayout<Float>.size), Int(MemoryLayout<Float>.size) * max(1, Int(first.mNumberChannels)))
+        let derivedFrameCount = Int(first.mDataByteSize) / max(1, bytesPerFrame)
+        let frames = max(Int(frameCount), derivedFrameCount)
+        guard frames > 0 else { return noErr }
+        callbackLock.lock()
+        callbackCounter &+= 1
+        lastFrameCount = frames
+        callbackLock.unlock()
+
+        if let inputBlock,
+           let audioUnit,
+           let inputCaptureBuffer,
+           inputCaptureChannelCount > 0,
+           frames <= inputCaptureBuffer.frameCapacity {
+            inputCaptureBuffer.frameLength = AVAudioFrameCount(frames)
+            var actionFlags = AudioUnitRenderActionFlags()
+            let status = AudioUnitRender(
+                audioUnit,
+                &actionFlags,
+                timeStamp,
+                1,
+                UInt32(frames),
+                inputCaptureBuffer.mutableAudioBufferList
+            )
+            if status == noErr {
+                inputBlock(frames, UnsafePointer(inputCaptureBuffer.mutableAudioBufferList))
+            }
+        }
+
+        renderBlock?(AVAudioFrameCount(frames), ioData)
         return noErr
     }
 }
 
-private let coreAudioLiveOutputRenderCallback: AURenderCallback = { refCon, actionFlags, timeStamp, busNumber, frameCount, ioData in
-    let driver = Unmanaged<CoreAudioLiveOutputDriver>.fromOpaque(refCon).takeUnretainedValue()
-    return driver.render(frameCount: frameCount, ioData: ioData)
+nonisolated private let coreAudioLiveOutputRenderCallback: AURenderCallback = { inRefCon, _, inTimeStamp, _, inNumberFrames, ioData in
+    let driver = Unmanaged<CoreAudioLiveOutputDriver>.fromOpaque(inRefCon).takeUnretainedValue()
+    return driver.render(timeStamp: inTimeStamp, frameCount: inNumberFrames, ioData: ioData)
 }
 
 final class AudioEngineController: ObservableObject {
     private let engine = AVAudioEngine()
     private let outputMixer = AVAudioMixerNode()
     private let liveOutputDriver = CoreAudioLiveOutputDriver()
+    private let deviceRefreshQueue = DispatchQueue(label: "tub.audio.output.devices", qos: .userInitiated)
     private var sourceNode: AVAudioSourceNode?
     private let renderState = MasterRenderState()
     private var preferredInputUID: String?
@@ -552,7 +673,7 @@ final class AudioEngineController: ObservableObject {
     @Published private(set) var inputRouteProfile: InputRoutingProfile = InputRoutingProfile.defaultProfile(for: "default", inputChannels: 1)
 
     private var outputMeterPollTimer: DispatchSourceTimer?
-    private var lastObservedOutputRenderCallbackCount: UInt64 = 0
+    private var outputRefreshGeneration: UInt64 = 0
 
     var onInputRecordingAlignment: ((InputAudioAlignment) -> Void)?
     var onLiveInputBufferCaptured: ((AVAudioPCMBuffer, AVAudioTime?) -> Void)?
@@ -607,16 +728,6 @@ final class AudioEngineController: ObservableObject {
         let catalogChannels = max(1, CoreAudioOutputCatalog.outputChannels(forUID: activeUID) ?? CoreAudioOutputCatalog.defaultOutputChannelCount())
         let sampleRate = CoreAudioOutputCatalog.nominalSampleRate(forUID: activeUID) ?? 48_000.0
         let outputChannels = max(1, catalogChannels)
-        guard let renderFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: AVAudioChannelCount(outputChannels),
-            interleaved: false
-        ) else {
-            isAudioRunning = false
-            audioError = "engine start error: could not create render format for output \(activeName) (\(outputChannels)ch @ \(Int(sampleRate)) Hz)"
-            return
-        }
 
         var profile = profileForOutputUID(activeUID, hardwareChannels: outputChannels)
         profile.sanitize(for: outputChannels)
@@ -650,13 +761,15 @@ final class AudioEngineController: ObservableObject {
         inputSource = useLiveInputSource ? .live : .replayFile
         if useLiveInputSource {
             usesEngineLiveInputTap = false
+            let renderState = self.renderState
             do {
                 try liveOutputDriver.start(
                     outputUID: activeUID,
                     sampleRate: sampleRate,
-                    channels: outputChannels
-                ) { [weak self] frameCount, audioBufferList in
-                    self?.renderState.render(frameCount: frameCount, audioBufferList: audioBufferList)
+                    channels: outputChannels,
+                    inputBlock: nil
+                ) { frameCount, audioBufferList in
+                    renderState.render(frameCount: frameCount, audioBufferList: audioBufferList)
                 }
                 isAudioRunning = true
                 audioError = nil
@@ -670,6 +783,17 @@ final class AudioEngineController: ObservableObject {
                 engine.disconnectNodeOutput(sourceNode)
                 engine.detach(sourceNode)
                 self.sourceNode = nil
+            }
+
+            guard let renderFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: sampleRate,
+                channels: AVAudioChannelCount(outputChannels),
+                interleaved: false
+            ) else {
+                isAudioRunning = false
+                audioError = "engine start error: could not create render format for output \(activeName) (\(outputChannels)ch @ \(Int(sampleRate)) Hz)"
+                return
             }
 
             let src = AVAudioSourceNode(format: renderFormat) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
@@ -798,28 +922,19 @@ final class AudioEngineController: ObservableObject {
     }
 
     func refreshOutputDevices() {
-        let devices = CoreAudioOutputCatalog.listOutputDevices()
-        let selected = preferredOutputUID ?? CoreAudioOutputCatalog.defaultOutputUID() ?? devices.first?.uid ?? ""
-        if let existing = devices.first(where: { $0.uid == selected }) {
-            preferredOutputUID = existing.uid
-        } else if let first = devices.first {
-            preferredOutputUID = first.uid
-        } else {
-            preferredOutputUID = nil
-        }
+        outputRefreshGeneration &+= 1
+        let refreshGeneration = outputRefreshGeneration
 
-        let uiSelected = preferredOutputUID ?? selected
-        let uiName = devices.first(where: { $0.uid == uiSelected })?.name ?? CoreAudioOutputCatalog.defaultOutputName() ?? "System Default"
-        let uiChannels = devices.first(where: { $0.uid == uiSelected })?.outputChannels ?? CoreAudioOutputCatalog.defaultOutputChannelCount()
+        deviceRefreshQueue.async { [weak self] in
+            guard let self else { return }
+            let devices = CoreAudioOutputCatalog.listOutputDevices()
+            let defaultUID = CoreAudioOutputCatalog.defaultOutputUID()
 
-        DispatchQueue.main.async {
-            self.outputDevices = devices
-            self.selectedOutputUID = uiSelected
-            self.activeOutputName = uiName
-            self.activeOutputChannels = max(1, uiChannels)
-            self.outputProfile = self.profileForOutputUID(uiSelected, hardwareChannels: max(1, uiChannels))
+            DispatchQueue.main.async {
+                guard refreshGeneration == self.outputRefreshGeneration else { return }
+                self.applyOutputDeviceRefresh(devices: devices, defaultUID: defaultUID)
+            }
         }
-        persistOutputRoutingStore()
     }
 
     func selectOutputDevice(uid: String) {
@@ -974,14 +1089,23 @@ final class AudioEngineController: ObservableObject {
     }
 
     private func startOutputMeterPolling() {
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + .milliseconds(120), repeating: .milliseconds(100))
+        let timerQueue = DispatchQueue(label: "tub.audio.output.meters", qos: .utility)
+        let timer = DispatchSource.makeTimerSource(queue: timerQueue)
+        var lastObservedOutputRenderCallbackCount: UInt64 = 0
+        var lastObservedDriverCallbackCount: UInt64 = 0
+        var lastPublishedLevels = outputHardwareLevels
+        var lastPublishedDiagnostics = outputRenderDiagnostics
+
+        timer.schedule(deadline: .now() + .milliseconds(180), repeating: .milliseconds(160), leeway: .milliseconds(16))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
-            self.outputHardwareLevels = self.renderState.consumeOutputHardwareMeterLevels()
+            let levels = self.renderState.consumeOutputHardwareMeterLevels()
             let snapshot = self.renderState.consumeOutputRenderDiagnostics()
+            let driverSnapshot = self.liveOutputDriver.callbackSnapshot()
             let diagnostics = OutputRenderDiagnostics(
-                callbackActive: snapshot.callbackCounter != self.lastObservedOutputRenderCallbackCount,
+                driverCallbackActive: driverSnapshot.count != lastObservedDriverCallbackCount,
+                driverCallbackCount: driverSnapshot.count,
+                callbackActive: snapshot.callbackCounter != lastObservedOutputRenderCallbackCount,
                 frameCount: snapshot.frameCount,
                 bufferCount: snapshot.bufferCount,
                 slotCount: snapshot.slotCount,
@@ -989,11 +1113,94 @@ final class AudioEngineController: ObservableObject {
                 preRoutePeak: snapshot.preRoutePeak,
                 postRoutePeak: snapshot.postRoutePeak
             )
-            self.lastObservedOutputRenderCallbackCount = snapshot.callbackCounter
-            self.outputRenderDiagnostics = diagnostics
+            lastObservedDriverCallbackCount = driverSnapshot.count
+            lastObservedOutputRenderCallbackCount = snapshot.callbackCounter
+
+            let levelsChanged = !Self.approximatelyEqual(levels, lastPublishedLevels, tolerance: 0.012)
+            let diagnosticsChanged = !Self.diagnosticsMateriallyEqual(diagnostics, lastPublishedDiagnostics)
+            guard levelsChanged || diagnosticsChanged else { return }
+
+            lastPublishedLevels = levels
+            lastPublishedDiagnostics = diagnostics
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.outputHardwareLevels = levels
+                self.outputRenderDiagnostics = diagnostics
+            }
         }
         outputMeterPollTimer = timer
         timer.resume()
+    }
+
+    private func applyOutputDeviceRefresh(devices: [AudioOutputDevice], defaultUID: String?) {
+        let selected = preferredOutputUID ?? defaultUID ?? devices.first?.uid ?? ""
+        if let existing = devices.first(where: { $0.uid == selected }) {
+            preferredOutputUID = existing.uid
+        } else if let first = devices.first {
+            preferredOutputUID = first.uid
+        } else {
+            preferredOutputUID = nil
+        }
+
+        let uiSelected = preferredOutputUID ?? selected
+        let uiName = devices.first(where: { $0.uid == uiSelected })?.name ?? CoreAudioOutputCatalog.defaultOutputName() ?? "System Default"
+        let uiChannels = devices.first(where: { $0.uid == uiSelected })?.outputChannels ?? CoreAudioOutputCatalog.defaultOutputChannelCount()
+        let hardwareChannels = max(1, uiChannels)
+        let profile = profileForOutputUID(uiSelected, hardwareChannels: hardwareChannels)
+        let decision = OutputRoutePlanner.decide(
+            preferredMode: profile.preferredMode,
+            hardwareChannels: hardwareChannels,
+            bindSucceeded: true
+        )
+        renderState.setOutputRouting(
+            profile: profile,
+            hardwareChannels: hardwareChannels,
+            activeMode: decision.mode,
+            outputUID: uiSelected,
+            outputName: uiName,
+            warning: decision.warning
+        )
+        activeOutputRoute = OutputRouteInfo(
+            outputUID: uiSelected,
+            outputName: uiName,
+            hardwareChannels: hardwareChannels,
+            activeMode: decision.mode,
+            routeLocked: decision.locked,
+            warning: decision.warning,
+            mappingSummary: profile.mappingSummary()
+        )
+
+        outputDevices = devices
+        selectedOutputUID = uiSelected
+        activeOutputName = uiName
+        activeOutputChannels = hardwareChannels
+        outputProfile = profile
+        outputRouteMode = decision.mode
+        outputRouteLocked = decision.locked
+        outputRouteWarning = decision.warning
+        persistOutputRoutingStore()
+    }
+
+    private static func approximatelyEqual(_ lhs: [Float], _ rhs: [Float], tolerance: Float) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for idx in lhs.indices where abs(lhs[idx] - rhs[idx]) > tolerance {
+            return false
+        }
+        return true
+    }
+
+    private static func diagnosticsMateriallyEqual(_ lhs: OutputRenderDiagnostics, _ rhs: OutputRenderDiagnostics) -> Bool {
+        let lhsDriverSeen = lhs.driverCallbackCount > 0
+        let rhsDriverSeen = rhs.driverCallbackCount > 0
+        return lhs.driverCallbackActive == rhs.driverCallbackActive
+            && lhsDriverSeen == rhsDriverSeen
+            && lhs.callbackActive == rhs.callbackActive
+            && lhs.frameCount == rhs.frameCount
+            && lhs.bufferCount == rhs.bufferCount
+            && lhs.slotCount == rhs.slotCount
+            && lhs.configuredHardwareChannels == rhs.configuredHardwareChannels
+            && abs(lhs.preRoutePeak - rhs.preRoutePeak) <= 0.012
+            && abs(lhs.postRoutePeak - rhs.postRoutePeak) <= 0.012
     }
 
     private func applyOutputRoutingProfileToRender() {
@@ -1119,6 +1326,16 @@ final class AudioEngineController: ObservableObject {
         )
         renderState.ingestInput(buffer: buffer)
         recorder?.append(buffer: buffer, time: time)
+    }
+
+    func ingestLiveInputAudioBuffers(_ audioBufferList: UnsafePointer<AudioBufferList>, frameCount: Int, sampleRate: Double) {
+        guard inputSource == .live else { return }
+        let binding = RawInputChannelBinding(audioBuffers: audioBufferList)
+        updateLiveInputCaptureInfo(
+            sampleRate: sampleRate,
+            channels: max(1, binding.channelCount)
+        )
+        renderState.ingestInput(audioBufferList: audioBufferList, frameCount: frameCount, sampleRate: Float(sampleRate))
     }
 
     func startInputRecording(to url: URL, fileFormat: String = "caf") throws -> (sampleRate: Double, channels: Int, format: String) {
@@ -2580,7 +2797,7 @@ enum InputResampler {
     }
 }
 
-private final class MasterRenderState {
+nonisolated private final class MasterRenderState {
     private let ringLock = NSLock()
     private let stateLock = NSLock()
 
@@ -3281,7 +3498,6 @@ private final class MasterRenderState {
         let frames = Int(buffer.frameLength)
         let channels = Int(buffer.format.channelCount)
         guard frames > 0, channels > 0 else { return }
-        let inputSampleRate = max(8_000, Float(buffer.format.sampleRate))
         let routeProfile = stateLock.withLock { inputRouteProfile }
         let activeMask = InputChannelRouter.sanitizedMask(routeProfile.activeChannels, channelCount: channels)
         var mono = [Float](repeating: 0, count: frames)
@@ -3294,6 +3510,30 @@ private final class MasterRenderState {
                 channelData[ch][i]
             }
         }
+        ingestMonoInputSamples(mono, inputSampleRate: max(8_000, Float(buffer.format.sampleRate)))
+    }
+
+    func ingestInput(audioBufferList: UnsafePointer<AudioBufferList>, frameCount: Int, sampleRate inputSampleRate: Float) {
+        let binding = RawInputChannelBinding(audioBuffers: audioBufferList)
+        let channels = binding.channelCount
+        guard frameCount > 0, channels > 0 else { return }
+        let routeProfile = stateLock.withLock { inputRouteProfile }
+        let activeMask = InputChannelRouter.sanitizedMask(routeProfile.activeChannels, channelCount: channels)
+        var mono = [Float](repeating: 0, count: frameCount)
+        for frameIndex in 0..<frameCount {
+            mono[frameIndex] = InputChannelRouter.mixedSample(
+                channelCount: channels,
+                activeMask: activeMask,
+                channelGainDb: routeProfile.channelGainDb
+            ) { ch in
+                binding.sample(channelIndex: ch, frameIndex: frameIndex)
+            }
+        }
+        ingestMonoInputSamples(mono, inputSampleRate: max(8_000, inputSampleRate))
+    }
+
+    private func ingestMonoInputSamples(_ mono: [Float], inputSampleRate: Float) {
+        guard !mono.isEmpty else { return }
 
         ringLock.lock()
         let backlog = ringDistanceSamples(read: ringRead, write: ringWrite, capacity: inputRing.count)
