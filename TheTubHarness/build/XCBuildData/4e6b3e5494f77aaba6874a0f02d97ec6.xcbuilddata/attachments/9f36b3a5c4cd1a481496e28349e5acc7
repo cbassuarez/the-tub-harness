@@ -1,0 +1,166 @@
+{
+  "" : {
+    "const-values" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarness-primary.swiftconstvalues",
+    "dependencies" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarness-primary.d",
+    "diagnostics" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarness-primary.dia",
+    "emit-module-dependencies" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarness-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarness-primary-emit-module.dia",
+    "pch" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarness-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarness-primary.swiftdeps"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/Audience/AudienceBodyClaimResolver.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudienceBodyClaimResolver.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudienceBodyClaimResolver.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudienceBodyClaimResolver.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/Audience/AudienceIngestQueue.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudienceIngestQueue.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudienceIngestQueue.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudienceIngestQueue.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/Audience/AudiencePreferenceOverlay.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudiencePreferenceOverlay.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudiencePreferenceOverlay.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudiencePreferenceOverlay.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/Audience/AudienceSessionServer.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudienceSessionServer.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudienceSessionServer.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudienceSessionServer.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/AudioEngineController.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudioEngineController.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudioEngineController.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudioEngineController.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/AudioInputAnalyzer.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudioInputAnalyzer.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudioInputAnalyzer.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/AudioInputAnalyzer.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/BundledFontRegistrar.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/BundledFontRegistrar.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/BundledFontRegistrar.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/BundledFontRegistrar.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/ContentView.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ContentView.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ContentView.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ContentView.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/JSONLLogger.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/JSONLLogger.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/JSONLLogger.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/JSONLLogger.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/JoltVideoClipPool.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/JoltVideoClipPool.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/JoltVideoClipPool.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/JoltVideoClipPool.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/JoltVideoPlayerView.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/JoltVideoPlayerView.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/JoltVideoPlayerView.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/JoltVideoPlayerView.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/ManifestCatalog.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ManifestCatalog.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ManifestCatalog.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ManifestCatalog.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/ModeContract.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ModeContract.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ModeContract.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ModeContract.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/ModeEngine.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ModeEngine.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ModeEngine.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ModeEngine.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/ModelPackets.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ModelPackets.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ModelPackets.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ModelPackets.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/Persistence.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/Persistence.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/Persistence.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/Persistence.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/ReplayCLI.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ReplayCLI.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ReplayCLI.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ReplayCLI.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/SharedTypes.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/SharedTypes.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/SharedTypes.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/SharedTypes.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/ShellChrome.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ShellChrome.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ShellChrome.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/ShellChrome.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/SpeechTranscriber.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/SpeechTranscriber.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/SpeechTranscriber.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/SpeechTranscriber.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/StageAudioAnalyzer.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/StageAudioAnalyzer.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/StageAudioAnalyzer.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/StageAudioAnalyzer.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/StageVoxelEngine.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/StageVoxelEngine.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/StageVoxelEngine.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/StageVoxelEngine.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/TheTubHarnessApp.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarnessApp.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarnessApp.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarnessApp.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/TubMLClient.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TubMLClient.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TubMLClient.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TubMLClient.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/USGSWebcamPool.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/USGSWebcamPool.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/USGSWebcamPool.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/USGSWebcamPool.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/VideoOutputController.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/VideoOutputController.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/VideoOutputController.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/VideoOutputController.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TheTubHarness/VideoStageView.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/VideoStageView.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/VideoStageView.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/VideoStageView.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/DerivedSources/CoreDataGenerated/TheTubHarness/Item+CoreDataClass.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/Item+CoreDataClass.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/Item+CoreDataClass.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/Item+CoreDataClass.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/DerivedSources/CoreDataGenerated/TheTubHarness/Item+CoreDataProperties.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/Item+CoreDataProperties.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/Item+CoreDataProperties.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/Item+CoreDataProperties.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/DerivedSources/CoreDataGenerated/TheTubHarness/TheTubHarness+CoreDataModel.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarness+CoreDataModel.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarness+CoreDataModel.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/TheTubHarness+CoreDataModel.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/DerivedSources/GeneratedAssetSymbols.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/GeneratedAssetSymbols.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/GeneratedAssetSymbols.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release/TheTubHarness.build/Objects-normal/x86_64/GeneratedAssetSymbols.o"
+  }
+}

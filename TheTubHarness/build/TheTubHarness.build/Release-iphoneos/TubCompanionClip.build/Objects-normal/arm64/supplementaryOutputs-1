@@ -1,0 +1,12 @@
+{
+  "/Users/seb/the-tub-harness/TheTubHarness/TubCompanionClip/ClipLaunchView.swift" : {
+    "abi-baseline-json" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip.abi.json",
+    "const-values" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-primary.swiftconstvalues",
+    "dependencies" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-primary.d",
+    "diagnostics" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-primary.dia",
+    "objc-header" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-Swift.h",
+    "swiftdoc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip.swiftdoc",
+    "swiftmodule" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip.swiftmodule",
+    "swiftsourceinfo" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip.swiftsourceinfo"
+  }
+}

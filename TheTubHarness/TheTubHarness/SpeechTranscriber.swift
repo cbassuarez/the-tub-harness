@@ -37,6 +37,9 @@ final class SpeechTranscriber: ObservableObject {
     /// Maximum duration before restarting the recognition task (Apple caps at ~60s).
     private let restartInterval: TimeInterval = 50.0
     private var taskStartDate: Date = .distantPast
+    private let segmentLookbackWindow: TimeInterval = 10.0
+    private let fallbackSegmentCount: Int = 14
+    private let maxPublishedWordCount: Int = 18
 
     init() {
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
@@ -220,31 +223,44 @@ final class SpeechTranscriber: ObservableObject {
         // Rate limit.
         guard now.timeIntervalSince(lastPublishDate) >= publishInterval else { return }
 
-        // Check for new transcription text.
         let bestTranscription = result.bestTranscription
-        let text = bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let segments = bestTranscription.segments
+        guard !segments.isEmpty else { return }
 
         // Check confidence of the most recent segment.
-        if let lastSegment = bestTranscription.segments.last {
+        if let lastSegment = segments.last {
             guard lastSegment.confidence >= minConfidence || lastSegment.confidence == 0 else { return }
         }
+
+        // Prefer the recent phrase window so we don't keep latching the first words.
+        let recentSegments: [SFTranscriptionSegment]
+        if let last = segments.last {
+            let cutoff = max(0, last.timestamp - segmentLookbackWindow)
+            let filtered = segments.filter { $0.timestamp >= cutoff }
+            recentSegments = filtered.isEmpty ? Array(segments.suffix(fallbackSegmentCount)) : filtered
+        } else {
+            recentSegments = Array(segments.suffix(fallbackSegmentCount))
+        }
+
+        let text = recentSegments
+            .map(\.substring)
+            .joined(separator: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !text.isEmpty else { return }
 
         // Only publish if we have substantial text (at least 2 words).
         let wordCount = text.components(separatedBy: .whitespaces).filter { !$0.isEmpty }.count
         guard wordCount >= 2 else { return }
 
-        // Take the last ~60 chars to keep it concise.
-        let trimmed: String
-        if text.count > 80 {
-            let suffix = String(text.suffix(80))
-            if let spaceIdx = suffix.firstIndex(of: " ") {
-                trimmed = String(suffix[suffix.index(after: spaceIdx)...])
-            } else {
-                trimmed = suffix
-            }
-        } else {
-            trimmed = text
+        let words = text.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        let trimmed = words.count > maxPublishedWordCount
+            ? words.suffix(maxPublishedWordCount).joined(separator: " ")
+            : text
+
+        if latestTranscription == trimmed {
+            return
         }
 
         latestTranscription = trimmed

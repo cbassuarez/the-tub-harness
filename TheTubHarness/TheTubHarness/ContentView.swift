@@ -1752,6 +1752,7 @@ struct ModeChooserView: View {
 
 struct ContentView: View {
     let runMode: HarnessRunMode
+    @EnvironmentObject private var audienceServer: AudienceSessionServer
 
     @StateObject private var modelServer = ModelServerProcess()
     @StateObject private var client = TubMLClient(host: "127.0.0.1", port: 9910)
@@ -1789,6 +1790,7 @@ struct ContentView: View {
     @State private var showOutputRoutingModal: Bool = false
     @State private var showManualReplayEntry: Bool = false
     @State private var joltHoldSources: Set<JoltHoldSource> = []
+    @State private var isTransportTransitioning: Bool = false
 
     init(runMode: HarnessRunMode = .training, defaultRecordInputAudio: Bool = false) {
         self.runMode = runMode
@@ -1859,16 +1861,16 @@ struct ContentView: View {
             videoStage.bind(analyzer: analyzer)
             videoStage.setMode(mode)
             webcamPool.startFilling()
-            Task { await videoClipPool.load(from: URL(fileURLWithPath: "/Users/seb/Desktop/video-for-modes4-7")) }
             videoOutput.bind(webcamPool: webcamPool)
             videoOutput.bind(videoClipPool: videoClipPool)
             videoOutput.bind(store: videoStage)
             videoStage.bind(speechTranscriber: speechTranscriber)
+            videoStage.ingestAudienceInfluenceTelemetry(audienceServer.lastInfluenceTelemetry)
+            audienceServer.publishStageSnapshot(StageSnapshotPayload.fromVideoStageSnapshot(videoStage.snapshot))
             analyzer.onLiveInputBuffer = { [weak audio] buffer, time in
                 audio?.ingestLiveInputBuffer(buffer, time: time)
             }
             speechTranscriber.requestAuthorization()
-            speechTranscriber.start()
             analyzer.onLiveInputRawBuffers = { [weak audio, weak speechTranscriber] audioBufferList, frameCount, sampleRate in
                 audio?.ingestLiveInputAudioBuffers(audioBufferList, frameCount: frameCount, sampleRate: sampleRate)
                 speechTranscriber?.appendRawAudio(audioBufferList, frameCount: frameCount, sampleRate: sampleRate)
@@ -1877,6 +1879,10 @@ struct ContentView: View {
                 DispatchQueue.main.async {
                     videoStage.ingestStageAudioSnapshot(snapshot)
                 }
+            }
+            if ProcessInfo.processInfo.environment["TUB_PRELOAD_JOLT_CLIPS"] == "1" {
+                let clipDirectory = URL(fileURLWithPath: "/Users/seb/Desktop/video-for-modes4-7")
+                videoClipPool.loadInBackground(from: clipDirectory)
             }
             analyzer.refreshInputDevices()
             audio.refreshInputRouting()
@@ -1907,6 +1913,12 @@ struct ContentView: View {
         .onChange(of: mode) { _, newMode in
             mlMonitor.setMode(newMode)
             videoStage.setMode(newMode)
+        }
+        .onReceive(audienceServer.$lastInfluenceTelemetry.receive(on: RunLoop.main)) { telemetry in
+            videoStage.ingestAudienceInfluenceTelemetry(telemetry)
+        }
+        .onReceive(videoStage.$snapshot.removeDuplicates().receive(on: RunLoop.main)) { snapshot in
+            audienceServer.publishStageSnapshot(StageSnapshotPayload.fromVideoStageSnapshot(snapshot))
         }
         .onChange(of: isReplayRunning) { _, running in
             if running {
@@ -2044,15 +2056,19 @@ struct ContentView: View {
                 startSelectedProfile()
             }
         } label: {
-            Label(client.isRunning ? "Stop" : "Start", systemImage: client.isRunning ? "stop.fill" : "play.fill")
+            if isTransportTransitioning {
+                Label("Working", systemImage: "hourglass")
+            } else {
+                Label(client.isRunning ? "Stop" : "Start", systemImage: client.isRunning ? "stop.fill" : "play.fill")
+            }
         }
         .shellActionButton(
             role: .primaryTransport,
-            accent: client.isRunning ? ShellChromePalette.dangerRed : ShellChromePalette.startGreen
+            accent: isTransportTransitioning ? ShellChromePalette.accentBlue : (client.isRunning ? ShellChromePalette.dangerRed : ShellChromePalette.startGreen)
         )
         .keyboardShortcut(.space, modifiers: [])
         .accessibilityIdentifier("control_room.start_stop")
-        .disabled(isReplayRunning)
+        .disabled(isReplayRunning || isTransportTransitioning)
     }
 
     @ViewBuilder
@@ -4244,14 +4260,13 @@ struct ContentView: View {
     }
 
     private func startSelectedProfile() {
+        guard !isTransportTransitioning else { return }
         if isReplayRunning {
             stopReplay()
         }
         replayStatus = nil
+        isTransportTransitioning = true
 
-        analyzer.start()
-        audio.start()
-        syncLiveInputCaptureInfo()
         client.featuresProvider = { [weak analyzer] in
             analyzer?.snapshotFrame() ?? FeaturePacketSnapshot(
                 features: Features(
@@ -4275,18 +4290,24 @@ struct ContentView: View {
             client.interventionsProvider = nil
         }
 
-        client.onModelOut = { [weak audio, modeEngine] out, _, sentButtons in
+        client.onModelOut = { [weak audio, modeEngine, weak audienceServer, weak videoStage] out, _, sentButtons in
             guard let audio else { return }
             DispatchQueue.main.async {
-                let control = modeEngine.makeControl(out: out, sentButtons: sentButtons)
+                var influencedOut = out
+                if let audienceServer,
+                   let telemetry = audienceServer.applyAudienceOverlay(to: &influencedOut) {
+                    videoStage?.ingestAudienceInfluenceTelemetry(telemetry)
+                }
+                let control = modeEngine.makeControl(out: influencedOut, sentButtons: sentButtons)
                 audio.apply(control: control)
             }
         }
 
         client.setMode(mode)
 
+        let shouldRecordInputAudio = (runMode == .training ? recordInputAudio : false)
         client.startLoop(
-            recordInputAudio: runMode == .training ? recordInputAudio : false,
+            recordInputAudio: shouldRecordInputAudio,
             replayMode: false,
             replayedSessionId: nil,
             runMode: runMode
@@ -4296,64 +4317,120 @@ struct ContentView: View {
         syncSessionOutputRouteMetadata()
         client.setReplayContext(replayMode: false, replayedSessionId: nil)
         client.setReplayAudioMissing(false)
+        let inputAudioPathForRecording = shouldRecordInputAudio ? client.inputAudioPath : nil
 
-        if runMode == .training && recordInputAudio, let path = client.inputAudioPath {
-            do {
-                let info = try audio.startInputRecording(to: URL(fileURLWithPath: path), fileFormat: "caf")
-                client.configureSessionInputAudio(sampleRate: info.sampleRate, channels: info.channels, format: info.format, path: path)
-                controlRoom.appendEvent("Input audio recording enabled.", severity: .info)
-            } catch {
-                replayStatus = "Input audio recording failed: \(error.localizedDescription)"
-                let inputInfo = analyzer.currentCaptureInfo()
-                client.configureSessionInputAudio(sampleRate: inputInfo.sampleRate, channels: inputInfo.channels, format: inputInfo.format, path: nil)
-                controlRoom.appendEvent("Input audio recording failed.", severity: .warning)
+        DispatchQueue.global(qos: .userInitiated).async { [analyzer, audio] in
+            analyzer.start()
+            audio.start()
+
+            var recordingError: Error?
+            var recordingInfo: (sampleRate: Double, channels: Int, format: String, path: String)?
+            if let path = inputAudioPathForRecording {
+                do {
+                    let info = try audio.startInputRecording(to: URL(fileURLWithPath: path), fileFormat: "caf")
+                    recordingInfo = (sampleRate: info.sampleRate, channels: info.channels, format: info.format, path: path)
+                } catch {
+                    recordingError = error
+                }
             }
-        } else {
-            let inputInfo = analyzer.currentCaptureInfo()
-            client.configureSessionInputAudio(sampleRate: inputInfo.sampleRate, channels: inputInfo.channels, format: inputInfo.format, path: nil)
-            controlRoom.appendEvent("Started \(runMode.title.lowercased()) run.", severity: .info)
+
+            DispatchQueue.main.async {
+                speechTranscriber.start()
+                if let recordingInfo {
+                    client.configureSessionInputAudio(
+                        sampleRate: recordingInfo.sampleRate,
+                        channels: recordingInfo.channels,
+                        format: recordingInfo.format,
+                        path: recordingInfo.path
+                    )
+                    controlRoom.appendEvent("Input audio recording enabled.", severity: .info)
+                } else {
+                    if let recordingError {
+                        replayStatus = "Input audio recording failed: \(recordingError.localizedDescription)"
+                        controlRoom.appendEvent("Input audio recording failed.", severity: .warning)
+                    }
+                    let inputInfo = analyzer.currentCaptureInfo()
+                    client.configureSessionInputAudio(
+                        sampleRate: inputInfo.sampleRate,
+                        channels: inputInfo.channels,
+                        format: inputInfo.format,
+                        path: nil
+                    )
+                    controlRoom.appendEvent("Started \(runMode.title.lowercased()) run.", severity: .info)
+                }
+                syncLiveInputCaptureInfo()
+                syncSessionInputRouteMetadata()
+                syncSessionOutputRouteMetadata()
+                isTransportTransitioning = false
+            }
         }
     }
 
     private func stopAll() {
+        guard !isTransportTransitioning else { return }
+        isTransportTransitioning = true
         releaseAllJoltHolds()
         if isReplayRunning {
             stopReplay()
         }
-        if runMode == .training {
-            if let summary = audio.stopInputRecording() {
-                client.configureSessionInputAudio(sampleRate: summary.sampleRate, channels: summary.channels, format: summary.fileFormat, path: summary.outputURL.path)
-                if let alignment = summary.alignment {
-                    client.noteSessionAudioAlignment(hostTime: alignment.hostTime, sampleIndex: alignment.sampleIndex)
-                }
-            }
-        }
         client.stopLoop()
-        audio.stop()
-        analyzer.stop()
+        speechTranscriber.stop()
 
-        if runMode == .training {
-            if let sid = client.activeSessionId {
-                replaySessionId = sid
-            }
-            if let p = client.logPath {
-                replayPath = p
+        let shouldCollectTrainingSummary = (runMode == .training)
+        DispatchQueue.global(qos: .userInitiated).async { [audio, analyzer] in
+            let summary = shouldCollectTrainingSummary ? audio.stopInputRecording() : nil
+            audio.stop()
+            analyzer.stop()
+
+            DispatchQueue.main.async {
+                if let summary {
+                    client.configureSessionInputAudio(
+                        sampleRate: summary.sampleRate,
+                        channels: summary.channels,
+                        format: summary.fileFormat,
+                        path: summary.outputURL.path
+                    )
+                    if let alignment = summary.alignment {
+                        client.noteSessionAudioAlignment(hostTime: alignment.hostTime, sampleIndex: alignment.sampleIndex)
+                    }
+                }
+
+                if runMode == .training {
+                    if let sid = client.activeSessionId {
+                        replaySessionId = sid
+                    }
+                    if let p = client.logPath {
+                        replayPath = p
+                    }
+                }
+                syncLiveInputCaptureInfo()
+                syncSessionInputRouteMetadata()
+                syncSessionOutputRouteMetadata()
+                controlRoom.appendEvent("Run stopped.", severity: .info)
+                isTransportTransitioning = false
             }
         }
-        controlRoom.appendEvent("Run stopped.", severity: .info)
     }
 
     private func startReplaySession() {
         let sessionId = replayResolvedSessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !sessionId.isEmpty else { return }
         guard !isReplayRunning else { return }
+        guard !isTransportTransitioning else {
+            replayStatus = "Transport busy. Try replay again in a moment."
+            controlRoom.setReplayStatus(replayStatus)
+            return
+        }
         releaseAllJoltHolds()
         replaySessionId = sessionId
 
-        analyzer.stop()
         if client.isRunning {
             stopAll()
+            replayStatus = "Stopping live run. Tap replay again."
+            controlRoom.setReplayStatus(replayStatus)
+            return
         }
+        analyzer.stop()
         audio.startReplayEngineIfNeeded()
         controlRoom.resetReplayAlignment()
 

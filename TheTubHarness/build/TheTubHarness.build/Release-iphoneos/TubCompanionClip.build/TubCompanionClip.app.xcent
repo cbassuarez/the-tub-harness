@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>application-identifier</key>
+	<string>S74572Q65M.com.StageDevices.TheTubHarness.Clip</string>
+	<key>com.apple.developer.on-demand-install-capable</key>
+	<true/>
+	<key>com.apple.developer.parent-application-identifiers</key>
+	<array>
+		<string>S74572Q65M.com.StageDevices.TheTubHarness</string>
+	</array>
+	<key>com.apple.developer.team-identifier</key>
+	<string>S74572Q65M</string>
+	<key>get-task-allow</key>
+	<true/>
+</dict>
+</plist>

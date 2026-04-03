@@ -703,7 +703,7 @@ private struct StageTerminalLogLayer: View {
                     .foregroundStyle(StageIndustrialPalette.signal.color.opacity(baseOpacity * fade))
                     .shadow(color: StageIndustrialPalette.signal.color.opacity(glowIntensity * 0.25 * fade), radius: 8, x: 0, y: 0)
                     .multilineTextAlignment(.trailing)
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

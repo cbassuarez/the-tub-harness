@@ -1,0 +1,4 @@
+Target dependency graph (2 targets)
+Target 'TheTubHarness' in project 'TheTubHarness'
+➜ Explicit dependency on target 'TubCompanionClip' in project 'TheTubHarness'
+Target 'TubCompanionClip' in project 'TheTubHarness' (no dependencies)

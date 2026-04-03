@@ -1,0 +1,26 @@
+{
+  "" : {
+    "const-values" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-primary.swiftconstvalues",
+    "dependencies" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-primary.d",
+    "diagnostics" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-primary.dia",
+    "emit-module-dependencies" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-primary-emit-module.dia",
+    "pch" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClip-primary.swiftdeps"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TubCompanionClip/ClipLaunchView.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/ClipLaunchView.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/ClipLaunchView.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/ClipLaunchView.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/TubCompanionClip/TubCompanionClipApp.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClipApp.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClipApp.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/TubCompanionClipApp.o"
+  },
+  "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/DerivedSources/GeneratedAssetSymbols.swift" : {
+    "index-unit-output-path" : "/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/GeneratedAssetSymbols.o",
+    "llvm-bc" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/GeneratedAssetSymbols.bc",
+    "object" : "/Users/seb/the-tub-harness/TheTubHarness/build/TheTubHarness.build/Release-iphoneos/TubCompanionClip.build/Objects-normal/arm64/GeneratedAssetSymbols.o"
+  }
+}

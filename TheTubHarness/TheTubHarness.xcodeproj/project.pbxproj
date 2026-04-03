@@ -7,6 +7,41 @@
 	objects = {
 
 /* Begin PBXContainerItemProxy section */
+		9659675F2F7C9B1500576DAD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 96607F672F71D624001440A1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9659674C2F7C9B1500576DAD;
+			remoteInfo = TubCompanion;
+		};
+		965967692F7C9B1500576DAD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 96607F672F71D624001440A1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9659674C2F7C9B1500576DAD;
+			remoteInfo = TubCompanion;
+		};
+		9659679F2F7C9B2C00576DAD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 96607F672F71D624001440A1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9659678A2F7C9B2B00576DAD;
+			remoteInfo = TubCompanionClip;
+		};
+		965967A92F7C9B2C00576DAD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 96607F672F71D624001440A1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9659678A2F7C9B2B00576DAD;
+			remoteInfo = TubCompanionClip;
+		};
+		965967B02F7C9B2C00576DAD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 96607F672F71D624001440A1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9659678A2F7C9B2B00576DAD;
+			remoteInfo = TubCompanionClip;
+		};
 		96607F822F71D626001440A1 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 96607F672F71D624001440A1 /* Project object */;
@@ -23,27 +58,126 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		965967B72F7C9B2C00576DAD /* Embed App Clips */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
+			dstSubfolderSpec = 16;
+			files = (
+			);
+			name = "Embed App Clips";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		9659674D2F7C9B1500576DAD /* TubCompanion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TubCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9659675E2F7C9B1500576DAD /* TubCompanionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TubCompanionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		965967682F7C9B1500576DAD /* TubCompanionUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TubCompanionUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		9659678B2F7C9B2B00576DAD /* TubCompanionClip.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TubCompanionClip.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9659679E2F7C9B2C00576DAD /* TubCompanionClipTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TubCompanionClipTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		965967A82F7C9B2C00576DAD /* TubCompanionClipUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TubCompanionClipUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		96607F6F2F71D624001440A1 /* TheTubHarness.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TheTubHarness.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		96607F812F71D626001440A1 /* TheTubHarnessTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TheTubHarnessTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		96607F8B2F71D626001440A1 /* TheTubHarnessUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TheTubHarnessUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		965967B62F7C9B2C00576DAD /* Exceptions for "TubCompanionClip" folder in "TubCompanionClip" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 9659678A2F7C9B2B00576DAD /* TubCompanionClip */;
+		};
+		965967D32F7C9EA200576DAD /* Exceptions for "TheTubHarness" folder in "TubCompanion" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				LooperEngine.swift,
+				SharedTypes.swift,
+			);
+			target = 9659674C2F7C9B1500576DAD /* TubCompanion */;
+		};
 		965BBC1B2F7A79F10048C8AB /* Exceptions for "TheTubHarness" folder in "TheTubHarness" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				LooperEngine.swift,
 			);
 			target = 96607F6E2F71D624001440A1 /* TheTubHarness */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		965966C82F7C985C00576DAD /* THE TUB */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "THE TUB";
+			sourceTree = "<group>";
+		};
+		965966DB2F7C985D00576DAD /* THE TUBTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "THE TUBTests";
+			sourceTree = "<group>";
+		};
+		965966E52F7C985D00576DAD /* THE TUBUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "THE TUBUITests";
+			sourceTree = "<group>";
+		};
+		965966F82F7C98F500576DAD /* THE TUB-link */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "THE TUB-link";
+			sourceTree = "<group>";
+		};
+		9659670D2F7C98F500576DAD /* THE TUB-linkTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "THE TUB-linkTests";
+			sourceTree = "<group>";
+		};
+		965967172F7C98F500576DAD /* THE TUB-linkUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "THE TUB-linkUITests";
+			sourceTree = "<group>";
+		};
+		9659674E2F7C9B1500576DAD /* TubCompanion */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = TubCompanion;
+			sourceTree = "<group>";
+		};
+		965967612F7C9B1500576DAD /* TubCompanionTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = TubCompanionTests;
+			sourceTree = "<group>";
+		};
+		9659676B2F7C9B1500576DAD /* TubCompanionUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = TubCompanionUITests;
+			sourceTree = "<group>";
+		};
+		9659678C2F7C9B2B00576DAD /* TubCompanionClip */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				965967B62F7C9B2C00576DAD /* Exceptions for "TubCompanionClip" folder in "TubCompanionClip" target */,
+			);
+			path = TubCompanionClip;
+			sourceTree = "<group>";
+		};
+		965967A12F7C9B2C00576DAD /* TubCompanionClipTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = TubCompanionClipTests;
+			sourceTree = "<group>";
+		};
+		965967AB2F7C9B2C00576DAD /* TubCompanionClipUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = TubCompanionClipUITests;
+			sourceTree = "<group>";
+		};
 		96607F712F71D624001440A1 /* TheTubHarness */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				965BBC1B2F7A79F10048C8AB /* Exceptions for "TheTubHarness" folder in "TheTubHarness" target */,
+				965967D32F7C9EA200576DAD /* Exceptions for "TheTubHarness" folder in "TubCompanion" target */,
 			);
 			path = TheTubHarness;
 			sourceTree = "<group>";
@@ -61,6 +195,48 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		9659674A2F7C9B1500576DAD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9659675B2F7C9B1500576DAD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		965967652F7C9B1500576DAD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		965967882F7C9B2B00576DAD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9659679B2F7C9B2C00576DAD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		965967A52F7C9B2C00576DAD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		96607F6C2F71D624001440A1 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -91,6 +267,18 @@
 				96607F712F71D624001440A1 /* TheTubHarness */,
 				96607F842F71D626001440A1 /* TheTubHarnessTests */,
 				96607F8E2F71D626001440A1 /* TheTubHarnessUITests */,
+				965966C82F7C985C00576DAD /* THE TUB */,
+				965966DB2F7C985D00576DAD /* THE TUBTests */,
+				965966E52F7C985D00576DAD /* THE TUBUITests */,
+				965966F82F7C98F500576DAD /* THE TUB-link */,
+				9659670D2F7C98F500576DAD /* THE TUB-linkTests */,
+				965967172F7C98F500576DAD /* THE TUB-linkUITests */,
+				9659674E2F7C9B1500576DAD /* TubCompanion */,
+				965967612F7C9B1500576DAD /* TubCompanionTests */,
+				9659676B2F7C9B1500576DAD /* TubCompanionUITests */,
+				9659678C2F7C9B2B00576DAD /* TubCompanionClip */,
+				965967A12F7C9B2C00576DAD /* TubCompanionClipTests */,
+				965967AB2F7C9B2C00576DAD /* TubCompanionClipUITests */,
 				96607F702F71D624001440A1 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -101,6 +289,12 @@
 				96607F6F2F71D624001440A1 /* TheTubHarness.app */,
 				96607F812F71D626001440A1 /* TheTubHarnessTests.xctest */,
 				96607F8B2F71D626001440A1 /* TheTubHarnessUITests.xctest */,
+				9659674D2F7C9B1500576DAD /* TubCompanion.app */,
+				9659675E2F7C9B1500576DAD /* TubCompanionTests.xctest */,
+				965967682F7C9B1500576DAD /* TubCompanionUITests.xctest */,
+				9659678B2F7C9B2B00576DAD /* TubCompanionClip.app */,
+				9659679E2F7C9B2C00576DAD /* TubCompanionClipTests.xctest */,
+				965967A82F7C9B2C00576DAD /* TubCompanionClipUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -108,6 +302,142 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		9659674C2F7C9B1500576DAD /* TubCompanion */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 965967702F7C9B1500576DAD /* Build configuration list for PBXNativeTarget "TubCompanion" */;
+			buildPhases = (
+				965967492F7C9B1500576DAD /* Sources */,
+				9659674A2F7C9B1500576DAD /* Frameworks */,
+				9659674B2F7C9B1500576DAD /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				9659674E2F7C9B1500576DAD /* TubCompanion */,
+			);
+			name = TubCompanion;
+			packageProductDependencies = (
+			);
+			productName = TubCompanion;
+			productReference = 9659674D2F7C9B1500576DAD /* TubCompanion.app */;
+			productType = "com.apple.product-type.application";
+		};
+		9659675D2F7C9B1500576DAD /* TubCompanionTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 965967732F7C9B1500576DAD /* Build configuration list for PBXNativeTarget "TubCompanionTests" */;
+			buildPhases = (
+				9659675A2F7C9B1500576DAD /* Sources */,
+				9659675B2F7C9B1500576DAD /* Frameworks */,
+				9659675C2F7C9B1500576DAD /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				965967602F7C9B1500576DAD /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				965967612F7C9B1500576DAD /* TubCompanionTests */,
+			);
+			name = TubCompanionTests;
+			packageProductDependencies = (
+			);
+			productName = TubCompanionTests;
+			productReference = 9659675E2F7C9B1500576DAD /* TubCompanionTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		965967672F7C9B1500576DAD /* TubCompanionUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 965967762F7C9B1500576DAD /* Build configuration list for PBXNativeTarget "TubCompanionUITests" */;
+			buildPhases = (
+				965967642F7C9B1500576DAD /* Sources */,
+				965967652F7C9B1500576DAD /* Frameworks */,
+				965967662F7C9B1500576DAD /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9659676A2F7C9B1500576DAD /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				9659676B2F7C9B1500576DAD /* TubCompanionUITests */,
+			);
+			name = TubCompanionUITests;
+			packageProductDependencies = (
+			);
+			productName = TubCompanionUITests;
+			productReference = 965967682F7C9B1500576DAD /* TubCompanionUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		9659678A2F7C9B2B00576DAD /* TubCompanionClip */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 965967B32F7C9B2C00576DAD /* Build configuration list for PBXNativeTarget "TubCompanionClip" */;
+			buildPhases = (
+				965967872F7C9B2B00576DAD /* Sources */,
+				965967882F7C9B2B00576DAD /* Frameworks */,
+				965967892F7C9B2B00576DAD /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				9659678C2F7C9B2B00576DAD /* TubCompanionClip */,
+			);
+			name = TubCompanionClip;
+			packageProductDependencies = (
+			);
+			productName = TubCompanionClip;
+			productReference = 9659678B2F7C9B2B00576DAD /* TubCompanionClip.app */;
+			productType = "com.apple.product-type.application.on-demand-install-capable";
+		};
+		9659679D2F7C9B2C00576DAD /* TubCompanionClipTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 965967B82F7C9B2C00576DAD /* Build configuration list for PBXNativeTarget "TubCompanionClipTests" */;
+			buildPhases = (
+				9659679A2F7C9B2C00576DAD /* Sources */,
+				9659679B2F7C9B2C00576DAD /* Frameworks */,
+				9659679C2F7C9B2C00576DAD /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				965967A02F7C9B2C00576DAD /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				965967A12F7C9B2C00576DAD /* TubCompanionClipTests */,
+			);
+			name = TubCompanionClipTests;
+			packageProductDependencies = (
+			);
+			productName = TubCompanionClipTests;
+			productReference = 9659679E2F7C9B2C00576DAD /* TubCompanionClipTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		965967A72F7C9B2C00576DAD /* TubCompanionClipUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 965967BB2F7C9B2C00576DAD /* Build configuration list for PBXNativeTarget "TubCompanionClipUITests" */;
+			buildPhases = (
+				965967A42F7C9B2C00576DAD /* Sources */,
+				965967A52F7C9B2C00576DAD /* Frameworks */,
+				965967A62F7C9B2C00576DAD /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				965967AA2F7C9B2C00576DAD /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				965967AB2F7C9B2C00576DAD /* TubCompanionClipUITests */,
+			);
+			name = TubCompanionClipUITests;
+			packageProductDependencies = (
+			);
+			productName = TubCompanionClipUITests;
+			productReference = 965967A82F7C9B2C00576DAD /* TubCompanionClipUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		96607F6E2F71D624001440A1 /* TheTubHarness */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 96607F952F71D626001440A1 /* Build configuration list for PBXNativeTarget "TheTubHarness" */;
@@ -115,10 +445,12 @@
 				96607F6B2F71D624001440A1 /* Sources */,
 				96607F6C2F71D624001440A1 /* Frameworks */,
 				96607F6D2F71D624001440A1 /* Resources */,
+				965967B72F7C9B2C00576DAD /* Embed App Clips */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				965967B12F7C9B2C00576DAD /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				96607F712F71D624001440A1 /* TheTubHarness */,
@@ -186,6 +518,28 @@
 				LastSwiftUpdateCheck = 2600;
 				LastUpgradeCheck = 2600;
 				TargetAttributes = {
+					9659674C2F7C9B1500576DAD = {
+						CreatedOnToolsVersion = 26.0.1;
+					};
+					9659675D2F7C9B1500576DAD = {
+						CreatedOnToolsVersion = 26.0.1;
+						TestTargetID = 9659674C2F7C9B1500576DAD;
+					};
+					965967672F7C9B1500576DAD = {
+						CreatedOnToolsVersion = 26.0.1;
+						TestTargetID = 9659674C2F7C9B1500576DAD;
+					};
+					9659678A2F7C9B2B00576DAD = {
+						CreatedOnToolsVersion = 26.0.1;
+					};
+					9659679D2F7C9B2C00576DAD = {
+						CreatedOnToolsVersion = 26.0.1;
+						TestTargetID = 9659678A2F7C9B2B00576DAD;
+					};
+					965967A72F7C9B2C00576DAD = {
+						CreatedOnToolsVersion = 26.0.1;
+						TestTargetID = 9659678A2F7C9B2B00576DAD;
+					};
 					96607F6E2F71D624001440A1 = {
 						CreatedOnToolsVersion = 26.0.1;
 					};
@@ -216,11 +570,59 @@
 				96607F6E2F71D624001440A1 /* TheTubHarness */,
 				96607F802F71D626001440A1 /* TheTubHarnessTests */,
 				96607F8A2F71D626001440A1 /* TheTubHarnessUITests */,
+				9659674C2F7C9B1500576DAD /* TubCompanion */,
+				9659675D2F7C9B1500576DAD /* TubCompanionTests */,
+				965967672F7C9B1500576DAD /* TubCompanionUITests */,
+				9659678A2F7C9B2B00576DAD /* TubCompanionClip */,
+				9659679D2F7C9B2C00576DAD /* TubCompanionClipTests */,
+				965967A72F7C9B2C00576DAD /* TubCompanionClipUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		9659674B2F7C9B1500576DAD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9659675C2F7C9B1500576DAD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		965967662F7C9B1500576DAD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		965967892F7C9B2B00576DAD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9659679C2F7C9B2C00576DAD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		965967A62F7C9B2C00576DAD /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		96607F6D2F71D624001440A1 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -245,6 +647,48 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		965967492F7C9B1500576DAD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9659675A2F7C9B1500576DAD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		965967642F7C9B1500576DAD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		965967872F7C9B2B00576DAD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9659679A2F7C9B2C00576DAD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		965967A42F7C9B2C00576DAD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		96607F6B2F71D624001440A1 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -269,6 +713,31 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		965967602F7C9B1500576DAD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9659674C2F7C9B1500576DAD /* TubCompanion */;
+			targetProxy = 9659675F2F7C9B1500576DAD /* PBXContainerItemProxy */;
+		};
+		9659676A2F7C9B1500576DAD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9659674C2F7C9B1500576DAD /* TubCompanion */;
+			targetProxy = 965967692F7C9B1500576DAD /* PBXContainerItemProxy */;
+		};
+		965967A02F7C9B2C00576DAD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9659678A2F7C9B2B00576DAD /* TubCompanionClip */;
+			targetProxy = 9659679F2F7C9B2C00576DAD /* PBXContainerItemProxy */;
+		};
+		965967AA2F7C9B2C00576DAD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9659678A2F7C9B2B00576DAD /* TubCompanionClip */;
+			targetProxy = 965967A92F7C9B2C00576DAD /* PBXContainerItemProxy */;
+		};
+		965967B12F7C9B2C00576DAD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9659678A2F7C9B2B00576DAD /* TubCompanionClip */;
+			targetProxy = 965967B02F7C9B2C00576DAD /* PBXContainerItemProxy */;
+		};
 		96607F832F71D626001440A1 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 96607F6E2F71D624001440A1 /* TheTubHarness */;
@@ -282,6 +751,383 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		965967712F7C9B1500576DAD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "THE TUB";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "THE TUB requests access to your local network to allow you to share audio directly with THE TUB. Audio is kept in-buffer for the duration of the event.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "THE TUB requests access to your microphone to allow you to create music with THE TUB.";
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = NO;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = NO;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.TubCompanion;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator xros xrsimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				XROS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		965967722F7C9B1500576DAD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "THE TUB";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "THE TUB requests access to your local network to allow you to share audio directly with THE TUB. Audio is kept in-buffer for the duration of the event.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "THE TUB requests access to your microphone to allow you to create music with THE TUB.";
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = NO;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = NO;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.TubCompanion;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator xros xrsimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				XROS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
+		965967742F7C9B1500576DAD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.TubCompanionTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TubCompanion.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TubCompanion";
+				XROS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		965967752F7C9B1500576DAD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.TubCompanionTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TubCompanion.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TubCompanion";
+				XROS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
+		965967772F7C9B1500576DAD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.TubCompanionUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TEST_TARGET_NAME = TubCompanion;
+				XROS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		965967782F7C9B1500576DAD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.TubCompanionUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TEST_TARGET_NAME = TubCompanion;
+				XROS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
+		965967B42F7C9B2C00576DAD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = TubCompanionClip/TubCompanionClip.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = TubCompanionClip/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = TheTubHarness;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.Clip;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		965967B52F7C9B2C00576DAD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = TubCompanionClip/TubCompanionClip.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = TubCompanionClip/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = TheTubHarness;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.Clip;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		965967B92F7C9B2C00576DAD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.TubCompanionClipTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TubCompanionClip.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TubCompanionClip";
+			};
+			name = Debug;
+		};
+		965967BA2F7C9B2C00576DAD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.TubCompanionClipTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TubCompanionClip.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TubCompanionClip";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		965967BC2F7C9B2C00576DAD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.TubCompanionClipUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = TubCompanionClip;
+			};
+			name = Debug;
+		};
+		965967BD2F7C9B2C00576DAD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = S74572Q65M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness.TubCompanionClipUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = TubCompanionClip;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 		96607F932F71D626001440A1 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -403,6 +1249,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = S74572Q65M;
@@ -442,6 +1290,7 @@
 				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -461,6 +1310,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = S74572Q65M;
@@ -500,6 +1351,7 @@
 				MARKETING_VERSION = 0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.StageDevices.TheTubHarness;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -619,6 +1471,60 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		965967702F7C9B1500576DAD /* Build configuration list for PBXNativeTarget "TubCompanion" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				965967712F7C9B1500576DAD /* Debug */,
+				965967722F7C9B1500576DAD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		965967732F7C9B1500576DAD /* Build configuration list for PBXNativeTarget "TubCompanionTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				965967742F7C9B1500576DAD /* Debug */,
+				965967752F7C9B1500576DAD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		965967762F7C9B1500576DAD /* Build configuration list for PBXNativeTarget "TubCompanionUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				965967772F7C9B1500576DAD /* Debug */,
+				965967782F7C9B1500576DAD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		965967B32F7C9B2C00576DAD /* Build configuration list for PBXNativeTarget "TubCompanionClip" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				965967B42F7C9B2C00576DAD /* Debug */,
+				965967B52F7C9B2C00576DAD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		965967B82F7C9B2C00576DAD /* Build configuration list for PBXNativeTarget "TubCompanionClipTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				965967B92F7C9B2C00576DAD /* Debug */,
+				965967BA2F7C9B2C00576DAD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		965967BB2F7C9B2C00576DAD /* Build configuration list for PBXNativeTarget "TubCompanionClipUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				965967BC2F7C9B2C00576DAD /* Debug */,
+				965967BD2F7C9B2C00576DAD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		96607F6A2F71D624001440A1 /* Build configuration list for PBXProject "TheTubHarness" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

@@ -37,6 +37,7 @@ struct TheTubHarnessApp: App {
     let persistenceController = PersistenceController.shared
     private let defaultRecordInputAudio: Bool
     @State private var selectedMode: HarnessRunMode?
+    @StateObject private var audienceServer = AudienceSessionServer()
 
     init() {
         let args = ProcessInfo.processInfo.arguments
@@ -53,12 +54,20 @@ struct TheTubHarnessApp: App {
                 if let mode = selectedMode {
                     ContentView(runMode: mode, defaultRecordInputAudio: defaultRecordInputAudio)
                         .environment(\.managedObjectContext, persistenceController.container.viewContext)
+                        .environmentObject(audienceServer)
                 } else {
                     ModeChooserView { mode in
                         HarnessRunModeStorage.save(mode)
                         selectedMode = mode
                     }
+                    .environmentObject(audienceServer)
                 }
+            }
+            .onAppear {
+                audienceServer.startListening(on: 9911)
+            }
+            .onDisappear {
+                audienceServer.stopListening()
             }
         }
         .commands {

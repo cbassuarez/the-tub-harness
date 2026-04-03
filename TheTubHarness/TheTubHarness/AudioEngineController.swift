@@ -774,54 +774,23 @@ final class AudioEngineController: ObservableObject {
                 isAudioRunning = true
                 audioError = nil
             } catch {
-                isAudioRunning = false
-                audioError = "output driver start error: \(error.localizedDescription)"
+                liveOutputDriver.stop()
+                let fallbackStarted = startEngineOutputGraph(
+                    sampleRate: sampleRate,
+                    outputChannels: outputChannels,
+                    useEngineLiveInputTap: useEngineLiveInputTap
+                )
+                if !fallbackStarted {
+                    isAudioRunning = false
+                    audioError = "output driver start error: \(error.localizedDescription). \(audioError ?? "fallback unavailable")"
+                }
             }
         } else {
-            if let sourceNode {
-                engine.disconnectNodeInput(sourceNode)
-                engine.disconnectNodeOutput(sourceNode)
-                engine.detach(sourceNode)
-                self.sourceNode = nil
-            }
-
-            guard let renderFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
+            _ = startEngineOutputGraph(
                 sampleRate: sampleRate,
-                channels: AVAudioChannelCount(outputChannels),
-                interleaved: false
-            ) else {
-                isAudioRunning = false
-                audioError = "engine start error: could not create render format for output \(activeName) (\(outputChannels)ch @ \(Int(sampleRate)) Hz)"
-                return
-            }
-
-            let src = AVAudioSourceNode(format: renderFormat) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-                self?.renderState.render(frameCount: frameCount, audioBufferList: audioBufferList)
-                return noErr
-            }
-            self.sourceNode = src
-            engine.attach(src)
-            engine.disconnectNodeInput(outputMixer)
-            engine.disconnectNodeOutput(outputMixer)
-            engine.connect(src, to: outputMixer, format: renderFormat)
-            engine.connect(outputMixer, to: engine.outputNode, format: renderFormat)
-            outputMixer.outputVolume = 1.0
-
-            self.usesEngineLiveInputTap = useEngineLiveInputTap
-            if useEngineLiveInputTap {
-                configureLiveInputTap()
-            }
-
-            do {
-                engine.prepare()
-                try engine.start()
-                isAudioRunning = true
-                audioError = nil
-            } catch {
-                isAudioRunning = false
-                audioError = "engine start error: \(error)"
-            }
+                outputChannels: outputChannels,
+                useEngineLiveInputTap: useEngineLiveInputTap
+            )
         }
 
         preferredOutputUID = activeUID.isEmpty ? preferredOutputUID : activeUID
@@ -835,6 +804,61 @@ final class AudioEngineController: ObservableObject {
             self.outputRouteWarning = routeDecision.warning
             self.outputProfile = profile
             self.outputDevices = CoreAudioOutputCatalog.listOutputDevices()
+        }
+    }
+
+    @discardableResult
+    private func startEngineOutputGraph(
+        sampleRate: Double,
+        outputChannels: Int,
+        useEngineLiveInputTap: Bool
+    ) -> Bool {
+        liveOutputDriver.stop()
+        if let sourceNode {
+            engine.disconnectNodeInput(sourceNode)
+            engine.disconnectNodeOutput(sourceNode)
+            engine.detach(sourceNode)
+            self.sourceNode = nil
+        }
+
+        guard let renderFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: AVAudioChannelCount(outputChannels),
+            interleaved: false
+        ) else {
+            isAudioRunning = false
+            audioError = "engine start error: could not create render format (\(outputChannels)ch @ \(Int(sampleRate)) Hz)"
+            return false
+        }
+
+        let src = AVAudioSourceNode(format: renderFormat) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
+            self?.renderState.render(frameCount: frameCount, audioBufferList: audioBufferList)
+            return noErr
+        }
+        self.sourceNode = src
+        engine.attach(src)
+        engine.disconnectNodeInput(outputMixer)
+        engine.disconnectNodeOutput(outputMixer)
+        engine.connect(src, to: outputMixer, format: renderFormat)
+        engine.connect(outputMixer, to: engine.outputNode, format: renderFormat)
+        outputMixer.outputVolume = 1.0
+
+        self.usesEngineLiveInputTap = useEngineLiveInputTap
+        if useEngineLiveInputTap {
+            configureLiveInputTap()
+        }
+
+        do {
+            engine.prepare()
+            try engine.start()
+            isAudioRunning = true
+            audioError = nil
+            return true
+        } catch {
+            isAudioRunning = false
+            audioError = "engine start error: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -4245,6 +4269,43 @@ nonisolated private final class MasterRenderState {
         return out
     }
 
+    private func mode4NormalizedAssetId(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func mode4ExpandedAssets(bankId: String, manifestAssets: [BankAsset], fallbackPool: [URL]) -> [BankAsset] {
+        guard bankId == "samples_A", !fallbackPool.isEmpty else {
+            return manifestAssets
+        }
+
+        var merged = manifestAssets
+        var seenIds = Set(manifestAssets.map { mode4NormalizedAssetId($0.id) })
+        var seenBasenames = Set(manifestAssets.map { mode4PathBasename($0.path).lowercased() })
+
+        for fileURL in fallbackPool {
+            let basename = fileURL.lastPathComponent.lowercased()
+            if seenBasenames.contains(basename) {
+                continue
+            }
+            let derivedId = mode4NormalizedAssetId((basename as NSString).deletingPathExtension)
+            if derivedId.isEmpty || seenIds.contains(derivedId) {
+                continue
+            }
+            merged.append(
+                BankAsset(
+                    id: derivedId,
+                    path: fileURL.path,
+                    gain: nil,
+                    category: "general"
+                )
+            )
+            seenIds.insert(derivedId)
+            seenBasenames.insert(basename)
+        }
+
+        return merged
+    }
+
     private func mode4PathBasename(_ path: String) -> String {
         URL(fileURLWithPath: path).lastPathComponent
     }
@@ -4508,7 +4569,6 @@ nonisolated private final class MasterRenderState {
         }
 
         var loaded: [Mode4SampleClip] = []
-        loaded.reserveCapacity(bank.assets.count)
         let fallbackDirs = Array(
             Set(
                 bank.assets.map { asset in
@@ -4517,10 +4577,15 @@ nonisolated private final class MasterRenderState {
             )
         )
         let fallbackPool = mode4ScanFallbackAudioFiles(relativeDirectories: fallbackDirs)
+        var assetsToLoad = mode4ExpandedAssets(bankId: bankId, manifestAssets: bank.assets, fallbackPool: fallbackPool)
+        if assetsToLoad.count > bank.assets.count {
+            mode4LoadInterventions.append("mode4_asset_pool_expanded:\(bank.assets.count)->\(assetsToLoad.count)")
+        }
+        loaded.reserveCapacity(assetsToLoad.count)
         var fallbackCursor = 0
         var consumedFallback: Set<String> = []
 
-        for asset in bank.assets {
+        for asset in assetsToLoad {
             var resolvedURL = resolveMode4AssetURL(path: asset.path)
             var usedFallback = false
             if resolvedURL == nil {

@@ -1072,6 +1072,8 @@ final class VideoStageStore: ObservableObject {
     private var speechCancellable: AnyCancellable?
     private let modeEngine = ModeEngine()
     private var latestSpeechTranscription: String?
+    private var latestSpeechTimestamp: Date?
+    private var audienceInfluence: AudienceInfluenceTelemetry?
 
     func bind(client: TubMLClient) {
         let objectID = ObjectIdentifier(client)
@@ -1137,6 +1139,7 @@ final class VideoStageStore: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] text in
                 self?.latestSpeechTranscription = text
+                self?.latestSpeechTimestamp = text?.isEmpty == false ? Date() : nil
                 self?.rebuildSnapshot()
             }
     }
@@ -1149,6 +1152,12 @@ final class VideoStageStore: ObservableObject {
     func ingestStageAudioSnapshot(_ snapshot: StageAudioSnapshot) {
         guard snapshot.materiallyDiffers(from: stageAudio) else { return }
         stageAudio = snapshot
+        rebuildSnapshot()
+    }
+
+    func ingestAudienceInfluenceTelemetry(_ telemetry: AudienceInfluenceTelemetry?) {
+        guard audienceInfluence != telemetry else { return }
+        audienceInfluence = telemetry
         rebuildSnapshot()
     }
 
@@ -1191,10 +1200,13 @@ final class VideoStageStore: ObservableObject {
         )
 
         // Merge local speech transcription into thought log.
-        if let speech = latestSpeechTranscription, !speech.isEmpty {
-            let speechLine = "Someone said: \"\(speech)\""
-            var mergedLog = built.visual.thoughtLog
-            // Insert speech at the top, cap at 5 lines.
+        if let speech = latestSpeechTranscription,
+           !speech.isEmpty,
+           let speechTimestamp = latestSpeechTimestamp,
+           Date().timeIntervalSince(speechTimestamp) <= 8 {
+            let speechLine = "VOICE: \(speech)"
+            var mergedLog = built.visual.thoughtLog.filter { !$0.hasPrefix("VOICE: ") }
+            // Insert the most recent speech line at the top, cap at 5 lines.
             mergedLog.insert(speechLine, at: 0)
             if mergedLog.count > 5 { mergedLog = Array(mergedLog.prefix(5)) }
             let mergedVisual = VisualOut(
@@ -1234,6 +1246,54 @@ final class VideoStageStore: ObservableObject {
                 thoughtLogComposedAt: built.thoughtLogComposedAt,
                 monitorSnapshot: built.monitorSnapshot
             )
+        }
+
+        if let influence = audienceInfluence {
+            let age = Date().timeIntervalSince(influence.timestamp)
+            if age <= 8 {
+                let audienceLine = influence.stageLine
+                var mergedLog = built.visual.thoughtLog.filter { !$0.hasPrefix("AUDIENCE ") }
+                mergedLog.insert(audienceLine, at: 0)
+                if mergedLog.count > 5 { mergedLog = Array(mergedLog.prefix(5)) }
+
+                let mergedVisual = VisualOut(
+                    sceneId: built.visual.sceneId,
+                    density: built.visual.density,
+                    cohesion: built.visual.cohesion,
+                    disruption: built.visual.disruption,
+                    tokenSalience: built.visual.tokenSalience,
+                    wordmarkIntegrity: built.visual.wordmarkIntegrity,
+                    decayMs: built.visual.decayMs,
+                    flashBias: built.visual.flashBias,
+                    anchorWeights: built.visual.anchorWeights,
+                    thought: built.visual.thought,
+                    thoughtLog: mergedLog
+                )
+                built = VideoStageSnapshot(
+                    mode: built.mode,
+                    isRunning: built.isRunning,
+                    isWaiting: built.isWaiting,
+                    waitingReason: built.waitingReason,
+                    latencyMs: built.latencyMs,
+                    updatedAt: built.updatedAt,
+                    wordmark: built.wordmark,
+                    sceneProfile: built.sceneProfile,
+                    visualProfile: built.visualProfile,
+                    params: built.params,
+                    picks: built.picks,
+                    changes: built.changes,
+                    sprites: built.sprites,
+                    hasAdjustments: built.hasAdjustments,
+                    joltHeld: built.joltHeld,
+                    joltBeganAt: built.joltBeganAt,
+                    joltSeed: built.joltSeed,
+                    stageAudio: built.stageAudio,
+                    visual: mergedVisual,
+                    thoughtChangedAt: built.thoughtChangedAt,
+                    thoughtLogComposedAt: built.thoughtLogComposedAt,
+                    monitorSnapshot: built.monitorSnapshot
+                )
+            }
         }
 
         snapshot = built

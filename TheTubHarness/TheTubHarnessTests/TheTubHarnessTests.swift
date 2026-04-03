@@ -116,6 +116,230 @@ struct TheTubHarnessTests {
         }
     }
 
+    @Test("AudienceSessionServer NDJSON parser handles fragmented and multi-message chunks")
+    func audienceEnvelopeFramingHandlesFragmentedChunks() throws {
+        let server = AudienceSessionServer()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        let one = AudienceEnvelope(kind: .sessionOpen, sessionId: "session-1")
+        let two = AudienceEnvelope(kind: .queryState, sessionId: "session-1")
+
+        var lineOne = try encoder.encode(one)
+        var lineTwo = try encoder.encode(two)
+        lineOne.append(0x0A)
+        lineTwo.append(0x0A)
+
+        let merged = lineOne + lineTwo
+        let splitA = merged.prefix(11)
+        let splitB = merged.dropFirst(11).prefix(9)
+        let splitC = merged.dropFirst(20)
+
+        let decoded = server.decodeEnvelopesForTesting(
+            chunks: [Data(splitA), Data(splitB), Data(splitC)]
+        )
+        #expect(decoded.count == 2)
+        #expect(decoded[0].kind == .sessionOpen)
+        #expect(decoded[1].kind == .queryState)
+    }
+
+    @Test("AudienceSessionServer routes envelope kinds into preference events")
+    func audienceEnvelopeRoutingMapsToPreferenceEvents() {
+        let server = AudienceSessionServer()
+
+        let steerEnvelope = AudienceEnvelope(
+            kind: .steerVector,
+            sessionId: "session-1",
+            steerVector: SteerVectorPayload(
+                pointX: 0.25,
+                pointY: 0.75,
+                velocityX: 0.04,
+                velocityY: -0.03,
+                intensity: 0.7,
+                descriptorId: "dense",
+                descriptorLabel: "DENSE"
+            )
+        )
+
+        let holdEnvelope = AudienceEnvelope(
+            kind: .holdState,
+            sessionId: "session-1",
+            holdState: HoldStatePayload(isHolding: false, durationSeconds: 0.9, intensity: 0.8)
+        )
+
+        let nudgeEnvelope = AudienceEnvelope(
+            kind: .intensityNudge,
+            sessionId: "session-1",
+            intensityNudge: IntensityNudgePayload(direction: .less, intensity: 1.0)
+        )
+
+        let compareEnvelope = AudienceEnvelope(
+            kind: .compareChoice,
+            sessionId: "session-1",
+            compareChoice: CompareChoicePayload(
+                pairId: "pair-a-b",
+                leftDescriptorId: "a",
+                rightDescriptorId: "b",
+                chosenDescriptorId: "b",
+                intensity: 1
+            )
+        )
+
+        let steerEvent = server.routePreferenceForTesting(steerEnvelope)
+        let holdEvent = server.routePreferenceForTesting(holdEnvelope)
+        let nudgeEvent = server.routePreferenceForTesting(nudgeEnvelope)
+        let compareEvent = server.routePreferenceForTesting(compareEnvelope)
+
+        #expect(steerEvent?.eventType == .dragTowardDescriptor)
+        #expect(steerEvent?.descriptorLabel == "DENSE")
+        #expect(holdEvent?.eventType == .release)
+        #expect(nudgeEvent?.eventType == .lessAction)
+        #expect(compareEvent?.eventType == .pairwiseCompare)
+        #expect(compareEvent?.descriptorLabel == "B")
+    }
+
+    @Test("AudienceSessionServer NDJSON parser decodes stage snapshot envelopes")
+    func audienceEnvelopeParserDecodesStageSnapshot() throws {
+        let server = AudienceSessionServer()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        let snapshot = StageSnapshotPayload(
+            mode: 2,
+            sceneId: "relay_mesh",
+            thought: "listening",
+            thoughtLog: ["LISTENING", "AUDIENCE DENSE 45%"],
+            density: 0.41,
+            cohesion: 0.62,
+            disruption: 0.27,
+            isRunning: true,
+            isWaiting: false,
+            waitingReason: nil,
+            paramLines: ["LEVEL 54", "MIX 42"],
+            pickLines: ["PRESET ORBIT"],
+            changeLines: ["PARAM LEVEL 54"],
+            audio: StageAudioSummaryPayload(
+                rms: 0.21,
+                transientFlux: 0.16,
+                lowBand: 0.18,
+                midBand: 0.35,
+                highBand: 0.26,
+                peak: 0.42,
+                brightness: 0.31,
+                overloadPulse: 0.0
+            ),
+            joltHeld: false,
+            timestamp: Date()
+        )
+
+        let envelope = AudienceEnvelope(
+            kind: .stageSnapshot,
+            sessionId: "session-1",
+            stageSnapshot: snapshot
+        )
+
+        var line = try encoder.encode(envelope)
+        line.append(0x0A)
+
+        let chunks = [
+            Data(line.prefix(14)),
+            Data(line.dropFirst(14).prefix(11)),
+            Data(line.dropFirst(25))
+        ]
+
+        let decoded = server.decodeEnvelopesForTesting(chunks: chunks)
+        #expect(decoded.count == 1)
+        #expect(decoded[0].kind == .stageSnapshot)
+        #expect(decoded[0].stageSnapshot?.sceneId == "relay_mesh")
+        #expect(decoded[0].stageSnapshot?.thoughtLog.count == 2)
+    }
+
+    @Test("AudienceSessionServer NDJSON parser decodes operator vector envelopes")
+    func audienceEnvelopeParserDecodesOperatorVector() throws {
+        let server = AudienceSessionServer()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        let envelope = AudienceEnvelope(
+            kind: .operatorVector,
+            sessionId: "session-op",
+            operatorVector: OperatorVectorPayload(
+                paramVector: 0.7,
+                thoughtVector: -0.3,
+                audioVector: 0.2,
+                ttlSeconds: 1800
+            )
+        )
+
+        var line = try encoder.encode(envelope)
+        line.append(0x0A)
+        let decoded = server.decodeEnvelopesForTesting(chunks: [line])
+
+        #expect(decoded.count == 1)
+        #expect(decoded[0].kind == .operatorVector)
+        #expect(decoded[0].operatorVector?.paramVector == 0.7)
+        #expect(decoded[0].operatorVector?.thoughtVector == -0.3)
+        #expect(decoded[0].operatorVector?.ttlSeconds == 1800)
+    }
+
+    @Test("AudiencePreferenceOverlay less action uses symmetric intensity key path")
+    func audiencePreferenceOverlayLessActionSymmetry() {
+        let overlay = AudiencePreferenceOverlay()
+        let sessionId = "session-symmetry"
+
+        overlay.recordPreferenceEvent(
+            AudiencePreferenceEvent(sessionId: sessionId, eventType: .moreAction, intensity: 1)
+        )
+        overlay.recordPreferenceEvent(
+            AudiencePreferenceEvent(sessionId: sessionId, eventType: .lessAction, intensity: 1)
+        )
+
+        let mirror = Mirror(reflecting: overlay)
+        let sessionWeights = mirror.children.first(where: { $0.label == "sessionWeights" })?.value as? [String: [String: Double]]
+        let intensityWeight = sessionWeights?[sessionId]?["_intensity_"] ?? 999
+
+        #expect(abs(intensityWeight) < 0.0001)
+    }
+
+    @Test("AudiencePreferenceOverlay applies and expires operator vectors")
+    func audiencePreferenceOverlayOperatorVectorLifecycle() {
+        let overlay = AudiencePreferenceOverlay()
+        let sessionId = "session-vector"
+        let activeSessions: [String: AudienceSessionState] = [
+            sessionId: AudienceSessionState(sessionId: sessionId, sessionType: .appCompanion)
+        ]
+
+        overlay.recordOperatorVector(
+            OperatorVectorPayload(paramVector: 0.8, thoughtVector: 0.4, audioVector: -0.5, ttlSeconds: 10),
+            for: sessionId,
+            at: Date().addingTimeInterval(-12)
+        )
+        #expect(overlay.activeOperatorVectorSession(activeSessions: activeSessions) == nil)
+
+        overlay.recordOperatorVector(
+            OperatorVectorPayload(paramVector: 0.8, thoughtVector: 0.4, audioVector: -0.5, ttlSeconds: 3600),
+            for: sessionId
+        )
+        #expect(overlay.activeOperatorVectorSession(activeSessions: activeSessions) == sessionId)
+
+        var modelOut = ModelOut(
+            tsMs: 1,
+            mode: 2,
+            params: [
+                "density": 0.4,
+                "brightness": 0.4,
+                "level": 0.4
+            ],
+            picks: Picks(),
+            flags: Flags(),
+            visual: VisualOut.defaultForMode(2)
+        )
+
+        let result = overlay.applyOverlay(to: &modelOut, for: sessionId, activeSessions: activeSessions)
+        #expect(result != nil)
+        #expect((modelOut.params["level"] ?? 0) != 0.4)
+    }
+
     @Test("FeatureExtractor tracks sine centroid and bands")
     func featureExtractorSine() {
         let sampleRate = 48_000.0
