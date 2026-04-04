@@ -307,6 +307,7 @@ struct CommandRailButton: View {
     var isSolid: Bool = false
     var accent: Color = BrandingColors.glyphGreen
     let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
@@ -319,18 +320,23 @@ struct CommandRailButton: View {
                     : (isSolid ? Color.black.opacity(0.92) : (isActive ? accent : Color.white.opacity(0.88)))
                 )
                 .frame(maxWidth: .infinity, minHeight: 46)
-                .background {
-                    if isSolid {
-                        Rectangle()
-                            .fill(isEnabled ? accent.opacity(0.9) : Color.white.opacity(0.1))
+                .background(
+                    Group {
+                        if isSolid {
+                            Rectangle()
+                                .fill(isEnabled ? accent.opacity(0.9) : Color.white.opacity(0.1))
+                        } else if hovering {
+                            Rectangle()
+                                .fill(accent.opacity(0.08))
+                        }
                     }
-                }
+                )
                 .overlay {
                     Rectangle()
                         .stroke(
                             !isEnabled
                             ? Color.white.opacity(0.16)
-                            : (isSolid ? accent.opacity(0.95) : (isActive ? accent.opacity(0.72) : Color.white.opacity(0.2))),
+                            : (isSolid ? accent.opacity(0.95) : (isActive ? accent.opacity(0.72) : Color.white.opacity(hovering ? 0.34 : 0.2))),
                             lineWidth: 1
                         )
                 }
@@ -339,5 +345,8 @@ struct CommandRailButton: View {
         .buttonStyle(.plain)
         .contentShape(Rectangle())
         .disabled(!isEnabled)
+        .onHover { isHovering in
+            hovering = isHovering
+        }
     }
 }

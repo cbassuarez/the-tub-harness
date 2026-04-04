@@ -14,6 +14,11 @@ struct AudienceOverlayResult {
     let thought: String
 }
 
+struct ActiveOperatorVectorState: Equatable {
+    let sessionId: String
+    let payload: OperatorVectorPayload
+}
+
 class AudiencePreferenceOverlay {
     private let maxBias: Double = 0.5
     private let minBias: Double = -0.5
@@ -97,21 +102,50 @@ class AudiencePreferenceOverlay {
     }
 
     func activeOperatorVectorSession(activeSessions: [String: AudienceSessionState], now: Date = Date()) -> String? {
+        activeOperatorVectorState(activeSessions: activeSessions, now: now)?.sessionId
+    }
+
+    func activeOperatorVectorState(
+        activeSessions: [String: AudienceSessionState],
+        now: Date = Date()
+    ) -> ActiveOperatorVectorState? {
         biasLock.lock()
         defer { biasLock.unlock() }
         pruneExpiredOperatorVectors(now: now)
 
         var bestSessionId: String?
+        var bestVector: (paramVector: Double, thoughtVector: Double, audioVector: Double)?
+        var bestRemainingTTL: TimeInterval = 0
         var bestMagnitude: Double = 0
         for (sessionId, entry) in operatorVectors where activeSessions[sessionId] != nil {
             let vector = decayedOperatorVector(from: entry, now: now)
+            let remainingTTL = max(0, entry.ttlSeconds - now.timeIntervalSince(entry.setAt))
+            guard remainingTTL > 0 else { continue }
             let magnitude = max(abs(vector.paramVector), max(abs(vector.thoughtVector), abs(vector.audioVector)))
             if magnitude > bestMagnitude {
                 bestMagnitude = magnitude
                 bestSessionId = sessionId
+                bestVector = vector
+                bestRemainingTTL = remainingTTL
             }
         }
-        return bestSessionId
+
+        guard
+            let sessionId = bestSessionId,
+            let vector = bestVector
+        else {
+            return nil
+        }
+
+        return ActiveOperatorVectorState(
+            sessionId: sessionId,
+            payload: OperatorVectorPayload(
+                paramVector: vector.paramVector,
+                thoughtVector: vector.thoughtVector,
+                audioVector: vector.audioVector,
+                ttlSeconds: bestRemainingTTL
+            )
+        )
     }
     
     func applyOverlay(

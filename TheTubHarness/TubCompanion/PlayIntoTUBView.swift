@@ -18,6 +18,8 @@ struct PlayIntoTUBView: View {
 
     @StateObject private var viewModel = PlayGridViewModel()
     @Environment(\.scenePhase) private var scenePhase
+    @State private var hoveredGridCellID: PlayGridCell.ID?
+    @State private var gridContainerWidth: CGFloat = 0
 
     var body: some View {
         ZStack {
@@ -105,80 +107,242 @@ struct PlayIntoTUBView: View {
 
     private var gridSurface: some View {
         GeometryReader { proxy in
-            let side = max(1, proxy.size.width)
+            let width = max(1, proxy.size.width)
+            let height = max(1, proxy.size.height)
+            let meterLeftInset: CGFloat = 8
+            let targetMeterWidth = meterWidthForGrid(totalWidth: width)
+            let side = min(max(1, width - targetMeterWidth - meterLeftInset), height)
+            let meterWidth = max(0, width - side - meterLeftInset)
+
             let cell = side / CGFloat(viewModel.gridDimension)
 
             ZStack(alignment: .topLeading) {
-                Rectangle()
-                    .fill(Color.black.opacity(0.7))
-                Rectangle()
-                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                ZStack(alignment: .topLeading) {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.7))
+                    Rectangle()
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
 
-                ForEach(viewModel.cells) { gridCell in
-                    let x = CGFloat(gridCell.column) * cell
-                    let y = CGFloat(gridCell.row) * cell
+                    ForEach(viewModel.cells) { gridCell in
+                        let x = CGFloat(gridCell.column) * cell
+                        let y = CGFloat(gridCell.row) * cell
+                        let isActive = viewModel.isCellActive(gridCell)
+                        let isHovered = hoveredGridCellID == gridCell.id
 
-                    ZStack {
-                        Rectangle()
-                            .stroke(Color.white.opacity(0.13), lineWidth: 0.8)
-                            .background(
-                                Rectangle()
-                                    .fill(viewModel.isCellActive(gridCell) ? BrandingColors.glyphGreen.opacity(0.22) : Color.clear)
-                            )
-
-                        Text(gridCell.displayToken)
-                            .playMono(12, weight: .semibold)
-                            .foregroundStyle(viewModel.isCellActive(gridCell) ? BrandingColors.glyphGreen : Color.white.opacity(0.68))
-                    }
-                    .frame(width: cell, height: cell)
-                    .offset(x: x, y: y)
-                }
-            }
-            .frame(width: side, height: side)
-            .contentShape(Rectangle())
-            .overlay {
-                PlayMultiTouchCaptureView(
-                    onTouchesChanged: { touches in
-                        viewModel.handleTouches(touches, in: CGSize(width: side, height: side))
-                    },
-                    onTouchesEnded: {
-                        viewModel.endTouch()
-                    }
-                )
-                .allowsHitTesting(true)
-            }
-            .gesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                    .onChanged { value in
-                        viewModel.handleTouch(value.location, in: CGSize(width: side, height: side))
-                    }
-                    .onEnded { _ in
-                        viewModel.endTouch()
-                    }
-            )
-            .opacity(viewModel.canOutput ? 1 : 0.6)
-            .overlay(alignment: .center) {
-                if !viewModel.canOutput {
-                    Text("NO AUDIO ROUTE. CONNECT LINK OR ENABLE DEBUG OUTPUT.")
-                        .playMono(12, weight: .bold)
-                        .foregroundStyle(BrandingColors.warningYellow)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 12)
-                        .background(Color.black.opacity(0.88))
-                        .overlay {
+                        ZStack {
                             Rectangle()
-                                .stroke(BrandingColors.warningYellow.opacity(0.6), lineWidth: 1)
+                                .stroke(
+                                    Color.white.opacity(isHovered ? 0.32 : 0.13),
+                                    lineWidth: isHovered ? 1 : 0.8
+                                )
+                                .background(
+                                    Rectangle()
+                                        .fill(
+                                            isActive
+                                            ? BrandingColors.glyphGreen.opacity(0.22)
+                                            : (isHovered ? Color.white.opacity(0.05) : Color.clear)
+                                        )
+                                )
+
+                            Text(gridCell.displayToken)
+                                .playMono(12, weight: .semibold)
+                                .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(isHovered ? 0.86 : 0.68))
                         }
+                        .frame(width: cell, height: cell)
+                        .offset(x: x, y: y)
+                        .onHover { isHovering in
+                            if isHovering {
+                                hoveredGridCellID = gridCell.id
+                            } else if hoveredGridCellID == gridCell.id {
+                                hoveredGridCellID = nil
+                            }
+                        }
+                    }
+                }
+                .frame(width: side, height: side)
+                .contentShape(Rectangle())
+                .overlay {
+                    PlayMultiTouchCaptureView(
+                        onTouchesChanged: { touches in
+                            viewModel.handleTouches(touches, in: CGSize(width: side, height: side))
+                        },
+                        onTouchesEnded: {
+                            viewModel.endTouch()
+                        }
+                    )
+                    .allowsHitTesting(true)
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                        .onChanged { value in
+                            viewModel.handleTouch(value.location, in: CGSize(width: side, height: side))
+                        }
+                        .onEnded { _ in
+                            viewModel.endTouch()
+                        }
+                )
+                .opacity(viewModel.canOutput ? 1 : 0.6)
+                .overlay(alignment: .center) {
+                    if !viewModel.canOutput {
+                        Text("NO AUDIO ROUTE. CONNECT LINK OR ENABLE DEBUG OUTPUT.")
+                            .playMono(12, weight: .bold)
+                            .foregroundStyle(BrandingColors.warningYellow)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 12)
+                            .background(Color.black.opacity(0.88))
+                            .overlay {
+                                Rectangle()
+                                    .stroke(BrandingColors.warningYellow.opacity(0.6), lineWidth: 1)
+                            }
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("PLAY GRID")
+                .accessibilityHint("DRAG ACROSS GRID CELLS TO TRIGGER AUDIO EVENTS.")
+                .accessibilityIdentifier("play.grid.surface")
+            }
+            .frame(width: width, height: side, alignment: .leading)
+            .contentShape(Rectangle())
+            .overlay(alignment: .topLeading) {
+                if meterWidth > 0.5 && width > side + meterLeftInset {
+                    PlayOutputMeter(level: viewModel.outputMeterLevel)
+                        .frame(width: meterWidth, height: side)
+                        .offset(x: side + meterLeftInset, y: 0)
+                        .allowsHitTesting(false)
+                        .accessibilityIdentifier("play.grid.scope")
                 }
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("PLAY GRID")
-            .accessibilityHint("DRAG ACROSS GRID CELLS TO TRIGGER AUDIO EVENTS.")
-            .accessibilityIdentifier("play.grid.surface")
         }
         .frame(maxWidth: .infinity)
-        .aspectRatio(1, contentMode: .fit)
+        .frame(height: gridHeightForContainer(width: gridContainerWidth))
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear {
+                        gridContainerWidth = proxy.size.width
+                    }
+                    .onChange(of: proxy.size.width) { _, newWidth in
+                        gridContainerWidth = newWidth
+                    }
+            }
+        }
+    }
+
+    private func meterWidthForGrid(totalWidth: CGFloat) -> CGFloat {
+        max(10, min(34, totalWidth * 0.09))
+    }
+
+    private func gridHeightForContainer(width: CGFloat) -> CGFloat {
+        guard width > 0 else { return 252 }
+        let meterLeftInset: CGFloat = 2
+        let side = width - meterWidthForGrid(totalWidth: width) - meterLeftInset
+        return min(320, max(252, side))
+    }
+
+    private struct PlayOutputMeter: View {
+        let level: Double
+
+        var body: some View {
+            GeometryReader { proxy in
+                let clamped = max(0, min(1, level))
+                let fillHeight = max(2, (proxy.size.height - 2) * clamped)
+                let phosphorHeight = min(proxy.size.height, fillHeight + 22)
+
+                ZStack(alignment: .bottom) {
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.92), Color.black.opacity(0.74)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    TacticalStripTexture()
+                        .opacity(0.2)
+                        .blendMode(.screen)
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [BrandingColors.glyphGreen.opacity(0.12), .clear],
+                                startPoint: .bottom,
+                                endPoint: .top
+                            )
+                        )
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [BrandingColors.glyphGreen.opacity(0.38), .clear],
+                                startPoint: .bottom,
+                                endPoint: .top
+                            )
+                        )
+                        .frame(height: phosphorHeight)
+                        .blur(radius: 3.2)
+                        .blendMode(.screen)
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    BrandingColors.glyphGreen.opacity(0.4),
+                                    BrandingColors.glyphGreen.opacity(0.92),
+                                    Color.white.opacity(0.95)
+                                ],
+                                startPoint: .bottom,
+                                endPoint: .top
+                            )
+                        )
+                        .frame(height: fillHeight)
+                        .shadow(color: BrandingColors.glyphGreen.opacity(0.55), radius: 6, x: 0, y: 0)
+                    Rectangle()
+                        .fill(Color.white.opacity(0.96))
+                        .frame(height: 1)
+                        .offset(y: -fillHeight)
+                    Rectangle()
+                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                }
+                .compositingGroup()
+            }
+            .animation(.linear(duration: 0.05), value: level)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("OUTPUT GAIN METER")
+            .accessibilityHint("Shows current output level.")
+        }
+    }
+
+    private struct TacticalStripTexture: View {
+        var body: some View {
+            GeometryReader { proxy in
+                Canvas { context, size in
+                    var horizontal = Path()
+                    var y: CGFloat = 0
+                    while y <= size.height {
+                        horizontal.move(to: CGPoint(x: 0, y: y))
+                        horizontal.addLine(to: CGPoint(x: size.width, y: y))
+                        y += 8
+                    }
+                    context.stroke(horizontal, with: .color(Color.white.opacity(0.07)), lineWidth: 0.5)
+
+                    var vertical = Path()
+                    let verticalStep = max(12, size.width / 16)
+                    var x: CGFloat = 0
+                    while x <= size.width {
+                        vertical.move(to: CGPoint(x: x, y: 0))
+                        vertical.addLine(to: CGPoint(x: x, y: size.height))
+                        x += verticalStep
+                    }
+                    context.stroke(vertical, with: .color(BrandingColors.glyphGreen.opacity(0.08)), lineWidth: 0.5)
+
+                    var diagonal = Path()
+                    var offset: CGFloat = -size.height
+                    while offset < size.width {
+                        diagonal.move(to: CGPoint(x: offset, y: size.height))
+                        diagonal.addLine(to: CGPoint(x: offset + size.height, y: 0))
+                        offset += 34
+                    }
+                    context.stroke(diagonal, with: .color(BrandingColors.warningYellow.opacity(0.05)), lineWidth: 0.45)
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
+            }
+            .allowsHitTesting(false)
+        }
     }
 
     private var longStripSurface: some View {
@@ -195,89 +359,124 @@ struct PlayIntoTUBView: View {
                     .minimumScaleFactor(0.75)
                     .accessibilityIdentifier("play.long.bank.status")
             }
+            Text("TOUCH OR DRAG ACROSS THE STRIP TO BLEND THE BANK'S LEFT/RIGHT LONG SOUNDS. NO NEED TO HOLD.")
+                .playMono(10, weight: .regular)
+                .foregroundStyle(Color.white.opacity(0.62))
+                .fixedSize(horizontal: false, vertical: true)
 
             GeometryReader { proxy in
                 let width = max(1, proxy.size.width)
                 let height = max(1, proxy.size.height)
-                let slotWidth = width / CGFloat(max(1, viewModel.longStripSlotCount))
+                let meterInset: CGFloat = 2
+                let meterWidth = max(10, min(18, width * 0.06))
+                let stripWidth = max(1, width - meterWidth - meterInset)
+                let playheadX = CGFloat(viewModel.longBlendPosition) * stripWidth
 
-                ZStack(alignment: .topLeading) {
-                    LinearGradient(
-                        colors: [
-                            BrandingColors.glyphGreen.opacity(0.05),
-                            BrandingColors.warningYellow.opacity(0.07),
-                            BrandingColors.glyphGreen.opacity(0.04)
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                    Rectangle()
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-
-                    ForEach(viewModel.longStripCells) { cell in
-                        let x = CGFloat(cell.slotIndex) * slotWidth
+                HStack(spacing: 0) {
+                    ZStack(alignment: .topLeading) {
+                        LinearGradient(
+                            colors: [
+                                BrandingColors.glyphGreen.opacity(0.1),
+                                BrandingColors.warningYellow.opacity(0.08),
+                                BrandingColors.glyphGreen.opacity(0.1)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        TacticalStripTexture()
+                            .blendMode(.screen)
+                            .opacity(0.68)
+                        Rectangle()
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
 
                         Rectangle()
-                            .stroke(Color.white.opacity(0.12), lineWidth: 0.75)
-                            .frame(width: slotWidth, height: height)
-                            .offset(x: x)
+                            .fill(Color.white.opacity(0.14))
+                            .frame(width: 1, height: height)
+                            .offset(x: stripWidth * 0.5)
 
-                        if viewModel.isLongSlotActive(cell.slotIndex) {
+                        if viewModel.longBankHasCenterSample {
                             Rectangle()
-                                .stroke(BrandingColors.glyphGreen.opacity(0.9), lineWidth: 1.4)
-                                .frame(width: slotWidth, height: height)
-                                .offset(x: x)
+                                .fill(Color.white.opacity(0.08))
+                                .frame(width: 1, height: height)
+                                .offset(x: stripWidth * 0.25)
+                            Rectangle()
+                                .fill(Color.white.opacity(0.08))
+                                .frame(width: 1, height: height)
+                                .offset(x: stripWidth * 0.75)
                         }
 
-                        Text(cell.displayToken)
-                            .playMono(10, weight: .bold)
-                            .foregroundStyle(cell.hasSample ? Color.white.opacity(0.72) : Color.white.opacity(0.3))
-                            .frame(width: slotWidth, height: height, alignment: .bottom)
-                            .padding(.bottom, 7)
-                            .offset(x: x)
-                    }
-                }
-                .contentShape(Rectangle())
-                .overlay {
-                    PlayMultiTouchCaptureView(
-                        onTouchesChanged: { touches in
-                            viewModel.handleLongTouches(touches, in: CGSize(width: width, height: height))
-                        },
-                        onTouchesEnded: {
-                            viewModel.endLongTouch()
-                        }
-                    )
-                    .allowsHitTesting(true)
-                }
-                .gesture(
-                    DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                        .onChanged { value in
-                            viewModel.handleLongTouch(value.location, in: CGSize(width: width, height: height))
-                        }
-                        .onEnded { _ in
-                            viewModel.endLongTouch()
-                        }
-                )
-                .opacity(viewModel.canOutput ? 1 : 0.6)
-                .overlay(alignment: .center) {
-                    if !viewModel.canOutput {
-                        Text("NO AUDIO ROUTE.")
-                            .playMono(11, weight: .bold)
-                            .foregroundStyle(BrandingColors.warningYellow)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Color.black.opacity(0.88))
-                            .overlay {
-                                Rectangle()
-                                    .stroke(BrandingColors.warningYellow.opacity(0.6), lineWidth: 1)
+                        HStack {
+                            Text(viewModel.longLeftToken)
+                                .playMono(10, weight: .bold)
+                                .foregroundStyle(Color.white.opacity(0.82))
+                            Spacer()
+                            if viewModel.longBankHasCenterSample {
+                                Text(viewModel.longCenterToken)
+                                    .playMono(10, weight: .bold)
+                                    .foregroundStyle(BrandingColors.warningYellow.opacity(0.9))
+                                Spacer()
                             }
+                            Text(viewModel.longRightToken)
+                                .playMono(10, weight: .bold)
+                                .foregroundStyle(Color.white.opacity(0.82))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.top, 8)
+
+                        Rectangle()
+                            .fill(BrandingColors.glyphGreen.opacity(0.9))
+                            .frame(width: 2, height: height)
+                            .offset(x: max(0, min(stripWidth - 2, playheadX - 1)))
                     }
+                    .frame(width: stripWidth, height: height)
+                    .contentShape(Rectangle())
+                    .overlay {
+                        PlayMultiTouchCaptureView(
+                            onTouchesChanged: { touches in
+                                viewModel.handleLongTouches(touches, in: CGSize(width: stripWidth, height: height))
+                            },
+                            onTouchesEnded: {
+                                viewModel.endLongTouch()
+                            }
+                        )
+                        .allowsHitTesting(true)
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                            .onChanged { value in
+                                viewModel.handleLongTouch(value.location, in: CGSize(width: stripWidth, height: height))
+                            }
+                            .onEnded { _ in
+                                viewModel.endLongTouch()
+                            }
+                    )
+                    .opacity(viewModel.canOutput ? 1 : 0.6)
+                    .overlay(alignment: .center) {
+                        if !viewModel.canOutput {
+                            Text("NO AUDIO ROUTE.")
+                                .playMono(11, weight: .bold)
+                                .foregroundStyle(BrandingColors.warningYellow)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.black.opacity(0.88))
+                                .overlay {
+                                    Rectangle()
+                                        .stroke(BrandingColors.warningYellow.opacity(0.6), lineWidth: 1)
+                                }
+                        }
+                    }
+
+                    PlayOutputMeter(level: viewModel.longOutputMeterLevel)
+                        .frame(width: meterWidth, height: height)
+                        .padding(.leading, meterInset)
+                        .allowsHitTesting(false)
+                        .accessibilityIdentifier("play.long.scope")
                 }
             }
             .frame(height: 86)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("LONG SOUNDS GRADIENT STRIP")
-            .accessibilityHint("TOUCH OR DRAG HORIZONTALLY TO SELECT LONG SAMPLE PLAYBACK.")
+            .accessibilityHint("TOUCH OR DRAG HORIZONTALLY TO BLEND LONG SAMPLE PLAYBACK.")
             .accessibilityIdentifier("play.long.strip.surface")
 
             CommandSignalRule(opacity: 0.2)
@@ -426,10 +625,16 @@ struct PlayIntoTUBView: View {
 @MainActor
 private final class PlayGridViewModel: ObservableObject {
     let gridDimension = 6
-    let longStripSlotCount = PlayLongStripLayout.defaultSlotCount
 
     @Published private(set) var cells: [PlayGridCell] = []
-    @Published private(set) var longStripCells: [LongStripCell] = []
+    @Published private(set) var longBlendPosition: Double = 0.5
+    @Published private(set) var longBlendMeterLevel: Double = 0.5
+    @Published private(set) var longLeftToken = "LEFT —"
+    @Published private(set) var longRightToken = "RIGHT —"
+    @Published private(set) var longCenterToken = "CENTER —"
+    @Published private(set) var longBankHasCenterSample = false
+    @Published private(set) var outputMeterLevel: Double = 0
+    @Published private(set) var longOutputMeterLevel: Double = 0
     @Published private(set) var lastEventLabel = "—"
     @Published private(set) var activeLongLabel = "—"
     @Published private(set) var longElapsedLabel = "00:00.0"
@@ -439,7 +644,7 @@ private final class PlayGridViewModel: ObservableObject {
     @Published private(set) var outputStatus = "OFF"
     @Published private(set) var libraryStatus = "SCAN…"
     @Published private(set) var bankStatus = "01/01"
-    @Published private(set) var longBankStatus = "01/01"
+    @Published private(set) var longBankStatus = "01/08"
     @Published private(set) var debugStatus = "OFF"
     @Published private(set) var canOutput = false
 
@@ -447,28 +652,29 @@ private final class PlayGridViewModel: ObservableObject {
     private var sampleURLs: [URL] = []
     private var longSampleEntries: [PlayLongSampleEntry] = []
     private var bankSampleURLs: [[URL]] = []
-    private var longBanks: [[LongStripCell]] = []
+    private var longBanks: [PlayLongBank] = []
     private var activeBankIndex = 0
     private var activeLongBankIndex = 0
     private var activeCellIDs: Set<PlayGridCell.ID> = []
     private var activeTouchCellIDByTouch: [Int: PlayGridCell.ID] = [:]
     private var lastTriggerCellIDByTouch: [Int: PlayGridCell.ID] = [:]
     private var lastTriggerAtByTouch: [Int: Date] = [:]
-    private var activeLongSlotIndex: Int?
-    private var lastLongTouchSlot: Int?
+    private var lastLongBlendX: Double?
     private var activeLongURL: URL?
     private var longStartedAt: Date?
     private var longElapsedTicker: AnyCancellable?
+    private var meterTicker: AnyCancellable?
     private var didStart = false
+    private let preloadBankLookahead = 3
 
     init() {
-        self.cells = Self.makeCells(gridDimension: gridDimension)
-        self.longStripCells = PlayLongStripLayout.emptyBank(slotCount: longStripSlotCount)
+        self.cells = Self.makeCells(gridDimension: gridDimension, bankIndex: 0)
     }
 
     func start(using appState: TubCompanionAppState) {
         guard !didStart else { return }
         didStart = true
+        startMeterTicker()
         updateRoute(using: appState)
         loadSampleLibrary()
     }
@@ -479,6 +685,8 @@ private final class PlayGridViewModel: ObservableObject {
             audio.stopAll()
             endLongTouch()
             stopLong()
+            outputMeterLevel = 0
+            longOutputMeterLevel = 0
         }
     }
 
@@ -497,6 +705,8 @@ private final class PlayGridViewModel: ObservableObject {
             endLongTouch()
             audio.stopAll()
             stopLong()
+            outputMeterLevel = 0
+            longOutputMeterLevel = 0
         }
     }
 
@@ -554,15 +764,17 @@ private final class PlayGridViewModel: ObservableObject {
             return
         }
         guard let touch = touches.first else { return }
-
-        let slot = PlayLongStripLayout.slotIndex(for: touch.location, in: size, slotCount: longStripSlotCount)
-        guard slot != lastLongTouchSlot else { return }
-        lastLongTouchSlot = slot
-        triggerLong(slotIndex: slot)
+        guard size.width > 0 else { return }
+        let normalized = max(0, min(1, Double(touch.location.x / size.width)))
+        if let last = lastLongBlendX, abs(last - normalized) < 0.01 {
+            return
+        }
+        lastLongBlendX = normalized
+        triggerLongBlend(position: normalized)
     }
 
     func endLongTouch() {
-        lastLongTouchSlot = nil
+        lastLongBlendX = nil
     }
 
     func isCellActive(_ cell: PlayGridCell) -> Bool {
@@ -620,8 +832,11 @@ private final class PlayGridViewModel: ObservableObject {
         activeLongBankIndex = (activeLongBankIndex + 1) % longBanks.count
         updateLongBankStatus()
         endLongTouch()
-        stopLong()
-        longActivityLine = "LONG BANK \(longBankStatus) ARMED."
+        if hasActiveLongSample {
+            triggerLongBlend(position: longBlendPosition, smoothTransition: true)
+        } else {
+            longActivityLine = "LONG BANK \(longBankStatus) ARMED. SWEEP STRIP."
+        }
     }
 
     func previousLongBank() {
@@ -629,15 +844,19 @@ private final class PlayGridViewModel: ObservableObject {
         activeLongBankIndex = (activeLongBankIndex - 1 + longBanks.count) % longBanks.count
         updateLongBankStatus()
         endLongTouch()
-        stopLong()
-        longActivityLine = "LONG BANK \(longBankStatus) ARMED."
+        if hasActiveLongSample {
+            triggerLongBlend(position: longBlendPosition, smoothTransition: true)
+        } else {
+            longActivityLine = "LONG BANK \(longBankStatus) ARMED. SWEEP STRIP."
+        }
     }
 
     func stopLong() {
         audio.stopLong()
         stopLongElapsedTicker()
         activeLongURL = nil
-        activeLongSlotIndex = nil
+        longBlendMeterLevel = longBlendPosition
+        longOutputMeterLevel = 0
         longStartedAt = nil
         activeLongLabel = "—"
         longElapsedLabel = "00:00.0"
@@ -664,39 +883,50 @@ private final class PlayGridViewModel: ObservableObject {
         activityLine = "BANK \(bankStatus) / CELL \(row + 1):\(column + 1) -> \(url.deletingPathExtension().lastPathComponent.uppercased())"
     }
 
-    func isLongSlotActive(_ slotIndex: Int) -> Bool {
-        activeLongSlotIndex == slotIndex
-    }
-
-    private func triggerLong(slotIndex: Int) {
+    private func triggerLongBlend(position: Double, smoothTransition: Bool = false) {
         guard !longBanks.isEmpty else {
             longActivityLine = "LONG EMPTY. NO STRIP EVENTS."
             return
         }
         let bank = longBanks[min(max(0, activeLongBankIndex), longBanks.count - 1)]
-        guard slotIndex >= 0, slotIndex < bank.count else { return }
-        let cell = bank[slotIndex]
-        guard let url = cell.sampleURL else {
-            longActivityLine = "SLOT \(cell.displayToken) EMPTY."
+        let plan = Self.longBlendPlan(for: bank, position: position)
+
+        guard let primary = plan.primary else {
+            longActivityLine = "LONG BANK \(longBankStatus) EMPTY."
+            stopLong()
             return
         }
 
-        let targetGain: Float = 0.62
-        if activeLongURL == nil {
-            audio.triggerLong(url: url, gain: targetGain)
-        } else if activeLongURL != url {
-            audio.transitionLong(to: url, gain: targetGain)
+        let secondaryURL = plan.secondary?.url
+        if smoothTransition {
+            audio.transitionLongBlend(
+                primaryURL: primary.url,
+                secondaryURL: secondaryURL,
+                mix: Float(plan.mix),
+                gain: 0.62
+            )
         } else {
-            return
+            audio.blendLong(
+                primaryURL: primary.url,
+                secondaryURL: secondaryURL,
+                mix: Float(plan.mix),
+                gain: 0.62
+            )
         }
 
-        activeLongURL = url
-        activeLongSlotIndex = slotIndex
-        activeLongLabel = cell.displayName.uppercased()
-        longStartedAt = Date()
+        longBlendPosition = position
+        longBlendMeterLevel = plan.mix
+        activeLongURL = plan.dominantURL
+        activeLongLabel = plan.dominantLabel.uppercased()
+        if longStartedAt == nil {
+            longStartedAt = Date()
+        }
         updateLongElapsedLabel(now: Date())
         startLongElapsedTicker()
-        longActivityLine = "LONG \(longBankStatus) / SLOT \(cell.displayToken) -> \(cell.displayName.uppercased())"
+
+        let secondaryLabel = plan.secondary?.displayName.uppercased() ?? "—"
+        let prefix = smoothTransition ? "LONG \(longBankStatus) CROSSFADE" : "LONG \(longBankStatus)"
+        longActivityLine = "\(prefix) \(primary.displayName.uppercased()) ↔ \(secondaryLabel) MIX \(Int((plan.mix * 100).rounded()))%"
     }
 
     private func loadSampleLibrary() {
@@ -725,21 +955,21 @@ private final class PlayGridViewModel: ObservableObject {
                     }
                 self.rebuildBanks()
                 self.libraryStatus = Self.libraryStatus(shortCount: self.sampleURLs.count, longCount: self.longSampleEntries.count)
-                if self.sampleURLs.isEmpty && self.longSampleEntries.isEmpty {
-                    self.activityLine = "NO SAMPLE FILES DISCOVERED IN BUNDLE."
-                    self.longActivityLine = "NO LONG SAMPLES DISCOVERED."
-                } else if self.sampleURLs.isEmpty {
-                    self.activityLine = "SHORT EMPTY. GRID EVENTS DISABLED."
-                    self.longActivityLine = "LONG STRIP READY (\(self.longBankStatus))."
-                } else if self.longSampleEntries.isEmpty {
-                    self.activityLine = "GRID READY (\(self.bankStatus)). DRAG TO PLAY."
-                    self.longActivityLine = "LONG EMPTY. SHORT GRID ONLY."
-                } else {
-                    self.activityLine = "LIBRARY READY (\(self.bankStatus)). DRAG TO PLAY."
-                    self.longActivityLine = "LONG READY (\(self.longBankStatus)). TOUCH STRIP."
-                }
+            if self.sampleURLs.isEmpty && self.longSampleEntries.isEmpty {
+                self.activityLine = "NO SAMPLE FILES DISCOVERED IN BUNDLE."
+                self.longActivityLine = "NO LONG SAMPLES DISCOVERED."
+            } else if self.sampleURLs.isEmpty {
+                self.activityLine = "SHORT EMPTY. GRID EVENTS DISABLED."
+                self.longActivityLine = "LONG STRIP READY (\(self.longBankStatus)). SWEEP TO BLEND."
+            } else if self.longSampleEntries.isEmpty {
+                self.activityLine = "GRID READY (\(self.bankStatus)). DRAG TO PLAY."
+                self.longActivityLine = "LONG EMPTY. SHORT GRID ONLY."
+            } else {
+                self.activityLine = "LIBRARY READY (\(self.bankStatus)). DRAG TO PLAY."
+                self.longActivityLine = "LONG READY (\(self.longBankStatus)). SWEEP TO BLEND."
             }
         }
+    }
     }
 
     private func rebuildBanks() {
@@ -747,6 +977,7 @@ private final class PlayGridViewModel: ObservableObject {
             bankSampleURLs = []
             activeBankIndex = 0
             bankStatus = "01/01"
+            cells = Self.makeCells(gridDimension: gridDimension, bankIndex: activeBankIndex)
         } else {
             let cellCount = gridDimension * gridDimension
             let count = sampleURLs.count
@@ -771,12 +1002,14 @@ private final class PlayGridViewModel: ObservableObject {
             updateBankStatus()
         }
 
-        longBanks = PlayLongStripLayout.makeBanks(entries: longSampleEntries, slotCount: longStripSlotCount)
+        longBanks = PlayLongBankLayout.makeBanks(entries: longSampleEntries)
         if longBanks.isEmpty {
             activeLongBankIndex = 0
-            longBankStatus = "01/01"
-            longStripCells = PlayLongStripLayout.emptyBank(slotCount: longStripSlotCount)
-            activeLongSlotIndex = nil
+            longBankStatus = "01/08"
+            longLeftToken = "LEFT —"
+            longRightToken = "RIGHT —"
+            longCenterToken = "CENTER —"
+            longBankHasCenterSample = false
         } else {
             activeLongBankIndex = min(activeLongBankIndex, longBanks.count - 1)
             updateLongBankStatus()
@@ -787,16 +1020,24 @@ private final class PlayGridViewModel: ObservableObject {
         let total = max(1, bankSampleURLs.count)
         let current = min(max(0, activeBankIndex), total - 1) + 1
         bankStatus = String(format: "%02d/%02d", current, total)
+        cells = Self.makeCells(gridDimension: gridDimension, bankIndex: activeBankIndex)
+        preloadActiveGridBanks()
     }
 
     private func updateLongBankStatus() {
         let total = max(1, longBanks.count)
         let current = min(max(0, activeLongBankIndex), total - 1) + 1
         longBankStatus = String(format: "%02d/%02d", current, total)
-        if longBanks.isEmpty {
-            longStripCells = PlayLongStripLayout.emptyBank(slotCount: longStripSlotCount)
+        guard !longBanks.isEmpty else { return }
+        let bank = longBanks[min(max(0, activeLongBankIndex), longBanks.count - 1)]
+        longLeftToken = "LEFT \(bank.left?.displayToken ?? "--")"
+        longRightToken = "RIGHT \(bank.right?.displayToken ?? "--")"
+        if let center = bank.center {
+            longCenterToken = "CENTER \(center.displayToken)"
+            longBankHasCenterSample = true
         } else {
-            longStripCells = longBanks[min(max(0, activeLongBankIndex), longBanks.count - 1)]
+            longCenterToken = "CENTER --"
+            longBankHasCenterSample = false
         }
     }
 
@@ -805,6 +1046,21 @@ private final class PlayGridViewModel: ObservableObject {
             return "EMPTY"
         }
         return "S\(shortCount)/L\(longCount)"
+    }
+
+    private func preloadActiveGridBanks() {
+        guard !bankSampleURLs.isEmpty else { return }
+        let total = bankSampleURLs.count
+        let lookahead = min(max(1, preloadBankLookahead), total)
+        var preloadURLs: [URL] = []
+        preloadURLs.reserveCapacity(lookahead * gridDimension * gridDimension)
+
+        for offset in 0..<lookahead {
+            let index = (activeBankIndex + offset) % total
+            preloadURLs.append(contentsOf: bankSampleURLs[index])
+        }
+
+        audio.preload(urls: preloadURLs, limit: preloadURLs.count)
     }
 
     private static func longToken(for url: URL) -> String {
@@ -833,6 +1089,51 @@ private final class PlayGridViewModel: ObservableObject {
     private func stopLongElapsedTicker() {
         longElapsedTicker?.cancel()
         longElapsedTicker = nil
+    }
+
+    private func startMeterTicker() {
+        guard meterTicker == nil else { return }
+        meterTicker = Timer
+            .publish(every: 1.0 / 60.0, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                let measured = self.audio.currentMeterLevels()
+                let measuredShort = max(0, min(1, measured.short))
+                let measuredLong = max(0, min(1, measured.long))
+
+                self.outputMeterLevel = self.smoothedMeterLevel(
+                    current: self.outputMeterLevel,
+                    target: measuredShort,
+                    attack: 0.9,
+                    release: 0.17
+                )
+
+                self.longOutputMeterLevel = self.smoothedMeterLevel(
+                    current: self.longOutputMeterLevel,
+                    target: measuredLong,
+                    attack: 0.86,
+                    release: 0.14
+                )
+
+                if self.outputMeterLevel < 0.003 {
+                    self.outputMeterLevel = 0
+                }
+                if self.longOutputMeterLevel < 0.003 {
+                    self.longOutputMeterLevel = 0
+                }
+            }
+    }
+
+    private func smoothedMeterLevel(
+        current: Double,
+        target: Double,
+        attack: Double,
+        release: Double
+    ) -> Double {
+        let alpha = target >= current ? attack : release
+        let next = current + ((target - current) * alpha)
+        return max(0, min(1, next))
     }
 
     private func updateLongElapsedLabel(now: Date) {
@@ -922,19 +1223,61 @@ private final class PlayGridViewModel: ObservableObject {
         return max(1, x)
     }
 
-    private static func makeCells(gridDimension: Int) -> [PlayGridCell] {
+    private static func makeCells(gridDimension: Int, bankIndex: Int) -> [PlayGridCell] {
         var result: [PlayGridCell] = []
         result.reserveCapacity(gridDimension * gridDimension)
 
         for row in 0..<gridDimension {
             for column in 0..<gridDimension {
                 let serial = row * gridDimension + column
-                let token = String(format: "%02X", serial)
+                let token = PlayGridTokenAlphabet.token(
+                    cellSerial: serial,
+                    bankIndex: bankIndex,
+                    gridDimension: gridDimension
+                )
                 result.append(PlayGridCell(row: row, column: column, displayToken: token))
             }
         }
         return result
     }
+
+    private static func longBlendPlan(for bank: PlayLongBank, position: Double) -> PlayLongBlendPlan {
+        let clamped = max(0, min(1, position))
+
+        if let center = bank.center {
+            if clamped < 0.5 {
+                let mix = clamped / 0.5
+                let primary = bank.left ?? center
+                return PlayLongBlendPlan(
+                    primary: primary,
+                    secondary: center,
+                    mix: mix,
+                    dominantURL: mix < 0.5 ? primary.url : center.url,
+                    dominantLabel: mix < 0.5 ? primary.displayName : center.displayName
+                )
+            }
+            let mix = (clamped - 0.5) / 0.5
+            let secondary = bank.right ?? center
+            return PlayLongBlendPlan(
+                primary: center,
+                secondary: secondary,
+                mix: mix,
+                dominantURL: mix < 0.5 ? center.url : secondary.url,
+                dominantLabel: mix < 0.5 ? center.displayName : secondary.displayName
+            )
+        }
+
+        let primary = bank.left ?? bank.right
+        let secondary = bank.right
+        return PlayLongBlendPlan(
+            primary: primary,
+            secondary: secondary,
+            mix: clamped,
+            dominantURL: clamped < 0.5 ? primary?.url : secondary?.url,
+            dominantLabel: clamped < 0.5 ? (primary?.displayName ?? "—") : (secondary?.displayName ?? primary?.displayName ?? "—")
+        )
+    }
+
 }
 
 enum PlaySampleClass: Equatable {
@@ -959,80 +1302,65 @@ struct PlayLongSampleEntry: Equatable {
     let displayName: String
 }
 
-struct LongStripCell: Identifiable, Equatable {
-    let slotIndex: Int
-    let displayToken: String
-    let sampleURL: URL?
-    let duration: TimeInterval
-    let displayName: String
-
-    var id: Int { slotIndex }
-    var hasSample: Bool { sampleURL != nil }
+struct PlayLongBank: Equatable {
+    let index: Int
+    let left: PlayLongSampleEntry?
+    let right: PlayLongSampleEntry?
+    let center: PlayLongSampleEntry?
 }
 
-enum PlayLongStripLayout {
-    static let defaultSlotCount = 12
+struct PlayLongBlendPlan: Equatable {
+    let primary: PlayLongSampleEntry?
+    let secondary: PlayLongSampleEntry?
+    let mix: Double
+    let dominantURL: URL?
+    let dominantLabel: String
+}
 
-    static func makeBanks(entries: [PlayLongSampleEntry], slotCount: Int = defaultSlotCount) -> [[LongStripCell]] {
-        guard !entries.isEmpty else { return [] }
-        let count = max(1, slotCount)
-        let bankCount = max(1, Int(ceil(Double(entries.count) / Double(count))))
-        var banks: [[LongStripCell]] = []
+enum PlayGridTokenAlphabet {
+    private static let symbols: [Character] = Array("0123456789ABCDEFGH")
+
+    static func symbol(at index: Int) -> Character {
+        guard index >= 0, index < symbols.count else { return "0" }
+        return symbols[index]
+    }
+
+    static func token(cellSerial: Int, bankIndex: Int, gridDimension: Int) -> String {
+        let base = bankIndex * (gridDimension * gridDimension)
+        let globalSerial = base + cellSerial
+        let high = globalSerial / 18
+        let low = globalSerial % 18
+        return "\(String(high, radix: 16, uppercase: true))\(symbol(at: low))"
+    }
+}
+
+enum PlayLongBankLayout {
+    static let bankCount = 8
+
+    static func makeBanks(entries: [PlayLongSampleEntry]) -> [PlayLongBank] {
+        var banks: [PlayLongBank] = []
         banks.reserveCapacity(bankCount)
 
         for bankIndex in 0..<bankCount {
-            let base = bankIndex * count
-            var cells: [LongStripCell] = []
-            cells.reserveCapacity(count)
-            for slot in 0..<count {
-                let entryIndex = base + slot
-                if entryIndex < entries.count {
-                    let entry = entries[entryIndex]
-                    cells.append(
-                        LongStripCell(
-                            slotIndex: slot,
-                            displayToken: entry.displayToken,
-                            sampleURL: entry.url,
-                            duration: entry.duration,
-                            displayName: entry.displayName
-                        )
-                    )
-                } else {
-                    cells.append(
-                        LongStripCell(
-                            slotIndex: slot,
-                            displayToken: String(format: "%02X", slot),
-                            sampleURL: nil,
-                            duration: 0,
-                            displayName: "EMPTY"
-                        )
-                    )
-                }
+            let left = entries[safe: bankIndex * 2]
+            let right = entries[safe: (bankIndex * 2) + 1]
+            let center: PlayLongSampleEntry?
+            if bankIndex >= 4 {
+                center = entries[safe: 16 + (bankIndex - 4)]
+            } else {
+                center = nil
             }
-            banks.append(cells)
+            banks.append(PlayLongBank(index: bankIndex, left: left, right: right, center: center))
         }
 
         return banks
     }
+}
 
-    static func emptyBank(slotCount: Int = defaultSlotCount) -> [LongStripCell] {
-        let count = max(1, slotCount)
-        return (0..<count).map { slot in
-            LongStripCell(
-                slotIndex: slot,
-                displayToken: String(format: "%02X", slot),
-                sampleURL: nil,
-                duration: 0,
-                displayName: "EMPTY"
-            )
-        }
-    }
-
-    static func slotIndex(for point: CGPoint, in size: CGSize, slotCount: Int = defaultSlotCount) -> Int {
-        let count = max(1, slotCount)
-        guard size.width > 0 else { return 0 }
-        let normalized = max(0, min(0.999_999, point.x / size.width))
-        return min(count - 1, max(0, Int(normalized * CGFloat(count))))
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        guard index >= 0, index < count else { return nil }
+        return self[index]
     }
 }
 

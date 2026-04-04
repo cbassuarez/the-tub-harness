@@ -443,19 +443,25 @@ struct ReadLearnView: View {
     }
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                Color.black.ignoresSafeArea()
+        ZStack {
+            LearnStageMirrorBackground(
+                snapshot: viewModel.effectiveStageSnapshot,
+                feedState: viewModel.stageFeedState,
+                reduceMotion: reduceMotion
+            )
+            .opacity(0.24)
+            .allowsHitTesting(false)
 
-                VStack(spacing: 0) {
-                    headerStrip
-                    CommandSignalRule()
-                    ritualDeck(viewportHeight: max(proxy.size.height * 0.76, 620))
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, max(proxy.safeAreaInsets.top + 8, 14))
-                .padding(.bottom, max(proxy.safeAreaInsets.bottom + 10, 14))
+            Color.black.opacity(0.62).ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                headerStrip
+                CommandSignalRule()
+                ritualDeck()
             }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 10)
         }
         .preferredColorScheme(.dark)
         .accessibilityIdentifier("learn.root")
@@ -506,7 +512,7 @@ struct ReadLearnView: View {
         .padding(.vertical, 8)
     }
 
-    private func ritualDeck(viewportHeight: CGFloat) -> some View {
+    private func ritualDeck() -> some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 18) {
@@ -518,15 +524,11 @@ struct ReadLearnView: View {
 
                     CommandSignalRule(opacity: 0.16)
 
-                    ritualTableOfContents(proxy: proxy)
-
-                    CommandSignalRule(opacity: 0.16)
-
                     LazyVStack(alignment: .leading, spacing: 24) {
                         ForEach(LearnChapter.allCases, id: \.self) { chapter in
                             let spec = viewModel.spec(for: chapter)
                             let index = (LearnChapter.allCases.firstIndex(of: chapter) ?? 0) + 1
-                            RitualSectionView(
+                            LearnDocumentSection(
                                 sectionNumber: index,
                                 spec: spec,
                                 isActive: chapter == viewModel.activeChapter
@@ -537,18 +539,7 @@ struct ReadLearnView: View {
 
                     CommandSignalRule(opacity: 0.16)
 
-                    Text("REFERENCE ATLAS")
-                        .font(.system(.title3, design: .monospaced, weight: .bold))
-                        .foregroundStyle(.white)
-                        .tracking(1.1)
-
-                    LazyVStack(alignment: .leading, spacing: 18) {
-                        ForEach(viewModel.atlasSections) { section in
-                            AtlasInlineSectionView(section: section)
-                                .id(section.id)
-                                .accessibilityIdentifier("learn.atlas.section.\(section.id)")
-                        }
-                    }
+                    learnSignalMap
 
                     CommandSignalRule(opacity: 0.16)
 
@@ -566,10 +557,11 @@ struct ReadLearnView: View {
                             accessibilityHint: "Open the Play tab now"
                         )
                     }
-                    .padding(.bottom, 10)
+                    .padding(.bottom, 20)
                 }
+                .padding(.vertical, 10)
             }
-            .frame(minHeight: min(max(viewportHeight * 0.86, 560), 980))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .onAppear {
                 scrollRitual(to: viewModel.activeChapter, proxy: proxy, animated: false)
             }
@@ -586,10 +578,10 @@ struct ReadLearnView: View {
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("ONE-PAGE ORIENTATION")
-                    .font(.system(.caption, design: .monospaced, weight: .bold))
-                    .foregroundStyle(BrandingColors.glyphGreen.opacity(0.9))
-                    .tracking(1.3)
+            Text("ONE-PAGE ORIENTATION")
+                .font(.system(.caption, design: .monospaced, weight: .bold))
+                .foregroundStyle(BrandingColors.glyphGreen.opacity(0.9))
+                .tracking(1.3)
                 Spacer()
                 Text("SECTION \(activeIndex)/\(LearnChapter.allCases.count)")
                     .font(.system(.caption2, design: .monospaced, weight: .semibold))
@@ -598,19 +590,47 @@ struct ReadLearnView: View {
                     .accessibilityIdentifier("learn.ritual.chapter.meta")
             }
 
-            Text(activeSpec.title)
+            Text("THE TUB // OPERATOR PRIMER")
                 .font(.system(.title2, design: .monospaced, weight: .bold))
                 .foregroundStyle(.white)
                 .tracking(1.2)
                 .chromaticAberration()
                 .accessibilityIdentifier("learn.ritual.chapter.title")
 
-            Text("READ TOP TO BOTTOM. ORIENTATION FIRST, REFERENCE SECOND.")
+            Text("READ TOP TO BOTTOM: WHAT THE TUB IS, HOW PEOPLE PARTICIPATE, WHAT THIS APP CONTROLS.")
                 .font(.system(.caption, design: .monospaced, weight: .medium))
                 .foregroundStyle(Color.white.opacity(0.74))
                 .tracking(1.0)
                 .textCase(.uppercase)
                 .accessibilityIdentifier("learn.ritual.chapter.copy")
+
+            Text("ACTIVE SECTION // \(activeIndex): \(activeSpec.title)")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(BrandingColors.aberrationCyan.opacity(0.9))
+                .tracking(1.0)
+                .textCase(.uppercase)
+        }
+    }
+
+    private var learnSignalMap: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("SIGNAL MAP")
+                .font(.system(.caption, design: .monospaced, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.6))
+                .tracking(1.3)
+                .textCase(.uppercase)
+
+            Text("BUTTONS + TOUCH + ALWAYS-ON MIC + KINECT BODY TRACKING -> ML FUSION -> LIVE AUDIO/VISUAL OUTPUT.")
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.86))
+                .tracking(0.9)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("APP ROLE: STEER DIRECTION, PLAY MATERIAL, LEARN DOCTRINE, SETTINGS DIAGNOSTICS.")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.74))
+                .tracking(0.95)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -861,76 +881,58 @@ private struct OperatorBlock: View {
     }
 }
 
-private struct RitualSectionView: View {
+private struct LearnDocumentSection: View {
     let sectionNumber: Int
     let spec: LearnChapterSpec
     let isActive: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(String(format: "%02d", sectionNumber))
-                    .font(.system(size: 16, weight: .bold, design: .monospaced))
-                    .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(0.72))
-                    .tracking(1.2)
+                    .font(.system(size: 14, weight: .bold, design: .monospaced))
+                    .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(0.64))
+                    .tracking(1.1)
 
                 Text(spec.title)
                     .font(.system(.title3, design: .monospaced, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white)
                     .tracking(1.0)
-                    .chromaticAberration()
-
-                Spacer()
-
-                if isActive {
-                    Text("ACTIVE")
-                        .font(.system(.caption2, design: .monospaced, weight: .bold))
-                        .foregroundStyle(BrandingColors.glyphGreen.opacity(0.9))
-                        .tracking(1.2)
-                }
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Text(spec.subtitle)
-                .font(.system(.caption, design: .monospaced, weight: .semibold))
-                .foregroundStyle(BrandingColors.aberrationCyan.opacity(0.82))
-                .tracking(1.4)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(BrandingColors.aberrationCyan.opacity(0.88))
+                .tracking(1.3)
+                .textCase(.uppercase)
 
-            OperatorBlock(
-                title: "SYSTEM BRIEF",
-                lines: spec.briefLines,
-                accent: BrandingColors.glyphGreen
-            )
-
-            OperatorBlock(
-                title: "OPERATING NOTES",
-                lines: spec.operationsLines,
-                accent: BrandingColors.warningYellow
-            )
-
-            OperatorBlock(
-                title: "SCLI REFERENCE",
-                lines: spec.commandLines,
-                accent: BrandingColors.aberrationCyan,
-                emphasizeMonospace: true
-            )
-
-            if let jumpTarget = spec.jumpTarget {
-                Text("VECTOR: \(jumpTarget.commandTitle)")
-                    .font(.system(.caption2, design: .monospaced, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.56))
-                    .tracking(1.3)
-            }
+            group(title: "BRIEF", lines: spec.briefLines, accent: BrandingColors.glyphGreen)
+            group(title: "OPERATIONS", lines: spec.operationsLines, accent: BrandingColors.warningYellow)
+            group(title: "CONSOLE", lines: spec.commandLines, accent: BrandingColors.aberrationCyan)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 10)
-        .overlay {
+    }
+
+    private func group(title: String, lines: [String], accent: Color) -> some View {
+        HStack(alignment: .top, spacing: 8) {
             Rectangle()
-                .stroke(
-                    isActive
-                    ? BrandingColors.glyphGreen.opacity(0.5)
-                    : Color.white.opacity(0.16),
-                    lineWidth: 1
-                )
+                .fill(accent.opacity(0.85))
+                .frame(width: 2)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(accent.opacity(0.9))
+                    .tracking(1.2)
+                    .textCase(.uppercase)
+                ForEach(lines, id: \.self) { line in
+                    Text(line)
+                        .font(.system(size: title == "CONSOLE" ? 11 : 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(title == "CONSOLE" ? 0.72 : 0.86))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

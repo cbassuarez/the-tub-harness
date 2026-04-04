@@ -19,24 +19,39 @@ final class PlayGridAudioEngine {
     }
 
     private let queue = DispatchQueue(label: "tub.play.grid.audio", qos: .userInteractive)
+    private let preloadQueue = DispatchQueue(
+        label: "tub.play.grid.audio.preload",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
     private let queueKey = DispatchSpecificKey<UInt8>()
     private let queueKeyValue: UInt8 = 1
     private let session = AVAudioSession.sharedInstance()
+    private let meterLock = NSLock()
 
     private var engine: AVAudioEngine?
     private var voices: [AVAudioPlayerNode] = []
+    private var shortMixer: AVAudioMixerNode?
     private var nextVoiceIndex = 0
     private var longVoices: [AVAudioPlayerNode] = []
     private var longMixer: AVAudioMixerNode?
     private var activeLongSlot: LongPlaybackSlot?
     private var activeLongURL: URL?
+    private var longSlotURLs: [URL?] = [nil, nil]
+    private var longLoopGenerations: [Int] = [0, 0]
     private var retainedLongFiles: [Int: AVAudioFile] = [:]
+    private var retainedOneShotFiles: [UUID: AVAudioFile] = [:]
     private var longTransitionGeneration = 0
     private var longDuckGeneration = 0
     private let longDuckFloor: Float = 0.5
     private let longMixBaseVolume: Float = 1
+    private var shortMeterLevel: Float = 0
+    private var longMeterLevel: Float = 0
+    private var shortMeterPeakHold: Float = 0
+    private var longMeterPeakHold: Float = 0
 
     private var bufferCache: [URL: AVAudioPCMBuffer] = [:]
+    private var inflightPreloadURLs: Set<URL> = []
     private var cacheOrder: [URL] = []
     private let cacheLimit = 96
 
@@ -67,6 +82,8 @@ final class PlayGridAudioEngine {
                     options.insert(.defaultToSpeaker)
                 }
 
+                try self.session.setPreferredSampleRate(48_000)
+                try self.session.setPreferredIOBufferDuration(0.0029)
                 try self.session.setCategory(.playAndRecord, mode: .default, options: options)
                 try self.session.setActive(true, options: [])
 
@@ -83,11 +100,27 @@ final class PlayGridAudioEngine {
         }
     }
 
+    func preload(urls: [URL], limit: Int = 72) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.ensureEngineRunningLocked() else { return }
+            guard !urls.isEmpty else { return }
+
+            var seen = Set<URL>()
+            var queued = 0
+            for url in urls {
+                guard queued < max(1, limit) else { break }
+                guard seen.insert(url).inserted else { continue }
+                self.startPreloadLocked(url: url)
+                queued += 1
+            }
+        }
+    }
+
     func trigger(url: URL, pan: Float, gain: Float) {
         queue.async { [weak self] in
             guard let self else { return }
             guard self.ensureEngineRunningLocked() else { return }
-            guard let buffer = self.loadBufferLocked(url: url) else { return }
             guard !self.voices.isEmpty else { return }
 
             let voice = self.voices[self.nextVoiceIndex % self.voices.count]
@@ -99,7 +132,13 @@ final class PlayGridAudioEngine {
 
             voice.pan = max(-1, min(1, pan))
             voice.volume = max(0, min(1, gain))
-            voice.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+            if let cached = self.bufferCache[url] {
+                voice.scheduleBuffer(cached, at: nil, options: [], completionHandler: nil)
+            } else if !self.scheduleOneShotFileLocked(on: voice, url: url) {
+                guard let fallbackBuffer = self.loadBufferLocked(url: url) else { return }
+                voice.scheduleBuffer(fallbackBuffer, at: nil, options: [], completionHandler: nil)
+            }
+            self.startPreloadLocked(url: url)
             voice.play()
             self.duckLongLayerLocked()
         }
@@ -151,15 +190,92 @@ final class PlayGridAudioEngine {
         }
     }
 
+    func blendLong(primaryURL: URL, secondaryURL: URL?, mix: Float, gain: Float) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.ensureEngineRunningLocked() else { return }
+            guard !self.longVoices.isEmpty else { return }
+            guard self.applyLongBlendSourcesLocked(
+                primaryURL: primaryURL,
+                secondaryURL: secondaryURL,
+                mix: mix,
+                gain: gain
+            ) else { return }
+
+            self.longTransitionGeneration += 1
+            self.longDuckGeneration += 1
+            self.longMixer?.volume = self.longMixBaseVolume
+        }
+    }
+
+    func transitionLongBlend(primaryURL: URL, secondaryURL: URL?, mix: Float, gain: Float) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.ensureEngineRunningLocked() else { return }
+            guard !self.longVoices.isEmpty else { return }
+
+            self.longTransitionGeneration += 1
+            self.longDuckGeneration += 1
+            let generation = self.longDuckGeneration
+            let fadeOutDuration = 0.075
+            let fadeInDuration = 0.16
+            let priorVolume = self.longMixer?.volume ?? self.longMixBaseVolume
+
+            self.animateLongMixerVolumeLocked(
+                from: priorVolume,
+                to: 0,
+                duration: fadeOutDuration,
+                steps: 4,
+                generation: generation
+            )
+
+            self.queue.asyncAfter(deadline: .now() + fadeOutDuration + 0.01) { [weak self] in
+                guard let self else { return }
+                guard generation == self.longDuckGeneration else { return }
+
+                guard self.applyLongBlendSourcesLocked(
+                    primaryURL: primaryURL,
+                    secondaryURL: secondaryURL,
+                    mix: mix,
+                    gain: gain
+                ) else {
+                    self.animateLongMixerVolumeLocked(
+                        from: self.longMixer?.volume ?? 0,
+                        to: priorVolume,
+                        duration: 0.08,
+                        steps: 4,
+                        generation: generation
+                    )
+                    return
+                }
+
+                self.longMixer?.volume = 0
+                self.animateLongMixerVolumeLocked(
+                    from: 0,
+                    to: self.longMixBaseVolume,
+                    duration: fadeInDuration,
+                    steps: 7,
+                    generation: generation
+                )
+            }
+        }
+    }
+
     func stopLong() {
         queue.async { [weak self] in
             guard let self else { return }
             self.longTransitionGeneration += 1
             self.longDuckGeneration += 1
             for (index, node) in self.longVoices.enumerated() {
+                if index < self.longLoopGenerations.count {
+                    self.longLoopGenerations[index] += 1
+                }
                 node.stop()
                 node.volume = 0
                 self.retainedLongFiles.removeValue(forKey: index)
+                if index < self.longSlotURLs.count {
+                    self.longSlotURLs[index] = nil
+                }
             }
             self.activeLongSlot = nil
             self.activeLongURL = nil
@@ -173,17 +289,33 @@ final class PlayGridAudioEngine {
         }
     }
 
+    func currentMeterLevels() -> (short: Double, long: Double) {
+        meterLock.lock()
+        let short = max(shortMeterLevel, shortMeterPeakHold)
+        let long = max(longMeterLevel, longMeterPeakHold)
+        shortMeterPeakHold = max(0, shortMeterPeakHold * 0.92)
+        longMeterPeakHold = max(0, longMeterPeakHold * 0.94)
+        if shortMeterPeakHold < 0.001 { shortMeterPeakHold = 0 }
+        if longMeterPeakHold < 0.001 { longMeterPeakHold = 0 }
+        meterLock.unlock()
+        return (Double(short), Double(long))
+    }
+
     private func configureEngineLocked() {
         let newEngine = AVAudioEngine()
         let outputMixer = newEngine.mainMixerNode
+        let newShortMixer = AVAudioMixerNode()
         var newVoices: [AVAudioPlayerNode] = []
         let newLongMixer = AVAudioMixerNode()
         var newLongVoices: [AVAudioPlayerNode] = []
 
+        newEngine.attach(newShortMixer)
+        newEngine.connect(newShortMixer, to: outputMixer, format: nil)
+
         for _ in 0..<12 {
             let node = AVAudioPlayerNode()
             newEngine.attach(node)
-            newEngine.connect(node, to: outputMixer, format: nil)
+            newEngine.connect(node, to: newShortMixer, format: nil)
             newVoices.append(node)
         }
 
@@ -202,9 +334,82 @@ final class PlayGridAudioEngine {
         newEngine.prepare()
         engine = newEngine
         voices = newVoices
+        shortMixer = newShortMixer
         longMixer = newLongMixer
         longVoices = newLongVoices
+        installMeterTapLocked(on: newShortMixer, lane: .short)
+        installMeterTapLocked(on: newLongMixer, lane: .long)
         _ = ensureEngineRunningLocked()
+    }
+
+    private enum MeterLane {
+        case short
+        case long
+    }
+
+    private func installMeterTapLocked(on node: AVAudioMixerNode, lane: MeterLane) {
+        node.removeTap(onBus: 0)
+        node.installTap(onBus: 0, bufferSize: 128, format: nil) { [weak self] buffer, _ in
+            guard let self else { return }
+            let measured = Self.computeMeterLevel(from: buffer)
+            self.storeMeterLevel(measured, lane: lane)
+        }
+    }
+
+    private func storeMeterLevel(_ level: Float, lane: MeterLane) {
+        let clamped = max(0, min(1, level))
+        meterLock.lock()
+        switch lane {
+        case .short:
+            shortMeterLevel = clamped
+            shortMeterPeakHold = max(shortMeterPeakHold, clamped)
+        case .long:
+            longMeterLevel = clamped
+            longMeterPeakHold = max(longMeterPeakHold, clamped)
+        }
+        meterLock.unlock()
+    }
+
+    private static func computeMeterLevel(from buffer: AVAudioPCMBuffer) -> Float {
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return 0 }
+        let channelCount = max(1, Int(buffer.format.channelCount))
+
+        var peak: Float = 0
+        var energy: Double = 0
+        var sampleCount = 0
+
+        if let channels = buffer.floatChannelData {
+            for ch in 0..<channelCount {
+                let channel = channels[ch]
+                for index in 0..<frameCount {
+                    let value = abs(channel[index])
+                    peak = max(peak, value)
+                    energy += Double(value * value)
+                    sampleCount += 1
+                }
+            }
+        } else if let channels = buffer.int16ChannelData {
+            let norm: Float = 1.0 / Float(Int16.max)
+            for ch in 0..<channelCount {
+                let channel = channels[ch]
+                for index in 0..<frameCount {
+                    let value = abs(Float(channel[index]) * norm)
+                    peak = max(peak, value)
+                    energy += Double(value * value)
+                    sampleCount += 1
+                }
+            }
+        } else {
+            return 0
+        }
+
+        guard sampleCount > 0 else { return 0 }
+        let rms = Float(sqrt(energy / Double(sampleCount)))
+        let blended = max(peak, rms * 1.35)
+        let boosted = min(1, blended * 5.1)
+        // Non-linear lift keeps quiet sounds visible while preserving contrast.
+        return max(0, min(1, pow(boosted, 0.42)))
     }
 
     @discardableResult
@@ -279,17 +484,103 @@ final class PlayGridAudioEngine {
         guard slot.rawValue < longVoices.count else { return false }
         let node = longVoices[slot.rawValue]
 
-        do {
-            let file = try AVAudioFile(forReading: url)
-            guard file.length > 0 else { return false }
-            node.stop()
-            node.scheduleFile(file, at: nil, completionHandler: nil)
-            retainedLongFiles[slot.rawValue] = file
-            node.play()
+        node.stop()
+        longLoopGenerations[slot.rawValue] += 1
+        let generation = longLoopGenerations[slot.rawValue]
+        if slot.rawValue < longSlotURLs.count {
+            longSlotURLs[slot.rawValue] = url
+        }
+        retainedLongFiles.removeValue(forKey: slot.rawValue)
+        return scheduleLongLoopLocked(on: slot, generation: generation)
+    }
+
+    private func applyLongBlendSourcesLocked(primaryURL: URL, secondaryURL: URL?, mix: Float, gain: Float) -> Bool {
+        let clampedMix = max(0, min(1, mix))
+        let clampedGain = max(0, min(1, gain))
+
+        guard ensureLongFilePlayingLocked(on: .a, url: primaryURL) else { return false }
+        let hasSecondary = secondaryURL != nil && secondaryURL != primaryURL
+        if hasSecondary {
+            guard ensureLongFilePlayingLocked(on: .b, url: secondaryURL) else { return false }
+        } else {
+            longLoopGenerations[LongPlaybackSlot.b.rawValue] += 1
+            longVoices[LongPlaybackSlot.b.rawValue].stop()
+            longVoices[LongPlaybackSlot.b.rawValue].volume = 0
+            retainedLongFiles.removeValue(forKey: LongPlaybackSlot.b.rawValue)
+            longSlotURLs[LongPlaybackSlot.b.rawValue] = nil
+        }
+
+        let leftGain: Float
+        let rightGain: Float
+        if hasSecondary {
+            leftGain = (1 - clampedMix) * clampedGain
+            rightGain = clampedMix * clampedGain
+        } else {
+            leftGain = clampedGain
+            rightGain = 0
+        }
+
+        longVoices[LongPlaybackSlot.a.rawValue].volume = leftGain
+        longVoices[LongPlaybackSlot.b.rawValue].volume = rightGain
+        activeLongSlot = hasSecondary && rightGain > leftGain ? .b : .a
+        activeLongURL = hasSecondary && rightGain > leftGain ? secondaryURL : primaryURL
+        return true
+    }
+
+    private func ensureLongFilePlayingLocked(on slot: LongPlaybackSlot, url: URL?) -> Bool {
+        guard slot.rawValue < longVoices.count else { return false }
+        guard let url else {
+            longLoopGenerations[slot.rawValue] += 1
+            longVoices[slot.rawValue].stop()
+            longVoices[slot.rawValue].volume = 0
+            retainedLongFiles.removeValue(forKey: slot.rawValue)
+            if slot.rawValue < longSlotURLs.count {
+                longSlotURLs[slot.rawValue] = nil
+            }
             return true
+        }
+        if slot.rawValue < longSlotURLs.count,
+           longSlotURLs[slot.rawValue] == url,
+           longVoices[slot.rawValue].isPlaying {
+            return true
+        }
+        return scheduleLongFileLocked(on: slot, url: url)
+    }
+
+    @discardableResult
+    private func scheduleLongLoopLocked(on slot: LongPlaybackSlot, generation: Int) -> Bool {
+        guard slot.rawValue < longVoices.count else { return false }
+        guard generation == longLoopGenerations[slot.rawValue] else { return false }
+        guard slot.rawValue < longSlotURLs.count else { return false }
+        guard let url = longSlotURLs[slot.rawValue] else { return false }
+
+        let file: AVAudioFile
+        do {
+            file = try AVAudioFile(forReading: url)
+            guard file.length > 0 else { return false }
         } catch {
             return false
         }
+
+        let node = longVoices[slot.rawValue]
+        retainedLongFiles[slot.rawValue] = file
+        node.scheduleFile(file, at: nil) { [weak self] in
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                guard let self else { return }
+                guard slot.rawValue < self.longLoopGenerations.count else { return }
+                guard generation == self.longLoopGenerations[slot.rawValue] else { return }
+                guard self.longSlotURLs[slot.rawValue] != nil else { return }
+                self.scheduleLongLoopLocked(on: slot, generation: generation)
+                if !node.isPlaying {
+                    node.play()
+                }
+            }
+        }
+        if !node.isPlaying {
+            node.play()
+        }
+        return true
     }
 
     private func crossfadeLongLocked(from fromSlot: LongPlaybackSlot, to toSlot: LongPlaybackSlot, targetGain: Float, duration: TimeInterval) {
@@ -312,9 +603,13 @@ final class PlayGridAudioEngine {
                 toNode.volume = clampedGain * progress
                 fromNode.volume = clampedGain * (1 - progress)
                 if step == steps {
+                    self.longLoopGenerations[fromSlot.rawValue] += 1
                     fromNode.stop()
                     fromNode.volume = 0
                     self.retainedLongFiles.removeValue(forKey: fromSlot.rawValue)
+                    if fromSlot.rawValue < self.longSlotURLs.count {
+                        self.longSlotURLs[fromSlot.rawValue] = nil
+                    }
                 }
             }
         }
@@ -369,7 +664,45 @@ final class PlayGridAudioEngine {
         }
     }
 
+    private func scheduleOneShotFileLocked(on voice: AVAudioPlayerNode, url: URL) -> Bool {
+        do {
+            let file = try AVAudioFile(forReading: url)
+            guard file.length > 0 else { return false }
+            let token = UUID()
+            retainedOneShotFiles[token] = file
+            voice.scheduleFile(file, at: nil) { [weak self] in
+                self?.queue.async { [weak self] in
+                    guard let self else { return }
+                    self.retainedOneShotFiles.removeValue(forKey: token)
+                }
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func startPreloadLocked(url: URL) {
+        guard bufferCache[url] == nil else { return }
+        guard inflightPreloadURLs.insert(url).inserted else { return }
+        preloadQueue.async { [weak self] in
+            guard let self else { return }
+            let loaded = self.loadBufferFromDisk(url: url)
+            self.queue.async { [weak self] in
+                guard let self else { return }
+                self.inflightPreloadURLs.remove(url)
+                guard self.bufferCache[url] == nil else { return }
+                guard let loaded else { return }
+                self.bufferCache[url] = loaded
+                self.cacheOrder.append(url)
+                self.evictCacheIfNeededLocked()
+            }
+        }
+    }
+
     private func teardownLocked() {
+        shortMixer?.removeTap(onBus: 0)
+        longMixer?.removeTap(onBus: 0)
         for node in voices {
             node.stop()
         }
@@ -378,14 +711,25 @@ final class PlayGridAudioEngine {
         }
         engine?.stop()
         voices.removeAll()
+        shortMixer = nil
         longVoices.removeAll()
         longMixer = nil
         engine = nil
         retainedLongFiles.removeAll(keepingCapacity: false)
+        longSlotURLs = [nil, nil]
+        longLoopGenerations = [0, 0]
         activeLongSlot = nil
         activeLongURL = nil
+        retainedOneShotFiles.removeAll(keepingCapacity: false)
         bufferCache.removeAll(keepingCapacity: false)
+        inflightPreloadURLs.removeAll(keepingCapacity: false)
         cacheOrder.removeAll(keepingCapacity: false)
+        meterLock.lock()
+        shortMeterLevel = 0
+        longMeterLevel = 0
+        shortMeterPeakHold = 0
+        longMeterPeakHold = 0
+        meterLock.unlock()
     }
 }
 
@@ -403,7 +747,13 @@ extension PlayGridAudioEngine {
 
     nonisolated static func discoverSampleLibrary() -> [URL] {
         let allowedExtensions = ["wav", "aif", "aiff", "caf", "m4a", "mp3"]
-        let preferredSubdirectories: [String?] = ["Samples", "Assets/Samples", nil]
+        let preferredSubdirectories: [String?] = [
+            "Samples/grid",
+            "Assets/Samples/grid",
+            "Samples",
+            "Assets/Samples",
+            nil
+        ]
         var discovered: [URL] = []
         var seen = Set<String>()
 

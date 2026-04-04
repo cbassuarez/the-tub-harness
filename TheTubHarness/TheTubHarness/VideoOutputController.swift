@@ -1204,7 +1204,8 @@ final class VideoStageStore: ObservableObject {
            !speech.isEmpty,
            let speechTimestamp = latestSpeechTimestamp,
            Date().timeIntervalSince(speechTimestamp) <= 8 {
-            let speechLine = "VOICE: \(speech)"
+            let sanitizedSpeech = StageTextModeration.sanitizeSpeechLine(speech)
+            let speechLine = "VOICE: \(sanitizedSpeech)"
             var mergedLog = built.visual.thoughtLog.filter { !$0.hasPrefix("VOICE: ") }
             // Insert the most recent speech line at the top, cap at 5 lines.
             mergedLog.insert(speechLine, at: 0)
@@ -1294,6 +1295,34 @@ final class VideoStageStore: ObservableObject {
                     monitorSnapshot: built.monitorSnapshot
                 )
             }
+        }
+
+        let sanitizedVisual = StageTextModeration.sanitizeVisual(built.visual)
+        if sanitizedVisual != built.visual {
+            built = VideoStageSnapshot(
+                mode: built.mode,
+                isRunning: built.isRunning,
+                isWaiting: built.isWaiting,
+                waitingReason: built.waitingReason,
+                latencyMs: built.latencyMs,
+                updatedAt: built.updatedAt,
+                wordmark: built.wordmark,
+                sceneProfile: built.sceneProfile,
+                visualProfile: built.visualProfile,
+                params: built.params,
+                picks: built.picks,
+                changes: built.changes,
+                sprites: built.sprites,
+                hasAdjustments: built.hasAdjustments,
+                joltHeld: built.joltHeld,
+                joltBeganAt: built.joltBeganAt,
+                joltSeed: built.joltSeed,
+                stageAudio: built.stageAudio,
+                visual: sanitizedVisual,
+                thoughtChangedAt: built.thoughtChangedAt,
+                thoughtLogComposedAt: built.thoughtLogComposedAt,
+                monitorSnapshot: built.monitorSnapshot
+            )
         }
 
         snapshot = built

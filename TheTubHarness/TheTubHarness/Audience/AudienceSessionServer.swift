@@ -33,6 +33,14 @@ struct AudienceInfluenceTelemetry: Equatable {
 }
 
 class AudienceSessionServer: ObservableObject {
+    private struct OperatorVectorBroadcastSignature: Equatable {
+        let sourceSessionId: String
+        let paramBin: Int
+        let thoughtBin: Int
+        let audioBin: Int
+        let ttlBin: Int
+    }
+
     @Published var activeSessions: [String: AudienceSessionState] = [:]
     @Published var claimStates: [String: AudienceClaimState] = [:]
     @Published private(set) var lastInfluenceTelemetry: AudienceInfluenceTelemetry?
@@ -43,6 +51,8 @@ class AudienceSessionServer: ObservableObject {
     private var connections: [String: NWConnection] = [:]
     private var receiveBuffers: [String: Data] = [:]
     private var sessionConnectionKeys: [String: String] = [:]
+    private var captureOutgoingEnvelopesForTesting = false
+    private var capturedOutgoingEnvelopesForTesting: [AudienceEnvelope] = []
     private var descriptorRevision = 1
     private var listeningPort: UInt16 = 9911
     private var totalPreferenceEvents = 0
@@ -50,6 +60,7 @@ class AudienceSessionServer: ObservableObject {
     private var cachedStageSnapshot: StageSnapshotPayload?
     private var lastBroadcastStageSnapshot: StageSnapshotPayload?
     private var lastStageBroadcastAt: Date = .distantPast
+    private var lastOperatorVectorBroadcastSignature: OperatorVectorBroadcastSignature?
     private let stageBroadcastInterval: TimeInterval = 1.0 / 30.0
     private let preferenceOverlay = AudiencePreferenceOverlay()
 
@@ -154,11 +165,13 @@ class AudienceSessionServer: ObservableObject {
 
             detachedSessions.forEach { sessionId in
                 self.sessionConnectionKeys.removeValue(forKey: sessionId)
+                self.preferenceOverlay.clearSession(sessionId)
                 DispatchQueue.main.async {
                     self.activeSessions.removeValue(forKey: sessionId)
                     self.claimStates.removeValue(forKey: sessionId)
                 }
             }
+            self.broadcastCanonicalOperatorVectorIfChanged()
         }
     }
 
@@ -357,9 +370,11 @@ class AudienceSessionServer: ObservableObject {
             if let stageSnapshot = cachedStageSnapshot {
                 sendStageSnapshot(stageSnapshot, to: sessionId)
             }
+            sendCanonicalOperatorVectorSnapshot(to: sessionId)
             sendAck(to: sessionId, message: "SESSION OPEN")
         case .sessionClose:
             cleanupSession(sessionId)
+            broadcastCanonicalOperatorVectorIfChanged()
         case .queryState:
             sendDescriptorSnapshot(to: sessionId)
         case .steerVector:
@@ -387,6 +402,7 @@ class AudienceSessionServer: ObservableObject {
                 preferenceOverlay.recordOperatorVector(payload, for: sessionId)
                 let summary = "OPERATOR VECTOR APPLIED P:\(formatSigned(payload.paramVector)) T:\(formatSigned(payload.thoughtVector)) A:\(formatSigned(payload.audioVector)) TTL:\(Int(payload.ttlSeconds))s"
                 sendAck(to: sessionId, message: summary)
+                broadcastCanonicalOperatorVectorIfChanged()
             }
         case .descriptorSnapshot:
             // Companion is not authoritative for descriptors in this path.
@@ -491,7 +507,90 @@ class AudienceSessionServer: ObservableObject {
         sendEnvelope(envelope, to: sessionId)
     }
 
+    private func sendCanonicalOperatorVectorSnapshot(to sessionId: String) {
+        guard let state = preferenceOverlay.activeOperatorVectorState(activeSessions: overlayEligibleSessions()) else {
+            return
+        }
+        let envelope = AudienceEnvelope(
+            kind: .operatorVector,
+            sessionId: state.sessionId,
+            operatorVector: state.payload
+        )
+        sendEnvelope(envelope, to: sessionId)
+    }
+
+    private func broadcastCanonicalOperatorVectorIfChanged() {
+        let maybeState = preferenceOverlay.activeOperatorVectorState(activeSessions: overlayEligibleSessions())
+        let sessions = Array(sessionConnectionKeys.keys)
+        guard !sessions.isEmpty else {
+            lastOperatorVectorBroadcastSignature = nil
+            return
+        }
+
+        guard let state = maybeState else {
+            if lastOperatorVectorBroadcastSignature == nil {
+                return
+            }
+            lastOperatorVectorBroadcastSignature = nil
+            let neutral = OperatorVectorPayload(
+                paramVector: 0,
+                thoughtVector: 0,
+                audioVector: 0,
+                ttlSeconds: 0
+            )
+            sessions.forEach { destinationSessionId in
+                let envelope = AudienceEnvelope(
+                    kind: .operatorVector,
+                    sessionId: "SYSTEM",
+                    operatorVector: neutral
+                )
+                sendEnvelope(envelope, to: destinationSessionId)
+            }
+            return
+        }
+
+        let signature = operatorVectorBroadcastSignature(for: state)
+        guard signature != lastOperatorVectorBroadcastSignature else { return }
+        lastOperatorVectorBroadcastSignature = signature
+
+        sessions.forEach { destinationSessionId in
+            let envelope = AudienceEnvelope(
+                kind: .operatorVector,
+                sessionId: state.sessionId,
+                operatorVector: state.payload
+            )
+            sendEnvelope(envelope, to: destinationSessionId)
+        }
+    }
+
+    private func operatorVectorBroadcastSignature(for state: ActiveOperatorVectorState) -> OperatorVectorBroadcastSignature {
+        OperatorVectorBroadcastSignature(
+            sourceSessionId: state.sessionId,
+            paramBin: quantizedBin(state.payload.paramVector, step: 0.01),
+            thoughtBin: quantizedBin(state.payload.thoughtVector, step: 0.01),
+            audioBin: quantizedBin(state.payload.audioVector, step: 0.01),
+            ttlBin: Int(state.payload.ttlSeconds.rounded(.toNearestOrEven))
+        )
+    }
+
+    private func overlayEligibleSessions() -> [String: AudienceSessionState] {
+        var sessions: [String: AudienceSessionState] = [:]
+        for sessionId in sessionConnectionKeys.keys {
+            sessions[sessionId] = AudienceSessionState(sessionId: sessionId, sessionType: .appCompanion)
+        }
+        return sessions
+    }
+
+    private func quantizedBin(_ value: Double, step: Double) -> Int {
+        guard step > 0 else { return 0 }
+        return Int((value / step).rounded())
+    }
+
     private func sendEnvelope(_ envelope: AudienceEnvelope, to sessionId: String) {
+        if captureOutgoingEnvelopesForTesting {
+            capturedOutgoingEnvelopesForTesting.append(envelope)
+        }
+
         guard
             let connectionKey = sessionConnectionKeys[sessionId],
             let connection = connections[connectionKey]
@@ -663,6 +762,23 @@ class AudienceSessionServer: ObservableObject {
         default:
             return nil
         }
+    }
+
+    func enableOutgoingEnvelopeCaptureForTesting(_ enabled: Bool) {
+        captureOutgoingEnvelopesForTesting = enabled
+        if !enabled {
+            capturedOutgoingEnvelopesForTesting.removeAll(keepingCapacity: false)
+        }
+    }
+
+    func takeOutgoingEnvelopesForTesting() -> [AudienceEnvelope] {
+        let envelopes = capturedOutgoingEnvelopesForTesting
+        capturedOutgoingEnvelopesForTesting.removeAll(keepingCapacity: true)
+        return envelopes
+    }
+
+    func simulateEnvelopeForTesting(_ envelope: AudienceEnvelope, connectionKey: String = "test-connection") {
+        handleEnvelope(envelope, connectionKey: connectionKey)
     }
 }
 

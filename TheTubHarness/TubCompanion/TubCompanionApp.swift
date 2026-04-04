@@ -22,6 +22,9 @@ struct TubCompanionApp: App {
                 harnessClient: harnessClient,
                 externalAudioRouteMonitor: externalAudioRouteMonitor
             )
+            #if targetEnvironment(macCatalyst)
+            .frame(minWidth: 980, minHeight: 700)
+            #endif
             .environmentObject(appState)
             .environmentObject(harnessClient)
             .environmentObject(externalAudioRouteMonitor)
@@ -132,6 +135,139 @@ enum AppTab: String, Hashable {
     case settings
 }
 
+enum ShellLayoutClass: String, Equatable {
+    case compact
+    case regular
+    case wide
+
+    static func classify(width: CGFloat, metrics: ShellLayoutMetrics = .default) -> ShellLayoutClass {
+        if width < metrics.compactUpperBound {
+            return .compact
+        }
+        if width < metrics.regularUpperBound {
+            return .regular
+        }
+        return .wide
+    }
+}
+
+struct ShellLayoutMetrics: Equatable {
+    let compactUpperBound: CGFloat
+    let regularUpperBound: CGFloat
+    let railWidthRegular: CGFloat
+    let railWidthWide: CGFloat
+    let inspectorWidthRegular: CGFloat
+    let inspectorWidthWide: CGFloat
+    let paneSpacing: CGFloat
+
+    static let `default` = ShellLayoutMetrics(
+        compactUpperBound: 700,
+        regularUpperBound: 1024,
+        railWidthRegular: 140,
+        railWidthWide: 152,
+        inspectorWidthRegular: 312,
+        inspectorWidthWide: 360,
+        paneSpacing: 12
+    )
+}
+
+@MainActor
+final class ShellLayoutModel: ObservableObject {
+    @Published private(set) var layoutClass: ShellLayoutClass = .compact
+    @Published private(set) var measuredWidth: CGFloat = 0
+    @Published private(set) var isRegularInspectorVisible: Bool
+
+    let metrics: ShellLayoutMetrics
+
+    private let defaults = UserDefaults.standard
+    private let persistRegularInspectorVisibility: Bool
+    private static let regularInspectorVisibilityKey = "ShellRegularInspectorVisible"
+
+    init(
+        metrics: ShellLayoutMetrics = .default,
+        persistRegularInspectorVisibility: Bool = true
+    ) {
+        self.metrics = metrics
+        self.persistRegularInspectorVisibility = persistRegularInspectorVisibility
+        if persistRegularInspectorVisibility {
+            self.isRegularInspectorVisible = defaults.bool(forKey: Self.regularInspectorVisibilityKey)
+        } else {
+            self.isRegularInspectorVisible = false
+        }
+    }
+
+    var usesLeftRail: Bool {
+        layoutClass != .compact
+    }
+
+    var showsSecondaryPane: Bool {
+        switch layoutClass {
+        case .compact:
+            return false
+        case .regular:
+            return isRegularInspectorVisible
+        case .wide:
+            return true
+        }
+    }
+
+    var railWidth: CGFloat {
+        layoutClass == .wide ? metrics.railWidthWide : metrics.railWidthRegular
+    }
+
+    var inspectorWidth: CGFloat {
+        layoutClass == .wide ? metrics.inspectorWidthWide : metrics.inspectorWidthRegular
+    }
+
+    func update(for width: CGFloat) {
+        measuredWidth = width
+        let nextClass = ShellLayoutClass.classify(width: width, metrics: metrics)
+        if nextClass != layoutClass {
+            layoutClass = nextClass
+        }
+    }
+
+    func toggleInspectorPane() {
+        guard layoutClass == .regular else { return }
+        isRegularInspectorVisible.toggle()
+        if persistRegularInspectorVisibility {
+            defaults.set(isRegularInspectorVisible, forKey: Self.regularInspectorVisibilityKey)
+        }
+    }
+}
+
+struct SteerInspectorState: Equatable {
+    let linkStatus: String
+    let descriptorSource: String
+    let mode: String
+    let access: String
+    let activeDescriptor: String
+    let preferenceCount: Int
+    let lastPreferenceEvent: String
+}
+
+struct PlayInspectorState: Equatable {
+    let cableStatus: String
+    let routeDescription: String
+    let sessionId: String
+    let contributionCount: Int
+    let debugOutput: String
+}
+
+struct LearnInspectorState: Equatable {
+    let linkStatus: String
+    let stageFeed: String
+    let lastReturnMode: String
+    let lastReturnChapter: String
+}
+
+struct SettingsInspectorState: Equatable {
+    let harnessStatus: String
+    let stageFeed: String
+    let sessionId: String
+    let lastSuccessfulSessionAt: String
+}
+
 struct CompanionRootView: View {
     @ObservedObject var appState: TubCompanionAppState
     @ObservedObject var harnessClient: HarnessClient
@@ -142,21 +278,23 @@ struct CompanionRootView: View {
 
     var body: some View {
         ZStack {
-            MainShellView(
-                appState: appState,
-                harnessClient: harnessClient,
-                externalAudioRouteMonitor: externalAudioRouteMonitor,
-                onPlaySurfaceReady: {
-                    isPlaySurfaceReady = true
-                }
-            )
+            if !appState.shouldPresentConnectionGate {
+                MainShellView(
+                    appState: appState,
+                    harnessClient: harnessClient,
+                    externalAudioRouteMonitor: externalAudioRouteMonitor,
+                    onPlaySurfaceReady: {
+                        isPlaySurfaceReady = true
+                    }
+                )
+            }
             if appState.shouldPresentConnectionGate {
                 ConnectionGateView(
                     appState: appState,
                     harnessClient: harnessClient,
                     externalAudioRouteMonitor: externalAudioRouteMonitor,
                     presentation: .fullScreen,
-                    preferredIntent: appState.lastEntryIntent
+                    preferredIntent: appState.bypassPreferredEntryIntentOnce ? nil : appState.lastEntryIntent
                 )
                 .transition(.opacity)
                 .zIndex(10)
@@ -207,46 +345,48 @@ struct MainShellView: View {
     @State private var selectedTab: AppTab = .steer
     @State private var isPlaySurfacePrimed = false
     @State private var didApplyInitialTab = false
+    @StateObject private var shellLayout = ShellLayoutModel()
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            currentTabView
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if selectedTab != .play, !isPlaySurfacePrimed {
-                PlayTabHostView(
-                    appState: appState,
-                    harnessClient: harnessClient,
-                    externalAudioRouteMonitor: externalAudioRouteMonitor,
-                    isActivated: true,
-                    isPrimed: $isPlaySurfacePrimed
-                )
-                .frame(width: 1, height: 1)
-                .opacity(0.01)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
+        GeometryReader { proxy in
+            ZStack {
+                Color.black.ignoresSafeArea()
+                if shellLayout.layoutClass == .compact {
+                    compactShell
+                } else {
+                    wideShell(safeAreaInsets: proxy.safeAreaInsets)
+                }
+                if selectedTab != .play, !isPlaySurfacePrimed {
+                    PlayTabHostView(
+                        appState: appState,
+                        harnessClient: harnessClient,
+                        externalAudioRouteMonitor: externalAudioRouteMonitor,
+                        isActivated: true,
+                        isPrimed: $isPlaySurfacePrimed
+                    )
+                    .frame(width: 1, height: 1)
+                    .opacity(0.01)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
             }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                CommandSignalRule()
-                ShellCommandNavigator(
-                    selectedTab: selectedTab,
-                    onSelect: { tab in
-                        selectTab(tab)
-                    }
-                )
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-                .padding(.bottom, 10)
+            .onAppear {
+                shellLayout.update(for: proxy.size.width)
             }
-            .background(Color.black.opacity(0.96))
+            .onChange(of: proxy.size.width) { _, width in
+                shellLayout.update(for: width)
+            }
         }
         .onAppear {
             guard !didApplyInitialTab else { return }
             didApplyInitialTab = true
-            let initialTab = appState.initialTabSelection()
-            selectTab(initialTab)
+            if let requested = appState.tabNavigationRequest {
+                selectTab(requested)
+                appState.consumeTabNavigationRequest()
+            } else {
+                let initialTab = appState.initialTabSelection()
+                selectTab(initialTab)
+            }
         }
         .onChange(of: selectedTab) { _, tab in
             appState.persistSelectedTab(tab)
@@ -260,6 +400,108 @@ struct MainShellView: View {
             guard primed else { return }
             onPlaySurfaceReady()
         }
+    }
+
+    private var compactShell: some View {
+        ZStack {
+            currentTabView
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                CommandSignalRule()
+                ShellCommandNavigator(
+                    selectedTab: selectedTab,
+                    layoutClass: .compact,
+                    appState: appState,
+                    harnessClient: harnessClient,
+                    onSelect: { tab in
+                        selectTab(tab)
+                    },
+                    showsInspectorToggle: false,
+                    inspectorVisible: false,
+                    onToggleInspector: nil
+                )
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 10)
+            }
+            .background(Color.black.opacity(0.96))
+        }
+    }
+
+    private func wideShell(safeAreaInsets: EdgeInsets) -> some View {
+        HStack(spacing: shellLayout.metrics.paneSpacing) {
+            ShellCommandNavigator(
+                selectedTab: selectedTab,
+                layoutClass: shellLayout.layoutClass,
+                appState: appState,
+                harnessClient: harnessClient,
+                onSelect: { tab in
+                    selectTab(tab)
+                },
+                showsInspectorToggle: shellLayout.layoutClass == .regular,
+                inspectorVisible: shellLayout.showsSecondaryPane,
+                onToggleInspector: {
+                    shellLayout.toggleInspectorPane()
+                }
+            )
+            .frame(width: shellLayout.railWidth)
+            .accessibilityIdentifier("shell.nav.rail")
+
+            Rectangle()
+                .fill(Color.white.opacity(0.13))
+                .frame(width: 1)
+
+            currentTabView
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityIdentifier("shell.content.primary")
+
+            if shellLayout.showsSecondaryPane {
+                Rectangle()
+                    .fill(Color.white.opacity(0.13))
+                    .frame(width: 1)
+
+                ShellInspectorPane(
+                    selectedTab: selectedTab,
+                    steerState: steerInspectorState,
+                    playState: playInspectorState,
+                    learnState: learnInspectorState,
+                    settingsState: settingsInspectorState,
+                    onSteerLess: {
+                        harnessClient.sendIntensityNudge(direction: .less, intensity: 1, sessionId: appState.sessionId)
+                        appState.recordPreference(
+                            AudiencePreferenceEvent(
+                                sessionId: appState.sessionId ?? "unknown",
+                                eventType: .lessAction,
+                                intensity: 1
+                            )
+                        )
+                    },
+                    onSteerMore: {
+                        harnessClient.sendIntensityNudge(direction: .more, intensity: 1, sessionId: appState.sessionId)
+                        appState.recordPreference(
+                            AudiencePreferenceEvent(
+                                sessionId: appState.sessionId ?? "unknown",
+                                eventType: .moreAction,
+                                intensity: 1
+                            )
+                        )
+                    },
+                    onJumpSteer: {
+                        selectTab(.steer)
+                    },
+                    onJumpPlay: {
+                        selectTab(.play)
+                    }
+                )
+                .frame(width: shellLayout.inspectorWidth)
+                .accessibilityIdentifier("shell.inspector")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, max(safeAreaInsets.top + 8, 12))
+        .padding(.bottom, max(safeAreaInsets.bottom + 10, 12))
     }
 
     @ViewBuilder
@@ -295,45 +537,232 @@ struct MainShellView: View {
     }
 
     private func selectTab(_ tab: AppTab) {
+        if tab == .steer {
+            attemptQuietHarnessReconnectIfNeeded()
+        }
         selectedTab = tab
+    }
+
+    private func attemptQuietHarnessReconnectIfNeeded() {
+        if case .connected = appState.harnessConnectionState {
+            return
+        }
+        if case .connecting = appState.harnessConnectionState {
+            return
+        }
+
+        let host = appState.lastKnownHarnessHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedHost = host.isEmpty ? "tub-harness.local" : host
+        let port = appState.lastKnownHarnessPort
+
+        appState.syncHarnessState(.connecting)
+        harnessClient.connectToHarness(host: resolvedHost, port: port)
+        harnessClient.preflightHandshake(host: resolvedHost, port: port) { result in
+            guard case .success(let payload) = result else { return }
+            let hintedHost = payload.hostHints?.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let handshakeHost = (hintedHost?.isEmpty == false) ? hintedHost! : resolvedHost
+            let handshakePort = payload.audiencePort.flatMap { UInt16(exactly: $0) } ?? port
+            guard handshakeHost != resolvedHost || handshakePort != port else { return }
+            appState.updateHarnessAddress(host: handshakeHost, port: handshakePort)
+            harnessClient.disconnect(manual: false)
+            harnessClient.connectToHarness(host: handshakeHost, port: handshakePort)
+        }
+    }
+
+    private var steerInspectorState: SteerInspectorState {
+        let linkStatus: String
+        if case .connected = appState.harnessConnectionState {
+            linkStatus = "CONNECTED"
+        } else {
+            linkStatus = "OFFLINE"
+        }
+        let descriptorSource = harnessClient.descriptorSnapshot == nil ? "LOCAL" : "SERVER"
+        let lastEvent = appState.preferenceEvents.last?.eventType.rawValue.uppercased() ?? "NONE"
+        return SteerInspectorState(
+            linkStatus: linkStatus,
+            descriptorSource: descriptorSource,
+            mode: "STEER",
+            access: appState.steerAccessDisplayState.chipLabel,
+            activeDescriptor: appState.currentDescriptors.first?.uppercased() ?? "NONE",
+            preferenceCount: appState.preferenceEvents.count,
+            lastPreferenceEvent: lastEvent
+        )
+    }
+
+    private var playInspectorState: PlayInspectorState {
+        let cableConnected = appState.isExternalAudioRouteActive || appState.isCableRouteSimulated || appState.isCablePathSatisfied
+        return PlayInspectorState(
+            cableStatus: cableConnected ? "CONNECTED" : "MISSING",
+            routeDescription: appState.externalAudioRouteDescription.uppercased(),
+            sessionId: appState.sessionId?.uppercased() ?? "NONE",
+            contributionCount: appState.audioContributions.count,
+            debugOutput: appState.isDebugOutputSimulated ? "SIMULATED" : "OFF"
+        )
+    }
+
+    private var learnInspectorState: LearnInspectorState {
+        let linkStatus: String
+        if case .connected = appState.harnessConnectionState {
+            linkStatus = "CONNECTED"
+        } else {
+            linkStatus = "OFFLINE"
+        }
+        return LearnInspectorState(
+            linkStatus: linkStatus,
+            stageFeed: harnessClient.stageFeedState.chipLabel,
+            lastReturnMode: appState.learnReturnContext?.mode.title.uppercased() ?? "RITUAL",
+            lastReturnChapter: appState.learnReturnContext.map { "\($0.chapter.rawValue + 1)".uppercased() } ?? "1"
+        )
+    }
+
+    private var settingsInspectorState: SettingsInspectorState {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        let timestamp = appState.lastSuccessfulSessionAt.map { formatter.string(from: $0).uppercased() } ?? "NONE"
+        let harnessStatus: String
+        switch appState.harnessConnectionState {
+        case .disconnected:
+            harnessStatus = "DISCONNECTED"
+        case .connecting:
+            harnessStatus = "CONNECTING"
+        case .connected:
+            harnessStatus = "CONNECTED"
+        case .error:
+            harnessStatus = "ERROR"
+        }
+        return SettingsInspectorState(
+            harnessStatus: harnessStatus,
+            stageFeed: harnessClient.stageFeedState.chipLabel,
+            sessionId: appState.sessionId?.uppercased() ?? "NONE",
+            lastSuccessfulSessionAt: timestamp
+        )
     }
 }
 
 private struct ShellCommandNavigator: View {
     let selectedTab: AppTab
+    let layoutClass: ShellLayoutClass
+    let appState: TubCompanionAppState
+    let harnessClient: HarnessClient
     let onSelect: (AppTab) -> Void
+    let showsInspectorToggle: Bool
+    let inspectorVisible: Bool
+    let onToggleInspector: (() -> Void)?
 
     private let allTabs: [AppTab] = [.steer, .play, .learn, .settings]
+    @State private var hoveredTab: AppTab?
+    @State private var hoveringInspector = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            ForEach(allTabs, id: \.rawValue) { tab in
-                let selected = tab == selectedTab
-                Button {
-                    onSelect(tab)
-                } label: {
-                    Text(tabTitle(tab))
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .tracking(1.0)
-                        .foregroundStyle(selected ? BrandingColors.glyphGreen : Color.white.opacity(0.76))
-                        .frame(maxWidth: .infinity, minHeight: 46)
-                        .overlay {
-                            Rectangle()
-                                .stroke(
-                                    selected
-                                    ? BrandingColors.glyphGreen.opacity(0.72)
-                                    : Color.white.opacity(0.16),
-                                    lineWidth: 1
-                                )
-                        }
+        Group {
+            if layoutClass == .compact {
+                HStack(spacing: 8) {
+                    tabButtons
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("shell.nav.button.\(tab.rawValue)")
-                .accessibilityLabel(tabTitle(tab).lowercased())
-                .accessibilityAddTraits(selected ? [.isSelected] : [])
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("COMMAND SHELL")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .tracking(1.2)
+                        .foregroundStyle(Color.white.opacity(0.64))
+                        .padding(.horizontal, 2)
+
+                    VStack(spacing: 8) {
+                        tabButtons
+                    }
+
+                    if showsInspectorToggle, let onToggleInspector {
+                        Button {
+                            onToggleInspector()
+                        } label: {
+                            Text(inspectorVisible ? "INSPECTOR ON" : "INSPECTOR OFF")
+                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                .tracking(1.0)
+                                .foregroundStyle(inspectorVisible ? BrandingColors.aberrationCyan : Color.white.opacity(0.7))
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .background(
+                                    hoveringInspector
+                                    ? BrandingColors.aberrationCyan.opacity(0.12)
+                                    : Color.clear
+                                )
+                                .overlay {
+                                    Rectangle()
+                                        .stroke(
+                                            inspectorVisible
+                                            ? BrandingColors.aberrationCyan.opacity(0.66)
+                                            : Color.white.opacity(0.2),
+                                            lineWidth: 1
+                                        )
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut("0", modifiers: [.command])
+                        .onHover { hovering in
+                            hoveringInspector = hovering
+                        }
+                    }
+
+                    Spacer(minLength: 8)
+
+                    VStack(spacing: 8) {
+                        CommandStatusChip(
+                            title: "LINK",
+                            value: appState.harnessConnectionState == .connected ? "CONNECTED" : "OFFLINE",
+                            isActive: appState.harnessConnectionState == .connected
+                        )
+                        CommandStatusChip(
+                            title: "STAGE FEED",
+                            value: harnessClient.stageFeedState.chipLabel,
+                            isActive: harnessClient.stageFeedState != .standby
+                        )
+                    }
+                }
+                .padding(.vertical, 4)
             }
         }
         .accessibilityIdentifier("shell.nav")
+    }
+
+    private var tabButtons: some View {
+        ForEach(allTabs, id: \.rawValue) { tab in
+            let selected = tab == selectedTab
+            let hovered = hoveredTab == tab
+            Button {
+                onSelect(tab)
+            } label: {
+                Text(tabTitle(tab))
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .tracking(1.0)
+                    .foregroundStyle(selected ? BrandingColors.glyphGreen : Color.white.opacity(0.76))
+                    .frame(maxWidth: .infinity, minHeight: layoutClass == .compact ? 46 : 50)
+                    .background(
+                        hovered
+                        ? BrandingColors.glyphGreen.opacity(0.08)
+                        : Color.clear
+                    )
+                    .overlay {
+                        Rectangle()
+                            .stroke(
+                                selected
+                                ? BrandingColors.glyphGreen.opacity(0.72)
+                                : Color.white.opacity(hovered ? 0.32 : 0.16),
+                                lineWidth: 1
+                            )
+                    }
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(shortcutKey(for: tab), modifiers: [.command])
+            .onHover { hovering in
+                if hovering {
+                    hoveredTab = tab
+                } else if hoveredTab == tab {
+                    hoveredTab = nil
+                }
+            }
+            .accessibilityIdentifier("shell.nav.button.\(tab.rawValue)")
+            .accessibilityLabel(tabTitle(tab).lowercased())
+            .accessibilityAddTraits(selected ? [.isSelected] : [])
+        }
     }
 
     private func tabTitle(_ tab: AppTab) -> String {
@@ -342,6 +771,180 @@ private struct ShellCommandNavigator: View {
         case .play: return "PLAY"
         case .learn: return "LEARN"
         case .settings: return "SETTINGS"
+        }
+    }
+
+    private func shortcutKey(for tab: AppTab) -> KeyEquivalent {
+        switch tab {
+        case .steer:
+            return "1"
+        case .play:
+            return "2"
+        case .learn:
+            return "3"
+        case .settings:
+            return "4"
+        }
+    }
+}
+
+private struct ShellInspectorPane: View {
+    let selectedTab: AppTab
+    let steerState: SteerInspectorState
+    let playState: PlayInspectorState
+    let learnState: LearnInspectorState
+    let settingsState: SettingsInspectorState
+    let onSteerLess: () -> Void
+    let onSteerMore: () -> Void
+    let onJumpSteer: () -> Void
+    let onJumpPlay: () -> Void
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("\(selectedTabTitle) INSPECTOR")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .tracking(1.2)
+                    .foregroundStyle(Color.white.opacity(0.72))
+
+                CommandSignalRule(opacity: 0.14)
+
+                switch selectedTab {
+                case .steer:
+                    steerPane
+                case .play:
+                    playPane
+                case .learn:
+                    learnPane
+                case .settings:
+                    settingsPane
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private var steerPane: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            inspectorLine("LINK", steerState.linkStatus, active: steerState.linkStatus == "CONNECTED")
+            inspectorLine("DESCRIPTORS", steerState.descriptorSource, active: steerState.descriptorSource == "SERVER")
+            inspectorLine("ACCESS", steerState.access, active: steerState.access == "UNLOCKED")
+            inspectorLine("ACTIVE", steerState.activeDescriptor, active: true)
+            inspectorLine("EVENTS", "\(steerState.preferenceCount)")
+            inspectorLine("LAST", steerState.lastPreferenceEvent)
+
+            HStack(spacing: 8) {
+                CommandRailButton(
+                    title: "LESS",
+                    isEnabled: steerState.linkStatus == "CONNECTED",
+                    isActive: false,
+                    accent: BrandingColors.glyphGreen,
+                    action: onSteerLess
+                )
+                CommandRailButton(
+                    title: "MORE",
+                    isEnabled: steerState.linkStatus == "CONNECTED",
+                    isActive: false,
+                    accent: BrandingColors.glyphGreen,
+                    action: onSteerMore
+                )
+            }
+
+            Text("PRIMARY PAD REMAINS LIVE IN MAIN PANE.")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(0.9)
+                .foregroundStyle(Color.white.opacity(0.54))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var playPane: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            inspectorLine("CABLE", playState.cableStatus, active: playState.cableStatus == "CONNECTED")
+            inspectorLine("ROUTE", playState.routeDescription)
+            inspectorLine("SESSION", playState.sessionId)
+            inspectorLine("CONTRIBUTIONS", "\(playState.contributionCount)")
+            inspectorLine("DEBUG OUTPUT", playState.debugOutput, active: playState.debugOutput != "OFF")
+            Text("GRID + LONG STRIP RUN IN PRIMARY PANE.")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(0.9)
+                .foregroundStyle(Color.white.opacity(0.54))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var learnPane: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            inspectorLine("LINK", learnState.linkStatus, active: learnState.linkStatus == "CONNECTED")
+            inspectorLine("STAGE FEED", learnState.stageFeed, active: learnState.stageFeed == "LIVE")
+            inspectorLine("RETURN MODE", learnState.lastReturnMode)
+            inspectorLine("RETURN CHAPTER", learnState.lastReturnChapter)
+            Text("ATLAS INDEX STAYS SCANNABLE IN PRIMARY DOC PANE.")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(0.9)
+                .foregroundStyle(Color.white.opacity(0.54))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                CommandRailButton(
+                    title: "JUMP STEER",
+                    isEnabled: true,
+                    isActive: false,
+                    accent: BrandingColors.glyphGreen,
+                    action: onJumpSteer
+                )
+                CommandRailButton(
+                    title: "JUMP PLAY",
+                    isEnabled: true,
+                    isActive: false,
+                    accent: BrandingColors.glyphGreen,
+                    action: onJumpPlay
+                )
+            }
+        }
+    }
+
+    private var settingsPane: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            inspectorLine("HARNESS", settingsState.harnessStatus, active: settingsState.harnessStatus == "CONNECTED")
+            inspectorLine("STAGE FEED", settingsState.stageFeed, active: settingsState.stageFeed != "STANDBY")
+            inspectorLine("SESSION", settingsState.sessionId)
+            inspectorLine("LAST LINK", settingsState.lastSuccessfulSessionAt)
+            Text("RUN RECOVERY + COVERT CONTROLS IN PRIMARY SETTINGS PANE.")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(0.9)
+                .foregroundStyle(Color.white.opacity(0.54))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var selectedTabTitle: String {
+        switch selectedTab {
+        case .steer:
+            return "STEER"
+        case .play:
+            return "PLAY"
+        case .learn:
+            return "LEARN"
+        case .settings:
+            return "SETTINGS"
+        }
+    }
+
+    private func inspectorLine(_ label: String, _ value: String, active: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(1.1)
+                .foregroundStyle(Color.white.opacity(0.52))
+                .frame(minWidth: 92, alignment: .leading)
+            Text(value.uppercased())
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .tracking(0.9)
+                .foregroundStyle(active ? BrandingColors.glyphGreen : Color.white.opacity(0.82))
+                .lineLimit(2)
+            Spacer(minLength: 0)
         }
     }
 }
@@ -413,6 +1016,8 @@ class TubCompanionAppState: NSObject, ObservableObject {
     @Published var steerUnlockExpiresAt: Date?
     @Published private(set) var steerHackSession: SteerHackSession
     @Published private(set) var steerHackRoundSpecs: [SteerHackRoundSpec]
+    @Published var forcePresentEntryGate = false
+    @Published var bypassPreferredEntryIntentOnce = false
 
     private let defaults = UserDefaults.standard
     private let debugBypassSteerLockOverride: Bool?
@@ -560,9 +1165,12 @@ class TubCompanionAppState: NSObject, ObservableObject {
     }
 
     func chooseEntryIntent(_ intent: EntryIntent) {
+        forcePresentEntryGate = false
+        bypassPreferredEntryIntentOnce = false
         entryIntent = intent
         lastEntryIntent = intent
         defaults.set(intent.rawValue, forKey: DefaultsKey.lastEntryIntent)
+        requestTabNavigation(defaultTab(for: intent))
     }
 
     func markCablePathSatisfied() {
@@ -583,6 +1191,8 @@ class TubCompanionAppState: NSObject, ObservableObject {
     }
 
     func resetEntryFlow() {
+        forcePresentEntryGate = true
+        bypassPreferredEntryIntentOnce = true
         entryIntent = nil
         isCablePathSatisfied = false
     }
@@ -603,6 +1213,9 @@ class TubCompanionAppState: NSObject, ObservableObject {
     }
 
     var shouldPresentConnectionGate: Bool {
+        if forcePresentEntryGate {
+            return true
+        }
         #if DEBUG
         if debugSkipEntryGate {
             return false
@@ -615,7 +1228,10 @@ class TubCompanionAppState: NSObject, ObservableObject {
         case .playLive:
             return false
         case .feedBank:
-            return !isBackendPathSatisfied
+            // FeedBank should land directly in STEER and attempt quiet reconnect first.
+            // Hard gating is handled in the STEER overlay so this full-screen ritual only
+            // appears when explicitly forced (e.g. RETURN TO ENTRY RITUAL).
+            return false
         }
     }
 
@@ -640,6 +1256,15 @@ class TubCompanionAppState: NSObject, ObservableObject {
     var shouldPresentSteerAccessOverlay: Bool {
         guard !shouldPresentOverlay(for: .steer) else { return false }
         return !isSteerAccessUnlocked
+    }
+
+    var steerAccessDisplayState: SteerAccessState {
+        #if DEBUG
+        if debugBypassSteerLock {
+            return .unlocked
+        }
+        #endif
+        return steerAccessState
     }
 
     func recordPreference(_ event: AudiencePreferenceEvent) {
@@ -727,6 +1352,7 @@ class TubCompanionAppState: NSObject, ObservableObject {
         #endif
 
         if resolvedMatch {
+            nextSession.strikes = 0
             if nextSession.roundIndex + 1 >= max(1, steerHackRoundSpecs.count) {
                 completeSteerChallenge()
                 return
@@ -823,13 +1449,7 @@ class TubCompanionAppState: NSObject, ObservableObject {
     }
 
     private var isSteerAccessUnlocked: Bool {
-        #if DEBUG
-        if debugBypassSteerLock {
-            return true
-        }
-        #endif
-
-        if case .unlocked = steerAccessState {
+        if case .unlocked = steerAccessDisplayState {
             return true
         }
         return false

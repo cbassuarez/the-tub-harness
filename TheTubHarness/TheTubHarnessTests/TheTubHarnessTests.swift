@@ -116,6 +116,49 @@ struct TheTubHarnessTests {
         }
     }
 
+    @Test("StageTextModeration redacts profanity with leetspeak and obfuscation")
+    func stageTextModerationRedactsSpeechLines() {
+        #expect(
+            StageTextModeration.sanitizeSpeechLine("this is sh1t, wow.")
+                == "this is [REDACTED], wow."
+        )
+        #expect(
+            StageTextModeration.sanitizeSpeechLine("f.u.c.k")
+                == "[REDACTED]"
+        )
+    }
+
+    @Test("StageTextModeration sanitizes visual thought and thought log")
+    func stageTextModerationSanitizesVisual() {
+        let visual = VisualOut(
+            sceneId: "relay_mesh",
+            density: 0.4,
+            cohesion: 0.5,
+            disruption: 0.2,
+            tokenSalience: 0.6,
+            wordmarkIntegrity: 0.7,
+            decayMs: 900,
+            flashBias: 0.3,
+            anchorWeights: [0.4, 0.3, 0.3],
+            thought: "fucking",
+            thoughtLog: [
+                "VOICE: f.u.c.k",
+                "TRACKING SIGNAL"
+            ]
+        )
+
+        let sanitized = StageTextModeration.sanitizeVisual(visual)
+        #expect(sanitized.thought == StageTextModeration.thoughtFallback)
+        #expect(sanitized.thoughtLog.first == "VOICE: [REDACTED]")
+        #expect(sanitized.thoughtLog.count == 2)
+    }
+
+    @Test("StageTextModeration Bedrock path falls back to local sanitizer when unavailable")
+    func stageTextModerationBedrockFallbacksToLocal() async {
+        let value = await StageTextModeration.sanitizeSpeechLineUsingBedrockIfAvailable("f.u.c.k")
+        #expect(value == "[REDACTED]")
+    }
+
     @Test("AudienceSessionServer NDJSON parser handles fragmented and multi-message chunks")
     func audienceEnvelopeFramingHandlesFragmentedChunks() throws {
         let server = AudienceSessionServer()
@@ -338,6 +381,120 @@ struct TheTubHarnessTests {
         let result = overlay.applyOverlay(to: &modelOut, for: sessionId, activeSessions: activeSessions)
         #expect(result != nil)
         #expect((modelOut.params["level"] ?? 0) != 0.4)
+    }
+
+    @Test("AudiencePreferenceOverlay returns canonical active operator vector state")
+    func audiencePreferenceOverlayCanonicalOperatorVectorState() {
+        let overlay = AudiencePreferenceOverlay()
+        let activeSessions: [String: AudienceSessionState] = [
+            "session-a": AudienceSessionState(sessionId: "session-a", sessionType: .appCompanion),
+            "session-b": AudienceSessionState(sessionId: "session-b", sessionType: .appCompanion)
+        ]
+
+        overlay.recordOperatorVector(
+            OperatorVectorPayload(paramVector: 0.22, thoughtVector: -0.1, audioVector: 0.08, ttlSeconds: 300),
+            for: "session-a"
+        )
+        overlay.recordOperatorVector(
+            OperatorVectorPayload(paramVector: 0.81, thoughtVector: 0.25, audioVector: -0.2, ttlSeconds: 300),
+            for: "session-b"
+        )
+
+        let state = overlay.activeOperatorVectorState(activeSessions: activeSessions)
+        #expect(state?.sessionId == "session-b")
+        #expect((state?.payload.ttlSeconds ?? 0) > 0)
+        #expect(abs((state?.payload.paramVector ?? 0) - 0.81) < 0.02)
+    }
+
+    @Test("AudienceSessionServer broadcasts canonical operator vectors and switches source")
+    func audienceSessionServerBroadcastsCanonicalOperatorVectors() {
+        let server = AudienceSessionServer()
+        server.enableOutgoingEnvelopeCaptureForTesting(true)
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(kind: .sessionOpen, sessionId: "session-a"),
+            connectionKey: "conn-a"
+        )
+        _ = server.takeOutgoingEnvelopesForTesting()
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(kind: .sessionOpen, sessionId: "session-b"),
+            connectionKey: "conn-b"
+        )
+        _ = server.takeOutgoingEnvelopesForTesting()
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(
+                kind: .operatorVector,
+                sessionId: "session-a",
+                operatorVector: OperatorVectorPayload(
+                    paramVector: 0.2,
+                    thoughtVector: 0.1,
+                    audioVector: 0.1,
+                    ttlSeconds: 300
+                )
+            ),
+            connectionKey: "conn-a"
+        )
+        let firstBroadcast = server.takeOutgoingEnvelopesForTesting().filter { $0.kind == .operatorVector }
+        #expect(firstBroadcast.count == 2)
+        #expect(firstBroadcast.allSatisfy { $0.sessionId == "session-a" })
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(
+                kind: .operatorVector,
+                sessionId: "session-b",
+                operatorVector: OperatorVectorPayload(
+                    paramVector: 0.9,
+                    thoughtVector: -0.1,
+                    audioVector: 0.2,
+                    ttlSeconds: 300
+                )
+            ),
+            connectionKey: "conn-b"
+        )
+        let secondBroadcast = server.takeOutgoingEnvelopesForTesting().filter { $0.kind == .operatorVector }
+        #expect(secondBroadcast.count == 2)
+        #expect(secondBroadcast.allSatisfy { $0.sessionId == "session-b" })
+    }
+
+    @Test("AudienceSessionServer session open includes canonical operator vector snapshot when available")
+    func audienceSessionServerSessionOpenIncludesOperatorVectorSnapshot() {
+        let server = AudienceSessionServer()
+        server.enableOutgoingEnvelopeCaptureForTesting(true)
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(kind: .sessionOpen, sessionId: "session-source"),
+            connectionKey: "conn-source"
+        )
+        _ = server.takeOutgoingEnvelopesForTesting()
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(
+                kind: .operatorVector,
+                sessionId: "session-source",
+                operatorVector: OperatorVectorPayload(
+                    paramVector: 0.55,
+                    thoughtVector: -0.2,
+                    audioVector: 0.12,
+                    ttlSeconds: 300
+                )
+            ),
+            connectionKey: "conn-source"
+        )
+        _ = server.takeOutgoingEnvelopesForTesting()
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(kind: .sessionOpen, sessionId: "session-late"),
+            connectionKey: "conn-late"
+        )
+        let openEnvelopes = server.takeOutgoingEnvelopesForTesting()
+        let descriptor = openEnvelopes.first(where: { $0.kind == .descriptorSnapshot })
+        let canonicalVector = openEnvelopes.first(where: { $0.kind == .operatorVector })
+
+        #expect(descriptor != nil)
+        #expect(canonicalVector?.sessionId == "session-source")
+        #expect((canonicalVector?.operatorVector?.ttlSeconds ?? 0) > 0)
     }
 
     @Test("FeatureExtractor tracks sine centroid and bands")

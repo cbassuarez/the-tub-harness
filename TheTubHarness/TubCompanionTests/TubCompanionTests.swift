@@ -19,8 +19,8 @@ struct TubCompanionTests {
     }
 
     @Test
-    func longStripBankLayoutDeterministicAndPadded() {
-        let entries: [PlayLongSampleEntry] = (0..<14).map { index in
+    func longBankLayoutDeterministicEightBanksWithOptionalCenter() {
+        let entries: [PlayLongSampleEntry] = (0..<24).map { index in
             PlayLongSampleEntry(
                 url: URL(fileURLWithPath: "/tmp/sample_\(index).wav"),
                 duration: 5 + Double(index) * 0.1,
@@ -29,24 +29,25 @@ struct TubCompanionTests {
             )
         }
 
-        let banks = PlayLongStripLayout.makeBanks(entries: entries, slotCount: 12)
-        #expect(banks.count == 2)
-        #expect(banks[0].count == 12)
-        #expect(banks[1].count == 12)
-        #expect(banks[1][0].sampleURL?.lastPathComponent == "sample_12.wav")
-        #expect(banks[1][1].sampleURL?.lastPathComponent == "sample_13.wav")
-        #expect(banks[1][2].sampleURL == nil)
+        let banks = PlayLongBankLayout.makeBanks(entries: entries)
+        #expect(banks.count == 8)
+        #expect(banks[0].left?.displayName == "sample_0")
+        #expect(banks[0].right?.displayName == "sample_1")
+        #expect(banks[0].center == nil)
+        #expect(banks[4].center?.displayName == "sample_16")
+        #expect(banks[7].center?.displayName == "sample_19")
     }
 
     @Test
-    func longStripSlotIndexMappingDeterministic() {
-        let size = CGSize(width: 240, height: 80)
-        #expect(PlayLongStripLayout.slotIndex(for: CGPoint(x: -10, y: 8), in: size, slotCount: 12) == 0)
-        #expect(PlayLongStripLayout.slotIndex(for: CGPoint(x: 0, y: 8), in: size, slotCount: 12) == 0)
-        #expect(PlayLongStripLayout.slotIndex(for: CGPoint(x: 20, y: 8), in: size, slotCount: 12) == 1)
-        #expect(PlayLongStripLayout.slotIndex(for: CGPoint(x: 119.9, y: 8), in: size, slotCount: 12) == 5)
-        #expect(PlayLongStripLayout.slotIndex(for: CGPoint(x: 239.9, y: 8), in: size, slotCount: 12) == 11)
-        #expect(PlayLongStripLayout.slotIndex(for: CGPoint(x: 420, y: 8), in: size, slotCount: 12) == 11)
+    func playGridTokenAlphabetMatchesTubPattern() {
+        #expect(PlayGridTokenAlphabet.token(cellSerial: 0, bankIndex: 0, gridDimension: 6) == "00")
+        #expect(PlayGridTokenAlphabet.token(cellSerial: 9, bankIndex: 0, gridDimension: 6) == "09")
+        #expect(PlayGridTokenAlphabet.token(cellSerial: 10, bankIndex: 0, gridDimension: 6) == "0A")
+        #expect(PlayGridTokenAlphabet.token(cellSerial: 17, bankIndex: 0, gridDimension: 6) == "0H")
+        #expect(PlayGridTokenAlphabet.token(cellSerial: 18, bankIndex: 0, gridDimension: 6) == "10")
+        #expect(PlayGridTokenAlphabet.token(cellSerial: 35, bankIndex: 0, gridDimension: 6) == "1H")
+        #expect(PlayGridTokenAlphabet.token(cellSerial: 0, bankIndex: 1, gridDimension: 6) == "20")
+        #expect(PlayGridTokenAlphabet.token(cellSerial: 35, bankIndex: 1, gridDimension: 6) == "3H")
     }
 
     @Test
@@ -514,6 +515,39 @@ struct TubCompanionTests {
     }
 
     @Test
+    func shellLayoutClassifierRespectsBreakpoints() {
+        let metrics = ShellLayoutMetrics.default
+        #expect(ShellLayoutClass.classify(width: 699, metrics: metrics) == .compact)
+        #expect(ShellLayoutClass.classify(width: 700, metrics: metrics) == .regular)
+        #expect(ShellLayoutClass.classify(width: 1023, metrics: metrics) == .regular)
+        #expect(ShellLayoutClass.classify(width: 1024, metrics: metrics) == .wide)
+    }
+
+    @Test
+    func shellLayoutPaneVisibilityTransitions() {
+        let model = ShellLayoutModel(persistRegularInspectorVisibility: false)
+
+        model.update(for: 680)
+        #expect(model.layoutClass == .compact)
+        #expect(!model.showsSecondaryPane)
+
+        model.update(for: 900)
+        #expect(model.layoutClass == .regular)
+        #expect(!model.showsSecondaryPane)
+
+        model.toggleInspectorPane()
+        #expect(model.showsSecondaryPane)
+
+        model.update(for: 1180)
+        #expect(model.layoutClass == .wide)
+        #expect(model.showsSecondaryPane)
+
+        model.update(for: 680)
+        #expect(model.layoutClass == .compact)
+        #expect(!model.showsSecondaryPane)
+    }
+
+    @Test
     func steerAccessGatePrecedence() {
         let appState = TubCompanionAppState(debugBypassSteerLockOverride: false)
         appState.initializeSession()
@@ -656,10 +690,52 @@ struct TubCompanionTests {
         #expect(viewModel.roundDisplay == 4)
         #expect(viewModel.interruptionActive)
         viewModel.resolveInterruptionForTesting()
+        #expect(!viewModel.interruptionActive)
+        #expect(viewModel.roundDisplay == 4)
+        viewModel.submitMatchForTesting(true)
 
         #expect(viewModel.state == .grantedAnimating)
         await wait(1.2)
         #expect(viewModel.state == .unlocked)
+    }
+
+    @Test
+    func settingsUnlockChallengeRoundTimeoutConsumesOneLife() async {
+        let viewModel = SettingsPowerUnlockChallengeViewModel()
+        viewModel.activate()
+
+        #expect(viewModel.roundDisplay == 1)
+        #expect(viewModel.livesRemaining == 3)
+
+        viewModel.forceRoundTimeoutForTesting()
+
+        #expect(viewModel.state == .inChallenge)
+        #expect(viewModel.livesRemaining == 2)
+
+        await wait(0.9)
+        #expect(viewModel.state == .inChallenge)
+        #expect(viewModel.roundDisplay == 1)
+    }
+
+    @Test
+    func settingsUnlockChallengeInterruptionTimeoutConsumesOneLife() async {
+        let viewModel = SettingsPowerUnlockChallengeViewModel()
+        viewModel.activate()
+        viewModel.submitMatchForTesting(true)
+        viewModel.submitMatchForTesting(true)
+        viewModel.submitMatchForTesting(true)
+
+        #expect(viewModel.interruptionActive)
+        #expect(viewModel.livesRemaining == 3)
+
+        viewModel.forceInterruptionTimeoutForTesting()
+
+        #expect(viewModel.state == .inChallenge)
+        #expect(viewModel.livesRemaining == 2)
+
+        await wait(0.9)
+        #expect(viewModel.state == .inChallenge)
+        #expect(viewModel.interruptionActive)
     }
 
     @Test
@@ -681,6 +757,196 @@ struct TubCompanionTests {
         viewModel.applyVectorDecayForTesting(now: Date().addingTimeInterval(3601))
         #expect(viewModel.operatorVector.isNeutral)
         #expect(viewModel.countdownDisplay == "NEUTRAL")
+    }
+
+    @Test
+    func settingsNeutralNoopDoesNotArmVectorDecay() {
+        let appState = TubCompanionAppState()
+        appState.initializeSession()
+        let harnessClient = HarnessClient()
+        let routeMonitor = ExternalAudioRouteMonitor()
+        let viewModel = SettingsViewModel(
+            appState: appState,
+            harnessClient: harnessClient,
+            externalAudioRouteMonitor: routeMonitor
+        )
+
+        viewModel.setPowerLayerUnlockedForTesting()
+        viewModel.setVector(param: 0.005)
+
+        #expect(viewModel.operatorVector.isNeutral)
+        #expect(viewModel.countdownDisplay == "NEUTRAL")
+    }
+
+    @Test
+    func settingsVectorEditDoesNotResetCountdownToFullTTL() async {
+        let appState = TubCompanionAppState()
+        appState.initializeSession()
+        let harnessClient = HarnessClient()
+        let routeMonitor = ExternalAudioRouteMonitor()
+        let viewModel = SettingsViewModel(
+            appState: appState,
+            harnessClient: harnessClient,
+            externalAudioRouteMonitor: routeMonitor
+        )
+
+        viewModel.setPowerLayerUnlockedForTesting()
+        viewModel.setVector(param: 0.6)
+        await wait(1.2)
+
+        let before = hmsToSeconds(viewModel.countdownDisplay)
+        #expect(before < 3600)
+
+        viewModel.setVector(param: 0.7)
+        let after = hmsToSeconds(viewModel.countdownDisplay)
+        #expect(after <= before + 1)
+    }
+
+    @Test
+    func settingsBeginPowerUnlockGateRoutesLockedVsUnlocked() {
+        let appState = TubCompanionAppState()
+        appState.initializeSession()
+        let harnessClient = HarnessClient()
+        let routeMonitor = ExternalAudioRouteMonitor()
+        let viewModel = SettingsViewModel(
+            appState: appState,
+            harnessClient: harnessClient,
+            externalAudioRouteMonitor: routeMonitor
+        )
+
+        viewModel.beginPowerUnlockGate()
+        #expect(viewModel.showPowerUnlockGate)
+        #expect(!viewModel.showPowerLayerModal)
+
+        viewModel.dismissPowerUnlockGate()
+        viewModel.setPowerLayerUnlockedForTesting()
+        viewModel.beginPowerUnlockGate()
+        #expect(!viewModel.showPowerUnlockGate)
+        #expect(viewModel.showPowerLayerModal)
+    }
+
+    @Test
+    func settingsUnlockSuccessOpensPowerLayerModalImmediately() {
+        let appState = TubCompanionAppState()
+        appState.initializeSession()
+        let harnessClient = HarnessClient()
+        let routeMonitor = ExternalAudioRouteMonitor()
+        let viewModel = SettingsViewModel(
+            appState: appState,
+            harnessClient: harnessClient,
+            externalAudioRouteMonitor: routeMonitor
+        )
+
+        viewModel.beginPowerUnlockGate()
+        #expect(viewModel.showPowerUnlockGate)
+        viewModel.handlePowerUnlockSucceeded()
+        #expect(!viewModel.showPowerUnlockGate)
+        #expect(viewModel.showPowerLayerModal)
+        #expect(viewModel.advancedAccessState == .unlocked)
+    }
+
+    @Test
+    func settingsRemoteOperatorVectorAppliesWhenIdle() {
+        let appState = TubCompanionAppState()
+        appState.initializeSession()
+        let harnessClient = HarnessClient()
+        let routeMonitor = ExternalAudioRouteMonitor()
+        let viewModel = SettingsViewModel(
+            appState: appState,
+            harnessClient: harnessClient,
+            externalAudioRouteMonitor: routeMonitor
+        )
+
+        viewModel.setPowerLayerUnlockedForTesting()
+        viewModel.applyRemoteOperatorVector(
+            OperatorVectorLiveState(
+                sessionId: "session-remote",
+                param: 0.42,
+                thought: -0.36,
+                audio: 0.2,
+                ttlSeconds: 120,
+                receivedAt: Date()
+            )
+        )
+
+        #expect(abs(viewModel.operatorVector.param - 0.42) < 0.001)
+        #expect(abs(viewModel.operatorVector.thought + 0.36) < 0.001)
+        #expect(abs(viewModel.operatorVector.audio - 0.2) < 0.001)
+        #expect(viewModel.lastVectorSourceSessionId == "session-remote")
+        #expect(viewModel.countdownDisplay != "NEUTRAL")
+    }
+
+    @Test
+    func settingsRemoteOperatorVectorQueuesDuringLocalEditAndAppliesOnRelease() {
+        let appState = TubCompanionAppState()
+        appState.initializeSession()
+        let harnessClient = HarnessClient()
+        let routeMonitor = ExternalAudioRouteMonitor()
+        let viewModel = SettingsViewModel(
+            appState: appState,
+            harnessClient: harnessClient,
+            externalAudioRouteMonitor: routeMonitor
+        )
+
+        viewModel.setPowerLayerUnlockedForTesting()
+        viewModel.setVector(param: 0.1, thought: 0.1, audio: 0.1)
+        let localParam = viewModel.operatorVector.param
+
+        viewModel.beginVectorEdit()
+        viewModel.applyRemoteOperatorVector(
+            OperatorVectorLiveState(
+                sessionId: "session-peer",
+                param: -0.7,
+                thought: 0.3,
+                audio: -0.2,
+                ttlSeconds: 90,
+                receivedAt: Date()
+            )
+        )
+
+        #expect(viewModel.pendingRemoteOperatorVector != nil)
+        #expect(abs(viewModel.operatorVector.param - localParam) < 0.001)
+
+        viewModel.endVectorEdit()
+        #expect(viewModel.pendingRemoteOperatorVector == nil)
+        #expect(abs(viewModel.operatorVector.param + 0.7) < 0.001)
+        #expect(abs(viewModel.operatorVector.thought - 0.3) < 0.001)
+    }
+
+    @Test
+    func harnessClientPublishesIncomingOperatorVectorEnvelope() async {
+        let harnessClient = HarnessClient()
+        harnessClient.injectEnvelopeForTesting(
+            AudienceEnvelope(
+                kind: .operatorVector,
+                sessionId: "session-peer",
+                operatorVector: OperatorVectorPayload(
+                    paramVector: 0.33,
+                    thoughtVector: -0.25,
+                    audioVector: 0.15,
+                    ttlSeconds: 120
+                )
+            )
+        )
+
+        let published = await waitUntil(timeout: 0.4) {
+            harnessClient.lastOperatorVectorState != nil
+        }
+        #expect(published)
+        #expect(harnessClient.lastOperatorVectorState?.sessionId == "session-peer")
+        #expect(abs((harnessClient.lastOperatorVectorState?.param ?? 0) - 0.33) < 0.001)
+    }
+
+    @Test
+    func settingsCommandVectorRailMappingDeterminism() {
+        let width: CGFloat = 200
+        #expect(abs(CommandVectorRailMath.normalizedValue(for: 0, width: width) + 1) < 0.0001)
+        #expect(abs(CommandVectorRailMath.normalizedValue(for: width / 2, width: width) - 0) < 0.0001)
+        #expect(abs(CommandVectorRailMath.normalizedValue(for: width, width: width) - 1) < 0.0001)
+
+        #expect(abs(CommandVectorRailMath.xPosition(for: -1, width: width) - 0) < 0.0001)
+        #expect(abs(CommandVectorRailMath.xPosition(for: 0, width: width) - (width / 2)) < 0.0001)
+        #expect(abs(CommandVectorRailMath.xPosition(for: 1, width: width) - width) < 0.0001)
     }
 
     private func makeRig(captureLimit: TimeInterval = 10) -> (
@@ -721,6 +987,15 @@ struct TubCompanionTests {
     private func wait(_ seconds: TimeInterval) async {
         let nanos = UInt64(max(0, seconds) * 1_000_000_000)
         try? await Task.sleep(nanoseconds: nanos)
+    }
+
+    private func hmsToSeconds(_ value: String) -> Int {
+        let parts = value.split(separator: ":")
+        guard parts.count == 3 else { return 0 }
+        let h = Int(parts[0]) ?? 0
+        let m = Int(parts[1]) ?? 0
+        let s = Int(parts[2]) ?? 0
+        return (h * 3600) + (m * 60) + s
     }
 
     private func waitUntil(timeout: TimeInterval, step: TimeInterval = 0.02, condition: () -> Bool) async -> Bool {

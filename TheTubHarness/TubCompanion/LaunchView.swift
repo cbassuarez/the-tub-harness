@@ -342,6 +342,7 @@ struct ConnectionGateView: View {
         )
         .onAppear {
             if let preferredIntent {
+                appState.chooseEntryIntent(preferredIntent)
                 step = preferredIntent == .playLive ? .playLive : .feedBank
             }
             withAnimation(.easeIn(duration: 0.5)) {
@@ -367,6 +368,9 @@ struct ConnectionGateView: View {
             // Show toast on successful connection
             if case .connected = state {
                 addToast("✓ Connected to THE TUB!", style: .success)
+                if step == .feedBank {
+                    appState.requestTabNavigation(.steer)
+                }
             }
         }
         .onReceive(externalAudioRouteMonitor.$isExternalAudioRouteActive) { isActive in
@@ -906,12 +910,188 @@ struct ConnectionRequiredOverlay: View {
     @ObservedObject var harnessClient: HarnessClient
     @ObservedObject var externalAudioRouteMonitor: ExternalAudioRouteMonitor
     let preferredIntent: EntryIntent?
+    @State private var hasStartedQuietReconnect = false
+    @State private var quietReconnectSuppressedUntil: Date?
+    @State private var lastQuietReconnectAt: Date?
+    private let quietReconnectWindow: TimeInterval = 5.0
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.78)
+            Color.black.opacity(0.9)
                 .ignoresSafeArea()
 
+            if shouldRenderGateContent {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(preferredIntent == .feedBank ? "HARNESS LINK REQUIRED" : "CABLE ROUTE REQUIRED")
+                        .font(.system(size: 18, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
+
+                    Text(preferredIntent == .feedBank
+                         ? "STEER needs a live harness link before controls can be used."
+                         : "PLAY needs an external audio route before controls can be used.")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.gray)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(statusText)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+
+                    Button(action: primaryAction) {
+                        Text(primaryActionLabel)
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(.black)
+                            .frame(maxWidth: .infinity, minHeight: 46)
+                            .background(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("connection.overlay.primary")
+
+                    Button(action: {
+                        appState.resetEntryFlow()
+                    }) {
+                        Text("RETURN TO ENTRY RITUAL")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .overlay {
+                                Rectangle()
+                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("connection.overlay.back")
+                }
+                .padding(16)
+                .frame(maxWidth: 520, alignment: .leading)
+                .overlay {
+                    Rectangle()
+                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                }
+                .padding(.horizontal, 20)
+            } else if isQuietReconnectPhase {
+                VStack(spacing: 10) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    Text("RECONNECTING HARNESS…")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    Text("HOLDING GATE WHILE LINK RECOVERS.")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.gray)
+                }
+                .padding(16)
+            }
+        }
+        .allowsHitTesting(shouldBlockInteraction)
+        .onAppear {
+            beginQuietReconnectIfNeeded(force: true)
+        }
+        .onChange(of: appState.harnessConnectionState) { _, state in
+            guard preferredIntent == .feedBank else { return }
+            switch state {
+            case .connected:
+                quietReconnectSuppressedUntil = nil
+            case .connecting:
+                hasStartedQuietReconnect = true
+                quietReconnectSuppressedUntil = Date().addingTimeInterval(quietReconnectWindow)
+            case .disconnected, .error:
+                if !shouldRenderGateContent {
+                    beginQuietReconnectIfNeeded(force: false)
+                }
+            }
+        }
+        .task(id: preferredIntent == .feedBank) {
+            guard preferredIntent == .feedBank else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if case .connected = appState.harnessConnectionState {
+                    continue
+                }
+                beginQuietReconnectIfNeeded(force: false)
+            }
+        }
+    }
+
+    private var primaryActionLabel: String {
+        preferredIntent == .feedBank ? "RECONNECT HARNESS" : "CHECK AUDIO ROUTE"
+    }
+
+    private var statusText: String {
+        if preferredIntent == .feedBank {
+            switch appState.harnessConnectionState {
+            case .connected:
+                return "HARNESS CONNECTED."
+            case .connecting:
+                return "ATTEMPTING HARNESS LINK…"
+            case .error(let message):
+                return message.uppercased()
+            case .disconnected:
+                return "HARNESS OFFLINE."
+            }
+        }
+        return appState.externalAudioRouteDescription.uppercased()
+    }
+
+    private func primaryAction() {
+        if preferredIntent == .feedBank {
+            beginQuietReconnectIfNeeded(force: true)
+            return
+        }
+
+        externalAudioRouteMonitor.refreshRouteState()
+    }
+
+    private var shouldRenderGateContent: Bool {
+        guard preferredIntent == .feedBank else { return true }
+        guard hasStartedQuietReconnect else { return false }
+        if case .connected = appState.harnessConnectionState { return false }
+        if case .connecting = appState.harnessConnectionState { return false }
+        if let quietReconnectSuppressedUntil, Date() < quietReconnectSuppressedUntil {
+            return false
+        }
+        return true
+    }
+
+    private var isQuietReconnectPhase: Bool {
+        preferredIntent == .feedBank && !shouldRenderGateContent
+    }
+
+    private var shouldBlockInteraction: Bool {
+        if preferredIntent == .feedBank {
+            return true
+        }
+        return shouldRenderGateContent
+    }
+
+    private func beginQuietReconnectIfNeeded(force: Bool) {
+        guard preferredIntent == .feedBank else { return }
+        if !force {
+            if case .connected = appState.harnessConnectionState { return }
+            if case .connecting = appState.harnessConnectionState { return }
+            if let lastQuietReconnectAt, Date().timeIntervalSince(lastQuietReconnectAt) < 1.6 {
+                return
+            }
+        }
+
+        let host = appState.lastKnownHarnessHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedHost = host.isEmpty ? "tub-harness.local" : host
+        let resolvedPort = appState.lastKnownHarnessPort
+        hasStartedQuietReconnect = true
+        lastQuietReconnectAt = Date()
+        quietReconnectSuppressedUntil = Date().addingTimeInterval(quietReconnectWindow)
+        appState.syncHarnessState(.connecting)
+        harnessClient.connectToHarness(host: resolvedHost, port: resolvedPort)
+        harnessClient.preflightHandshake(host: resolvedHost, port: resolvedPort) { result in
+            guard case .success(let payload) = result else { return }
+            let hintedHost = payload.hostHints?.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let handshakeHost = (hintedHost?.isEmpty == false) ? hintedHost! : resolvedHost
+            let handshakePort = payload.audiencePort.flatMap { UInt16(exactly: $0) } ?? resolvedPort
+            guard handshakeHost != resolvedHost || handshakePort != resolvedPort else { return }
+            appState.updateHarnessAddress(host: handshakeHost, port: handshakePort)
+            harnessClient.disconnect(manual: false)
+            harnessClient.connectToHarness(host: handshakeHost, port: handshakePort)
         }
     }
 }

@@ -22,6 +22,15 @@ enum StageFeedState: String, Equatable {
     }
 }
 
+struct OperatorVectorLiveState: Equatable {
+    let sessionId: String
+    let param: Double
+    let thought: Double
+    let audio: Double
+    let ttlSeconds: Double
+    let receivedAt: Date
+}
+
 class HarnessClient: NSObject, ObservableObject {
     struct HandshakeResponse: Decodable {
         let status: String
@@ -50,6 +59,7 @@ class HarnessClient: NSObject, ObservableObject {
     @Published var lastHandshakeSummary: String?
     @Published var lastAudienceAck: String?
     @Published var stageFeedState: StageFeedState = .standby
+    @Published var lastOperatorVectorState: OperatorVectorLiveState?
 
     var onVisualUpdate: ((VisualOutput) -> Void)?
     var onStageSnapshot: ((StageSnapshotPayload) -> Void)?
@@ -65,6 +75,10 @@ class HarnessClient: NSObject, ObservableObject {
     private var lastStageSnapshotAt: Date?
     private var lastVisualUpdateAt: Date?
     private var stageFeedTicker: AnyCancellable?
+    private var reconnectTicker: AnyCancellable?
+    private var preferredHost: String = "tub-harness.local"
+    private var preferredPort: UInt16 = 9911
+    private var autoReconnectEnabled = false
 
     override init() {
         super.init()
@@ -76,10 +90,16 @@ class HarnessClient: NSObject, ObservableObject {
             .sink { [weak self] _ in
                 self?.refreshStageFeedState()
             }
+        reconnectTicker = Timer.publish(every: 2.0, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.attemptAutoReconnectIfNeeded()
+            }
     }
 
     deinit {
         stageFeedTicker?.cancel()
+        reconnectTicker?.cancel()
     }
 
     func setSessionId(_ sessionId: String) {
@@ -89,6 +109,11 @@ class HarnessClient: NSObject, ObservableObject {
     }
 
     func connectToHarness(host: String = "tub-harness.local", port: UInt16 = 9911) {
+        let normalizedPreferredHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        preferredHost = normalizedPreferredHost.isEmpty ? "tub-harness.local" : normalizedPreferredHost
+        preferredPort = port
+        autoReconnectEnabled = true
+
         queue.async { [weak self] in
             guard let self else { return }
             let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -653,13 +678,23 @@ class HarnessClient: NSObject, ObservableObject {
                 self.refreshStageFeedState()
             }
         case .ack:
-            let message = envelope.ack?.message ?? "ACK"
+            let message = envelope.ack?.message ?? "STATUS"
             DispatchQueue.main.async {
                 self.lastAudienceAck = message
             }
         case .operatorVector:
-            // Server-authored operator vectors are currently not expected on companion.
-            break
+            guard let vector = envelope.operatorVector else { return }
+            let liveState = OperatorVectorLiveState(
+                sessionId: envelope.sessionId,
+                param: max(-1, min(1, vector.paramVector)),
+                thought: max(-1, min(1, vector.thoughtVector)),
+                audio: max(-1, min(1, vector.audioVector)),
+                ttlSeconds: max(0, vector.ttlSeconds),
+                receivedAt: Date()
+            )
+            DispatchQueue.main.async {
+                self.lastOperatorVectorState = liveState
+            }
         default:
             break
         }
@@ -683,7 +718,10 @@ class HarnessClient: NSObject, ObservableObject {
         }
     }
 
-    func disconnect() {
+    func disconnect(manual: Bool = true) {
+        if manual {
+            autoReconnectEnabled = false
+        }
         cancelConnectTimeout()
         sendSessionClose()
         nwConnection?.cancel()
@@ -693,7 +731,19 @@ class HarnessClient: NSObject, ObservableObject {
         }
         DispatchQueue.main.async {
             self.connectionState = .disconnected
+            self.lastOperatorVectorState = nil
             self.refreshStageFeedState()
+        }
+    }
+
+    private func attemptAutoReconnectIfNeeded() {
+        guard autoReconnectEnabled else { return }
+
+        switch connectionState {
+        case .connected, .connecting:
+            return
+        case .disconnected, .error:
+            connectToHarness(host: preferredHost, port: preferredPort)
         }
     }
 
@@ -928,5 +978,11 @@ class HarnessClient: NSObject, ObservableObject {
         } catch {
             return nil
         }
+    }
+
+    // MARK: - Testing Hooks
+
+    func injectEnvelopeForTesting(_ envelope: AudienceEnvelope) {
+        handleEnvelope(envelope)
     }
 }

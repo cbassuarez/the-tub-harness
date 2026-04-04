@@ -21,6 +21,7 @@ final class SpeechTranscriber: ObservableObject {
     private var recognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var remoteModerationTask: Task<Void, Never>?
     private var isRunning = false
 
     /// Thread-safe reference to the active recognition request for buffer appending.
@@ -82,6 +83,8 @@ final class SpeechTranscriber: ObservableObject {
     func stop() {
         wantsRunning = false
         isRunning = false
+        remoteModerationTask?.cancel()
+        remoteModerationTask = nil
         activeRequest = nil
         recognitionTask?.cancel()
         recognitionTask = nil
@@ -258,13 +261,15 @@ final class SpeechTranscriber: ObservableObject {
         let trimmed = words.count > maxPublishedWordCount
             ? words.suffix(maxPublishedWordCount).joined(separator: " ")
             : text
+        let moderated = StageTextModeration.sanitizeSpeechLine(trimmed)
 
-        if latestTranscription == trimmed {
+        if latestTranscription == moderated {
             return
         }
 
-        latestTranscription = trimmed
+        latestTranscription = moderated
         lastPublishDate = now
+        scheduleRemoteModerationIfNeeded(sourceText: trimmed, localModerated: moderated)
 
         // Restart the task periodically to avoid Apple's recognition timeout.
         if now.timeIntervalSince(taskStartDate) > restartInterval {
@@ -274,5 +279,217 @@ final class SpeechTranscriber: ObservableObject {
             recognitionTask = nil
             startRecognitionTask()
         }
+    }
+
+    private func scheduleRemoteModerationIfNeeded(sourceText: String, localModerated: String) {
+        remoteModerationTask?.cancel()
+        remoteModerationTask = Task { [weak self] in
+            guard let self else { return }
+            let refined = await StageTextModeration.sanitizeSpeechLineUsingBedrockIfAvailable(sourceText)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard self.isRunning else { return }
+                // Prevent stale network responses from overriding newer transcriptions.
+                guard self.latestTranscription == localModerated else { return }
+                guard refined != localModerated else { return }
+                self.latestTranscription = refined
+            }
+        }
+    }
+}
+
+/// Centralized moderation for speech-driven and display-facing text.
+/// Default list intentionally focuses on high-confidence profanity.
+/// Additional project-specific terms can be supplied with:
+/// `TUB_SPEECH_BLOCKLIST=term1,term2,term3`
+enum StageTextModeration {
+    static let redactionToken = "[REDACTED]"
+    static let thoughtFallback = "content_redacted"
+    private static let customTermsEnvironmentKey = "TUB_SPEECH_BLOCKLIST"
+
+    private static let builtInBlockedTerms: Set<String> = [
+        "asshole",
+        "bastard",
+        "bitch",
+        "bullshit",
+        "crap",
+        "cunt",
+        "dammit",
+        "fucker",
+        "fucking",
+        "fuck",
+        "goddamn",
+        "motherfucker",
+        "pussy",
+        "shit",
+        "shitty",
+        "slut",
+        "whore"
+    ]
+
+    private static let blockedTerms: Set<String> = {
+        let configured = ProcessInfo.processInfo.environment[customTermsEnvironmentKey] ?? ""
+        let customTerms = configured
+            .split(separator: ",")
+            .map { normalizeToken(String($0)) }
+            .filter { !$0.isEmpty }
+        return builtInBlockedTerms.union(customTerms)
+    }()
+
+    static func sanitizeSpeechLine(_ line: String) -> String {
+        sanitizeDisplayLine(line)
+    }
+
+    static func sanitizeSpeechLineUsingBedrockIfAvailable(_ line: String) async -> String {
+        let local = sanitizeSpeechLine(line)
+        guard !local.contains(redactionToken) else { return local }
+
+        guard let remote = await BedrockGuardrailModerator.shared.moderate(line: line) else {
+            return local
+        }
+
+        let cleanedRemote = sanitizeDisplayLine(remote)
+        if cleanedRemote == line {
+            return local
+        }
+        return cleanedRemote
+    }
+
+    static func sanitizeDisplayLine(_ line: String) -> String {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return trimmed }
+
+        var result = ""
+        var currentWord = ""
+        var didRedactWord = false
+
+        func flushWord() {
+            guard !currentWord.isEmpty else { return }
+            if shouldRedact(word: currentWord) {
+                result.append(redactionToken)
+                didRedactWord = true
+            } else {
+                result.append(currentWord)
+            }
+            currentWord.removeAll(keepingCapacity: true)
+        }
+
+        for character in trimmed {
+            if character.isLetter || character.isNumber {
+                currentWord.append(character)
+            } else {
+                flushWord()
+                result.append(character)
+            }
+        }
+        flushWord()
+
+        if didRedactWord {
+            return result
+        }
+
+        // Catch obfuscated patterns spread over punctuation (example: f.u.c.k).
+        let collapsed = normalizeToken(trimmed)
+        for term in blockedTerms where term.count >= 4 {
+            if collapsed.contains(term) {
+                return redactionToken
+            }
+        }
+
+        return result
+    }
+
+    static func sanitizeThoughtToken(_ token: String) -> String {
+        let normalized = normalizeToken(token)
+        guard !normalized.isEmpty else { return token }
+        return blockedTerms.contains(normalized) ? thoughtFallback : token
+    }
+
+    static func sanitizeThoughtLog(_ lines: [String]) -> [String] {
+        Array(
+            lines
+                .map(sanitizeDisplayLine)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .prefix(5)
+        )
+    }
+
+    static func sanitizeVisual(_ visual: VisualOut) -> VisualOut {
+        let sanitizedThought = sanitizeThoughtToken(visual.thought)
+        let sanitizedLog = sanitizeThoughtLog(visual.thoughtLog)
+        guard sanitizedThought != visual.thought || sanitizedLog != visual.thoughtLog else {
+            return visual
+        }
+        return VisualOut(
+            sceneId: visual.sceneId,
+            density: visual.density,
+            cohesion: visual.cohesion,
+            disruption: visual.disruption,
+            tokenSalience: visual.tokenSalience,
+            wordmarkIntegrity: visual.wordmarkIntegrity,
+            decayMs: visual.decayMs,
+            flashBias: visual.flashBias,
+            anchorWeights: visual.anchorWeights,
+            thought: sanitizedThought,
+            thoughtLog: sanitizedLog
+        )
+    }
+
+    private static func shouldRedact(word: String) -> Bool {
+        let normalized = normalizeToken(word)
+        guard !normalized.isEmpty else { return false }
+        if blockedTerms.contains(normalized) {
+            return true
+        }
+        // Handle elongated profanity like "fuuuck".
+        return blockedTerms.contains(normalizeRepeatedCharacters(normalized))
+    }
+
+    private static func normalizeToken(_ raw: String) -> String {
+        let folded = raw.folding(
+            options: [.diacriticInsensitive, .caseInsensitive, .widthInsensitive],
+            locale: .current
+        )
+        let mapped = folded.lowercased().map(mapLeetCharacter(_:))
+        let alnum = mapped.filter { $0.isLetter || $0.isNumber }
+        return normalizeRepeatedCharacters(String(alnum))
+    }
+
+    private static func mapLeetCharacter(_ character: Character) -> Character {
+        switch character {
+        case "0":
+            return "o"
+        case "1", "!", "|":
+            return "i"
+        case "2":
+            return "z"
+        case "3":
+            return "e"
+        case "4", "@":
+            return "a"
+        case "5", "$":
+            return "s"
+        case "6", "9":
+            return "g"
+        case "7":
+            return "t"
+        case "8":
+            return "b"
+        default:
+            return character
+        }
+    }
+
+    private static func normalizeRepeatedCharacters(_ token: String) -> String {
+        guard !token.isEmpty else { return token }
+        var normalized = ""
+        var previous: Character?
+        for character in token {
+            if previous == character { continue }
+            normalized.append(character)
+            previous = character
+        }
+        return normalized
     }
 }

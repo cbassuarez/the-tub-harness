@@ -81,7 +81,17 @@ struct OperatorVectorState: Equatable {
     static let zero = OperatorVectorState()
 
     var isNeutral: Bool {
-        abs(param) < 0.0001 && abs(thought) < 0.0001 && abs(audio) < 0.0001
+        isApproximatelyNeutral()
+    }
+
+    func isApproximatelyNeutral(epsilon: Double = 0.01) -> Bool {
+        abs(param) <= epsilon && abs(thought) <= epsilon && abs(audio) <= epsilon
+    }
+
+    func isApproximatelyEqual(to other: OperatorVectorState, epsilon: Double = 0.01) -> Bool {
+        abs(param - other.param) <= epsilon &&
+        abs(thought - other.thought) <= epsilon &&
+        abs(audio - other.audio) <= epsilon
     }
 }
 
@@ -105,25 +115,41 @@ enum AdvancedSettingsAccessState: Equatable {
 
 @MainActor
 final class SettingsViewModel: ObservableObject {
+    private enum VectorAuthority {
+        case local
+        case remote
+    }
+
     @Published var pendingGuardedAction: SettingsGuardedAction?
     @Published var showPowerUnlockGate = false
+    @Published var showPowerLayerModal = false
     @Published private(set) var advancedAccessState: AdvancedSettingsAccessState = .locked
     @Published private(set) var harnessActionStatus: String = "READY."
-    @Published private(set) var lastOperatorAck: String = "NO VECTOR ACK YET."
+    @Published private(set) var lastOperatorAck: String = "NONE"
+    @Published private(set) var lastOperatorAckAt: Date?
+    @Published private(set) var pendingOperatorAck = false
+    @Published private(set) var lastOperatorSendAt: Date?
     @Published private(set) var operatorVector: OperatorVectorState = .zero
     @Published private(set) var operatorVectorExpiresAt: Date?
     @Published private(set) var vectorCountdownLabel: String = "00:00:00"
+    @Published private(set) var isEditingOperatorVector = false
+    @Published private(set) var pendingRemoteOperatorVector: OperatorVectorLiveState?
+    @Published private(set) var lastVectorSourceSessionId: String?
 
     private let appState: TubCompanionAppState
     private let harnessClient: HarnessClient
     private let externalAudioRouteMonitor: ExternalAudioRouteMonitor
     private let vectorTTLSeconds: TimeInterval = 60 * 60
+    private let vectorComponentDeadband: Double = 0.01
+    private let vectorNoopEpsilon: Double = 0.01
 
     private var decayStartAt: Date?
     private var decayStartVector: OperatorVectorState = .zero
+    private var decayDurationSeconds: TimeInterval = 0
     private var decayTicker: AnyCancellable?
     private var pendingVectorSendWorkItem: DispatchWorkItem?
     private var cancellables: Set<AnyCancellable> = []
+    private var vectorAuthority: VectorAuthority = .local
 
     init(
         appState: TubCompanionAppState,
@@ -140,7 +166,17 @@ final class SettingsViewModel: ObservableObject {
                 guard let self, let ack else { return }
                 if ack.uppercased().contains("OPERATOR VECTOR") {
                     self.lastOperatorAck = ack.uppercased()
+                    self.lastOperatorAckAt = Date()
+                    self.pendingOperatorAck = false
                 }
+            }
+            .store(in: &cancellables)
+
+        harnessClient.$lastOperatorVectorState
+            .receive(on: RunLoop.main)
+            .sink { [weak self] liveState in
+                guard let self, let liveState else { return }
+                self.applyRemoteOperatorVector(liveState)
             }
             .store(in: &cancellables)
 
@@ -190,6 +226,51 @@ final class SettingsViewModel: ObservableObject {
 
     var countdownDisplay: String {
         operatorVectorExpiresAt == nil ? "NEUTRAL" : vectorCountdownLabel
+    }
+
+    var vectorSyncChipValue: String {
+        isHarnessLinked ? "CANONICAL" : "OFFLINE"
+    }
+
+    var vectorSourceChipValue: String {
+        guard let source = lastVectorSourceSessionId?.trimmingCharacters(in: .whitespacesAndNewlines), !source.isEmpty else {
+            return "LOCAL"
+        }
+        let upper = source.uppercased()
+        return upper.count <= 12 ? upper : String(upper.prefix(12))
+    }
+
+    var vectorStateChipValue: String {
+        if isEditingOperatorVector {
+            return "LOCAL HOLD"
+        }
+        if pendingRemoteOperatorVector != nil {
+            return "REMOTE QUEUED"
+        }
+        return "FOLLOWING"
+    }
+
+    var vectorAckChipValue: String {
+        if !isHarnessLinked {
+            return "OFFLINE"
+        }
+        if pendingOperatorAck {
+            return "PENDING"
+        }
+        if lastOperatorAckAt != nil {
+            return "SUCCESS"
+        }
+        return "IDLE"
+    }
+
+    var vectorAckDetail: String {
+        if pendingOperatorAck {
+            return "WAITING FOR HARNESS STATUS PING..."
+        }
+        if let lastOperatorAckAt {
+            return "\(lastOperatorAck) @ \(Self.timestampFormatter.string(from: lastOperatorAckAt).uppercased())"
+        }
+        return "SEND A VECTOR TO START LIVE SYNC."
     }
 
     func requestGuardedAction(_ action: SettingsGuardedAction) {
@@ -244,7 +325,10 @@ final class SettingsViewModel: ObservableObject {
     }
 
     func beginPowerUnlockGate() {
-        guard advancedAccessState != .unlocked else { return }
+        if advancedAccessState == .unlocked || advancedAccessState == .grantedAnimating {
+            showPowerLayerModal = true
+            return
+        }
         showPowerUnlockGate = true
         if case .cooldown = advancedAccessState {
             return
@@ -259,20 +343,23 @@ final class SettingsViewModel: ObservableObject {
         }
     }
 
+    func dismissPowerLayerModal() {
+        endVectorEdit()
+        showPowerLayerModal = false
+    }
+
     func handlePowerUnlockSucceeded() {
         showPowerUnlockGate = false
-        advancedAccessState = .grantedAnimating
+        advancedAccessState = .unlocked
         harnessActionStatus = "COVERT LAYER AUTHENTICATED."
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            guard let self else { return }
-            if case .grantedAnimating = self.advancedAccessState {
-                self.advancedAccessState = .unlocked
-            }
-        }
+        showPowerLayerModal = true
     }
 
     func relockPowerLayer() {
         advancedAccessState = .locked
+        endVectorEdit()
+        showPowerLayerModal = false
+        pendingRemoteOperatorVector = nil
         resetVectorsToNeutral(sendToHarness: true)
         harnessActionStatus = "COVERT LAYER LOCKED."
     }
@@ -280,32 +367,100 @@ final class SettingsViewModel: ObservableObject {
     func setVector(param: Double? = nil, thought: Double? = nil, audio: Double? = nil) {
         guard advancedAccessState == .unlocked else { return }
 
+        let current = operatorVector
         var next = operatorVector
-        if let param { next.param = Self.clampSigned(param) }
-        if let thought { next.thought = Self.clampSigned(thought) }
-        if let audio { next.audio = Self.clampSigned(audio) }
+        if let param { next.param = normalizedVectorComponent(param) }
+        if let thought { next.thought = normalizedVectorComponent(thought) }
+        if let audio { next.audio = normalizedVectorComponent(audio) }
+
+        guard !next.isApproximatelyEqual(to: current, epsilon: vectorNoopEpsilon) else {
+            return
+        }
 
         operatorVector = next
+        vectorAuthority = .local
+        lastVectorSourceSessionId = appState.sessionId
+        pendingRemoteOperatorVector = nil
         if next.isNeutral {
-            resetVectorsToNeutral(sendToHarness: true)
+            if current.isNeutral && operatorVectorExpiresAt == nil {
+                return
+            }
+            resetVectorsToNeutral(sendToHarness: !current.isNeutral)
+            harnessActionStatus = "OPERATOR VECTOR NEUTRAL."
             return
         }
 
         let now = Date()
+        let ttl = remainingVectorTTL(at: now) ?? vectorTTLSeconds
         decayStartAt = now
         decayStartVector = next
-        operatorVectorExpiresAt = now.addingTimeInterval(vectorTTLSeconds)
-        vectorCountdownLabel = Self.durationLabel(from: vectorTTLSeconds)
+        decayDurationSeconds = ttl
+        operatorVectorExpiresAt = now.addingTimeInterval(ttl)
+        vectorCountdownLabel = Self.durationLabel(from: ttl)
 
-        queueVectorSend(ttlSeconds: vectorTTLSeconds)
+        queueVectorSend(ttlSeconds: ttl)
+    }
+
+    func beginVectorEdit() {
+        guard advancedAccessState == .unlocked else { return }
+        isEditingOperatorVector = true
+    }
+
+    func endVectorEdit() {
+        guard isEditingOperatorVector else { return }
+        isEditingOperatorVector = false
+        if let pending = pendingRemoteOperatorVector {
+            pendingRemoteOperatorVector = nil
+            applyRemoteOperatorVector(pending)
+        }
+    }
+
+    func applyRemoteOperatorVector(_ liveState: OperatorVectorLiveState) {
+        if isEditingOperatorVector {
+            pendingRemoteOperatorVector = liveState
+            return
+        }
+
+        let normalized = OperatorVectorState(
+            param: normalizedVectorComponent(liveState.param),
+            thought: normalizedVectorComponent(liveState.thought),
+            audio: normalizedVectorComponent(liveState.audio)
+        )
+
+        let isLocalEcho = (liveState.sessionId == appState.sessionId)
+        if isLocalEcho && normalized.isApproximatelyEqual(to: operatorVector, epsilon: vectorNoopEpsilon) {
+            lastVectorSourceSessionId = liveState.sessionId
+            return
+        }
+
+        lastVectorSourceSessionId = liveState.sessionId
+        vectorAuthority = (liveState.sessionId == appState.sessionId) ? .local : .remote
+        pendingRemoteOperatorVector = nil
+
+        if liveState.ttlSeconds <= 0 || normalized.isNeutral {
+            resetVectorsToNeutral(sendToHarness: false)
+            harnessActionStatus = "CANONICAL VECTOR RESET."
+            return
+        }
+
+        operatorVector = normalized
+        let now = Date()
+        decayStartAt = now
+        decayStartVector = normalized
+        decayDurationSeconds = max(0.1, liveState.ttlSeconds)
+        operatorVectorExpiresAt = now.addingTimeInterval(decayDurationSeconds)
+        vectorCountdownLabel = Self.durationLabel(from: decayDurationSeconds)
+        harnessActionStatus = "CANONICAL VECTOR FROM \(vectorSourceChipValue)."
     }
 
     func resetVectorsToNeutral(sendToHarness: Bool) {
         operatorVector = .zero
         decayStartAt = nil
         decayStartVector = .zero
+        decayDurationSeconds = 0
         operatorVectorExpiresAt = nil
         vectorCountdownLabel = "00:00:00"
+        vectorAuthority = .local
         if sendToHarness {
             sendCurrentVector(ttlSeconds: 0)
         }
@@ -373,6 +528,12 @@ final class SettingsViewModel: ObservableObject {
             harnessActionStatus = "SESSION ID MISSING. VECTOR SEND CANCELLED."
             return
         }
+        guard isHarnessLinked else {
+            pendingOperatorAck = false
+            return
+        }
+        lastOperatorSendAt = Date()
+        pendingOperatorAck = true
         harnessClient.sendOperatorVector(
             paramVector: operatorVector.param,
             thoughtVector: operatorVector.thought,
@@ -382,6 +543,20 @@ final class SettingsViewModel: ObservableObject {
         )
     }
 
+    private func normalizedVectorComponent(_ value: Double) -> Double {
+        let clamped = Self.clampSigned(value)
+        return abs(clamped) <= vectorComponentDeadband ? 0 : clamped
+    }
+
+    private func remainingVectorTTL(at now: Date) -> TimeInterval? {
+        guard let expiresAt = operatorVectorExpiresAt else { return nil }
+        let remaining = expiresAt.timeIntervalSince(now)
+        if remaining <= 0 {
+            return nil
+        }
+        return max(0.1, remaining)
+    }
+
     private func applyDecay(now: Date) {
         guard let decayStartAt, let expiresAt = operatorVectorExpiresAt else { return }
         guard advancedAccessState == .unlocked else { return }
@@ -389,10 +564,13 @@ final class SettingsViewModel: ObservableObject {
         if now >= expiresAt {
             if !operatorVector.isNeutral {
                 operatorVector = .zero
-                sendCurrentVector(ttlSeconds: 0)
+                if vectorAuthority == .local {
+                    sendCurrentVector(ttlSeconds: 0)
+                }
             }
             self.decayStartAt = nil
             decayStartVector = .zero
+            decayDurationSeconds = 0
             operatorVectorExpiresAt = nil
             vectorCountdownLabel = "00:00:00"
             harnessActionStatus = "OPERATOR VECTOR EXPIRED TO NEUTRAL."
@@ -400,7 +578,8 @@ final class SettingsViewModel: ObservableObject {
         }
 
         let elapsed = max(0, now.timeIntervalSince(decayStartAt))
-        let progress = max(0, min(1, elapsed / vectorTTLSeconds))
+        let duration = max(0.1, decayDurationSeconds)
+        let progress = max(0, min(1, elapsed / duration))
         let factor = 1 - progress
         operatorVector = OperatorVectorState(
             param: decayStartVector.param * factor,
@@ -449,35 +628,48 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
     @Published private(set) var roundDisplay: Int = 1
     @Published private(set) var roundsTotal: Int = 4
     @Published private(set) var strikes: Int = 0
+    @Published private(set) var roundTimeRemaining: TimeInterval = 0
     @Published private(set) var cooldownRemaining: TimeInterval = 0
     @Published private(set) var statusLine: String = "POWER LAYER LOCKED."
     @Published private(set) var commandLog: [String] = ["PRIVILEGED MODULE SEALED."]
     @Published private(set) var interruptionActive = false
     @Published private(set) var qteEffort: Double = 0
-    @Published private(set) var qteThreshold: Double = 0.78
+    @Published private(set) var qteThreshold: Double = 0.72
     @Published private(set) var qteRemaining: TimeInterval = 0
+    @Published private(set) var transitionActive = false
+    @Published private(set) var transitionTitle: String = ""
+    @Published private(set) var transitionSubtitle: String = ""
 
-    private let codeRoundCount = 3
-    private let codeRoundSpeeds: [Double] = [5.6, 6.4, 7.1]
+    private let codeRoundCount = 4
+    private let codeRoundSpeeds: [Double] = [5.4, 6.0, 6.0, 6.2]
+    private let codeRoundDurations: [TimeInterval] = [40.0, 40.0, 40.0, 40.0]
     private let codeWindowTolerance = 1
-    private let qteDuration: TimeInterval = 3.2
-    private let qteTapGain = 0.11
-    private let qteDecayPerSecond = 0.46
+    private let qteDuration: TimeInterval = 5.0
+    private let qteTapGain = 0.1
+    private let qteDecayPerSecond = 0.3
+    private let transitionBeatDuration: TimeInterval = 0.72
+    private let interruptionTriggerRoundIndex = 2
 
     private var currentRoundIndex: Int = 0
     private var targetSlotIndex: Int = 0
     private var rollTimer: Timer?
+    private var roundTimer: Timer?
     private var cooldownTimer: Timer?
     private var interruptionTimer: Timer?
     private var interruptionEndsAt: Date?
     private var lastInterruptionTickAt: Date?
     private var lastTickAt: Date?
+    private var roundEndsAt: Date?
     private var roundSpecs: [SteerHackRoundSpec] = []
+    private var interruptionCompleted = false
+    private var transitionWorkItem: DispatchWorkItem?
 
     deinit {
         rollTimer?.invalidate()
+        roundTimer?.invalidate()
         cooldownTimer?.invalidate()
         interruptionTimer?.invalidate()
+        transitionWorkItem?.cancel()
     }
 
     func activate() {
@@ -487,6 +679,7 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
 
     func unlockViaCredentialBypass() {
         guard state != .unlocked else { return }
+        clearTransitionState()
         stopRollTimer()
         stopInterruptionTimer()
         stopCooldownTimer()
@@ -500,6 +693,7 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
 
     func matchTapped() {
         guard state == .inChallenge else { return }
+        guard !transitionActive else { return }
         guard !interruptionActive else { return }
         guard !stripTokens.isEmpty else { return }
 
@@ -515,49 +709,73 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
             now: now,
             tickInterval: CodeMatchChallengeCore.timerInterval(stripSpeed: spec.stripSpeed)
         )
-        resolveMatch(didMatch: didMatch, token: token)
+        resolveMatch(didMatch: didMatch, token: token, skipTransitions: false)
     }
 
     func submitMatchForTesting(_ didMatch: Bool) {
         guard state == .inChallenge else { return }
         guard !interruptionActive else { return }
-        resolveMatch(didMatch: didMatch, token: targetToken)
+        resolveMatch(didMatch: didMatch, token: targetToken, skipTransitions: true)
     }
 
     func interruptionTap() {
         guard state == .inChallenge else { return }
+        guard !transitionActive else { return }
         guard interruptionActive else { return }
         qteEffort = min(1, qteEffort + qteTapGain)
         statusLine = "PATCH EFFORT \(Int((qteEffort * 100).rounded()))% / \(Int((qteThreshold * 100).rounded()))%"
         if qteEffort >= qteThreshold {
-            resolveInterruption()
+            resolveInterruption(skipTransitions: false)
         }
     }
 
     func resolveInterruptionForTesting() {
         guard interruptionActive else { return }
-        resolveInterruption()
+        resolveInterruption(skipTransitions: true)
     }
 
-    private func resolveMatch(didMatch: Bool, token: String) {
+    func forceRoundTimeoutForTesting() {
+        guard state == .inChallenge, !interruptionActive else { return }
+        handleRoundTimeout()
+    }
+
+    func forceInterruptionTimeoutForTesting() {
+        guard state == .inChallenge, interruptionActive else { return }
+        handleInterruptionTimeout()
+    }
+
+    private func resolveMatch(didMatch: Bool, token: String, skipTransitions: Bool) {
         if didMatch {
             appendLog("MATCH \(token) ACCEPTED.")
             currentRoundIndex += 1
+
+            if !interruptionCompleted, currentRoundIndex == interruptionTriggerRoundIndex + 1 {
+                if skipTransitions {
+                    triggerInterruptionRound(resetLives: true)
+                } else {
+                    transitionIntoInterruptionRound()
+                }
+                return
+            }
+
             if currentRoundIndex >= roundSpecs.count {
-                triggerInterruptionRound()
+                finishChallenge()
             } else {
-                configureRound()
+                configureRound(resetLives: true)
             }
         } else {
-            strikes += 1
-            appendLog("MISS \(token). DRIFT DETECTED.")
-            if strikes >= 3 {
-                failChallenge()
-            }
+            loseLifeAndContinue(
+                eventLine: "MISS \(token). DRIFT DETECTED.",
+                retryAction: { [weak self] in
+                    self?.configureRound(resetLives: false)
+                },
+                clearInterruptionState: false
+            )
         }
     }
 
     func retryTapped() {
+        guard !transitionActive else { return }
         if case .cooldown(let until) = state, Date() < until {
             return
         }
@@ -590,25 +808,31 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
     }
 
     private func startChallenge() {
+        clearTransitionState()
         stopCooldownTimer()
         stopInterruptionTimer()
         stopRollTimer()
+        stopRoundTimer()
         roundSpecs = makeRoundSpecs()
         strikes = 0
         cooldownRemaining = 0
         currentRoundIndex = 0
-        roundsTotal = roundSpecs.count + 1
+        roundsTotal = roundSpecs.count
         interruptionActive = false
+        interruptionCompleted = false
         qteEffort = 0
         qteRemaining = 0
         interruptionEndsAt = nil
         lastInterruptionTickAt = nil
         state = .inChallenge
-        configureRound()
+        configureRound(resetLives: true)
     }
 
-    private func configureRound() {
+    private func configureRound(resetLives: Bool) {
         let spec = currentSpec
+        if resetLives {
+            strikes = 0
+        }
         roundDisplay = currentRoundIndex + 1
         targetToken = spec.targetToken.uppercased()
         statusLine = "ROUND \(roundDisplay): ALIGN \(targetToken)"
@@ -620,6 +844,7 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
         activeIndex = (targetSlotIndex + 3) % max(1, stripTokens.count)
         lastTickAt = Date()
         startRollTimer(speed: spec.stripSpeed)
+        startRoundTimer(roundIndex: currentRoundIndex)
     }
 
     private func startRollTimer(speed: Double) {
@@ -636,7 +861,9 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
     }
 
     private func failChallenge() {
+        clearTransitionState()
         stopRollTimer()
+        stopRoundTimer()
         stopInterruptionTimer()
         interruptionActive = false
         qteEffort = 0
@@ -651,7 +878,9 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
     }
 
     private func finishChallenge() {
+        clearTransitionState()
         stopRollTimer()
+        stopRoundTimer()
         stopInterruptionTimer()
         stopCooldownTimer()
         statusLine = "ACCESS GRANTED."
@@ -693,28 +922,66 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
         rollTimer = nil
     }
 
+    private func startRoundTimer(roundIndex: Int) {
+        stopRoundTimer()
+        let duration = codeRoundDurations[min(max(0, roundIndex), codeRoundDurations.count - 1)]
+        roundEndsAt = Date().addingTimeInterval(duration)
+        roundTimeRemaining = duration
+        roundTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.state == .inChallenge, !self.interruptionActive else {
+                    self.stopRoundTimer()
+                    return
+                }
+                guard let endsAt = self.roundEndsAt else {
+                    self.stopRoundTimer()
+                    return
+                }
+
+                self.roundTimeRemaining = max(0, endsAt.timeIntervalSinceNow)
+                if self.roundTimeRemaining <= 0 {
+                    self.handleRoundTimeout()
+                }
+            }
+        }
+        roundTimer?.tolerance = 0.03
+    }
+
+    private func stopRoundTimer() {
+        roundTimer?.invalidate()
+        roundTimer = nil
+        roundEndsAt = nil
+        roundTimeRemaining = 0
+    }
+
     private func stopCooldownTimer() {
         cooldownTimer?.invalidate()
         cooldownTimer = nil
     }
 
-    private func triggerInterruptionRound() {
+    private func triggerInterruptionRound(resetLives: Bool) {
+        clearTransitionState()
         stopRollTimer()
+        stopRoundTimer()
         interruptionActive = true
+        if resetLives {
+            strikes = 0
+        }
         qteEffort = 0
         qteRemaining = qteDuration
         interruptionEndsAt = Date().addingTimeInterval(qteDuration)
         lastInterruptionTickAt = Date()
-        roundDisplay = roundsTotal
+        roundDisplay = min(roundsTotal, currentRoundIndex + 1)
         targetToken = "PATCH"
         stripTokens = []
         activeIndex = 0
-        statusLine = "UPLINK FAILURE. BUILD PATCH EFFORT."
+        statusLine = "RAPID TAP REQUIRED. BUILD PATCH EFFORT."
         appendLog("SECURITY INTERRUPTION DETECTED.")
         startInterruptionTimer()
     }
 
-    private func resolveInterruption() {
+    private func resolveInterruption(skipTransitions: Bool) {
         interruptionActive = false
         qteEffort = 0
         qteRemaining = 0
@@ -722,7 +989,16 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
         lastInterruptionTickAt = nil
         stopInterruptionTimer()
         appendLog("PATCH COMPLETE. UPLINK RESTORED.")
-        finishChallenge()
+        interruptionCompleted = true
+        if currentRoundIndex >= roundSpecs.count {
+            finishChallenge()
+            return
+        }
+        if skipTransitions {
+            configureRound(resetLives: true)
+        } else {
+            transitionOutOfInterruptionRound()
+        }
     }
 
     private func startInterruptionTimer() {
@@ -743,13 +1019,12 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
                 self.statusLine = "PATCH EFFORT \(Int((self.qteEffort * 100).rounded()))% / \(Int((self.qteThreshold * 100).rounded()))%"
 
                 if self.qteEffort >= self.qteThreshold {
-                    self.resolveInterruption()
+                    self.resolveInterruption(skipTransitions: false)
                     return
                 }
 
                 if self.qteRemaining <= 0 {
-                    self.appendLog("PATCH WINDOW EXPIRED.")
-                    self.failChallenge()
+                    self.handleInterruptionTimeout()
                 }
             }
         }
@@ -761,11 +1036,125 @@ final class SettingsPowerUnlockChallengeViewModel: ObservableObject {
         interruptionTimer = nil
     }
 
+    private func handleRoundTimeout() {
+        stopRoundTimer()
+        loseLifeAndContinue(
+            eventLine: "ROUND \(roundDisplay) TIMEOUT.",
+            retryAction: { [weak self] in
+                self?.configureRound(resetLives: false)
+            },
+            clearInterruptionState: false
+        )
+    }
+
+    private func handleInterruptionTimeout() {
+        stopInterruptionTimer()
+        loseLifeAndContinue(
+            eventLine: "PATCH WINDOW EXPIRED.",
+            retryAction: { [weak self] in
+                self?.triggerInterruptionRound(resetLives: false)
+            },
+            clearInterruptionState: true
+        )
+    }
+
+    private func loseLifeAndContinue(
+        eventLine: String,
+        retryAction: @escaping @MainActor () -> Void,
+        clearInterruptionState: Bool
+    ) {
+        strikes += 1
+        appendLog(eventLine)
+        let remaining = livesRemaining
+        if strikes >= 3 {
+            failChallenge()
+            return
+        }
+
+        if clearInterruptionState {
+            interruptionActive = false
+            qteEffort = 0
+            qteRemaining = 0
+            interruptionEndsAt = nil
+            lastInterruptionTickAt = nil
+        }
+
+        statusLine = "LIFE LOST. \(remaining)/3 REMAINING."
+        appendLog("LIFE LOST. ROUND CONTINUES.")
+
+        startTransition(
+            title: "TRACE DESYNC",
+            subtitle: "\(remaining)/3 LIVES REMAIN",
+            duration: transitionBeatDuration,
+            completion: retryAction
+        )
+    }
+
+    private func transitionIntoInterruptionRound() {
+        startTransition(
+            title: "COUNTERMEASURE",
+            subtitle: "PATCH CHANNEL OPENING",
+            duration: transitionBeatDuration
+        ) { [weak self] in
+            self?.triggerInterruptionRound(resetLives: true)
+        }
+    }
+
+    private func transitionOutOfInterruptionRound() {
+        let nextRound = min(roundsTotal, currentRoundIndex + 1)
+        startTransition(
+            title: "PATCH ACCEPTED",
+            subtitle: "RESUME TRACE ROUND \(nextRound)",
+            duration: transitionBeatDuration
+        ) { [weak self] in
+            self?.configureRound(resetLives: true)
+        }
+    }
+
+    private func startTransition(
+        title: String,
+        subtitle: String,
+        duration: TimeInterval,
+        completion: @escaping @MainActor () -> Void
+    ) {
+        transitionWorkItem?.cancel()
+        transitionTitle = title
+        transitionSubtitle = subtitle
+        transitionActive = true
+        statusLine = "\(title) // \(subtitle)"
+
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.state == .inChallenge else {
+                    self.clearTransitionState()
+                    return
+                }
+                self.clearTransitionState()
+                completion()
+            }
+        }
+        transitionWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+    }
+
+    private func clearTransitionState() {
+        transitionWorkItem?.cancel()
+        transitionWorkItem = nil
+        transitionActive = false
+        transitionTitle = ""
+        transitionSubtitle = ""
+    }
+
     private func appendLog(_ line: String) {
         commandLog.append(line)
         if commandLog.count > 8 {
             commandLog.removeFirst(commandLog.count - 8)
         }
+    }
+
+    var livesRemaining: Int {
+        max(0, 3 - strikes)
     }
 }
 
@@ -793,7 +1182,7 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        GeometryReader { proxy in
+        GeometryReader { _ in
             ZStack {
                 Color.black.ignoresSafeArea()
 
@@ -886,62 +1275,14 @@ struct SettingsView: View {
                             }
 
                             covertTrigger
-
-                            if viewModel.advancedAccessState == .unlocked || viewModel.advancedAccessState == .grantedAnimating {
-                                SettingsSection(title: "COVERT POWER LAYER") {
-                                    statusLine("ACCESS", viewModel.advancedAccessState.label, active: viewModel.advancedAccessState == .unlocked)
-                                    statusLine("TEMPORARY OVERRIDES", "ACTIVE")
-                                    statusLine("AUTO-RESET IN", viewModel.countdownDisplay, active: true)
-
-                                    SettingsVectorControlRow(
-                                        title: "PARAM VECTOR",
-                                        value: viewModel.operatorVector.param
-                                    ) { value in
-                                        viewModel.setVector(param: value)
-                                    }
-
-                                    SettingsVectorControlRow(
-                                        title: "THOUGHT VECTOR",
-                                        value: viewModel.operatorVector.thought
-                                    ) { value in
-                                        viewModel.setVector(thought: value)
-                                    }
-
-                                    SettingsVectorControlRow(
-                                        title: "AUDIO VECTOR",
-                                        value: viewModel.operatorVector.audio
-                                    ) { value in
-                                        viewModel.setVector(audio: value)
-                                    }
-
-                                    actionRow(
-                                        title: "RESET TO NEUTRAL",
-                                        role: .destructive
-                                    ) {
-                                        viewModel.resetVectorsToNeutral(sendToHarness: true)
-                                    }
-                                    actionRow(
-                                        title: "LOCK POWER LAYER",
-                                        role: .destructive
-                                    ) {
-                                        viewModel.relockPowerLayer()
-                                    }
-
-                                    Text("VECTOR ACK: \(viewModel.lastOperatorAck)")
-                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                        .tracking(0.9)
-                                        .foregroundStyle(Color.white.opacity(0.68))
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
                         }
                         .padding(.horizontal, 16)
-                        .padding(.vertical, 14)
-                        .frame(minHeight: max(proxy.size.height * 0.8, 560), alignment: .top)
+                        .padding(.top, 14)
+                        .padding(.bottom, 10)
                     }
                 }
-                .padding(.top, max(proxy.safeAreaInsets.top + 6, 12))
-                .padding(.bottom, max(proxy.safeAreaInsets.bottom + 10, 14))
+                .padding(.top, 10)
+                .padding(.bottom, 10)
 
                 if viewModel.showPowerUnlockGate {
                     SettingsPowerUnlockOverlay(
@@ -954,6 +1295,12 @@ struct SettingsView: View {
                     )
                     .transition(.opacity)
                     .zIndex(20)
+                }
+
+                if viewModel.showPowerLayerModal {
+                    powerLayerModal
+                        .transition(.opacity)
+                        .zIndex(25)
                 }
             }
         }
@@ -1061,6 +1408,132 @@ struct SettingsView: View {
             .accessibilityHint("Opens access required prompt")
         }
     }
+
+    private var powerLayerModal: some View {
+        ZStack {
+            Color.black.opacity(0.86)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    viewModel.dismissPowerLayerModal()
+                }
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("COVERT POWER LAYER")
+                        .font(.system(size: 14, weight: .black, design: .monospaced))
+                        .tracking(1.3)
+                        .foregroundStyle(.white)
+                        .chromaticAberration()
+                    Spacer()
+                    Button {
+                        viewModel.dismissPowerLayerModal()
+                    } label: {
+                        Text("CLOSE")
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .tracking(1.0)
+                            .foregroundStyle(Color.white.opacity(0.85))
+                            .frame(minWidth: 84, minHeight: 44)
+                            .overlay {
+                                Rectangle()
+                                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("settings.covert.modal.close")
+                }
+
+                CommandSignalRule(opacity: 0.18)
+
+                HStack(spacing: 8) {
+                    CommandStatusChip(
+                        title: "SYNC",
+                        value: viewModel.vectorSyncChipValue,
+                        isActive: viewModel.isHarnessLinked,
+                        accent: BrandingColors.glyphGreen
+                    )
+                    CommandStatusChip(
+                        title: "SOURCE",
+                        value: viewModel.vectorSourceChipValue,
+                        isActive: true,
+                        accent: BrandingColors.aberrationCyan
+                    )
+                    CommandStatusChip(
+                        title: "STATE",
+                        value: viewModel.vectorStateChipValue,
+                        isActive: viewModel.pendingRemoteOperatorVector == nil,
+                        accent: BrandingColors.warningYellow
+                    )
+                }
+
+                statusLine("ACCESS", viewModel.advancedAccessState.label, active: viewModel.advancedAccessState == .unlocked)
+                statusLine("TEMPORARY OVERRIDES", "ACTIVE")
+                statusLine("AUTO-RESET IN", viewModel.countdownDisplay, active: true)
+
+                CommandVectorRail(
+                    title: "PARAM VECTOR",
+                    value: viewModel.operatorVector.param
+                ) { value in
+                    viewModel.setVector(param: value)
+                } onEditingChanged: { editing in
+                    editing ? viewModel.beginVectorEdit() : viewModel.endVectorEdit()
+                }
+
+                CommandVectorRail(
+                    title: "THOUGHT VECTOR",
+                    value: viewModel.operatorVector.thought
+                ) { value in
+                    viewModel.setVector(thought: value)
+                } onEditingChanged: { editing in
+                    editing ? viewModel.beginVectorEdit() : viewModel.endVectorEdit()
+                }
+
+                CommandVectorRail(
+                    title: "AUDIO VECTOR",
+                    value: viewModel.operatorVector.audio
+                ) { value in
+                    viewModel.setVector(audio: value)
+                } onEditingChanged: { editing in
+                    editing ? viewModel.beginVectorEdit() : viewModel.endVectorEdit()
+                }
+
+                actionRow(
+                    title: "RESET TO NEUTRAL",
+                    role: .destructive
+                ) {
+                    viewModel.resetVectorsToNeutral(sendToHarness: true)
+                }
+                actionRow(
+                    title: "LOCK POWER LAYER",
+                    role: .destructive
+                ) {
+                    viewModel.relockPowerLayer()
+                }
+
+                statusLine(
+                    "STATUS",
+                    viewModel.vectorAckChipValue,
+                    active: viewModel.vectorAckChipValue == "SUCCESS"
+                )
+
+                Text(viewModel.vectorAckDetail)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.9)
+                    .foregroundStyle(Color.white.opacity(0.68))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+            .frame(maxWidth: 560, alignment: .leading)
+            .background(Color.black)
+            .overlay {
+                Rectangle()
+                    .stroke(Color.white.opacity(0.25), lineWidth: 1)
+            }
+            .padding(.horizontal, 20)
+        }
+        .accessibilityIdentifier("settings.covert.modal")
+    }
 }
 
 private struct SettingsSection<Content: View>: View {
@@ -1086,10 +1559,26 @@ private struct SettingsSection<Content: View>: View {
     }
 }
 
-private struct SettingsVectorControlRow: View {
+enum CommandVectorRailMath {
+    static func normalizedValue(for x: CGFloat, width: CGFloat) -> Double {
+        guard width > 1 else { return 0 }
+        let clamped = max(0, min(width, x))
+        let scalar = Double(clamped / width)
+        return max(-1, min(1, (scalar * 2) - 1))
+    }
+
+    static func xPosition(for value: Double, width: CGFloat) -> CGFloat {
+        let clampedValue = max(-1, min(1, value))
+        return CGFloat((clampedValue + 1) * 0.5) * width
+    }
+}
+
+private struct CommandVectorRail: View {
     let title: String
     let value: Double
     let onChange: (Double) -> Void
+    let onEditingChanged: (Bool) -> Void
+    @State private var isDragging = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1120,14 +1609,59 @@ private struct SettingsVectorControlRow: View {
                 }
                 .buttonStyle(.plain)
 
-                Slider(
-                    value: Binding(
-                        get: { value },
-                        set: { onChange($0) }
-                    ),
-                    in: -1...1
-                )
-                .tint(BrandingColors.glyphGreen)
+                GeometryReader { proxy in
+                    let width = max(proxy.size.width, 1)
+                    let x = CommandVectorRailMath.xPosition(for: value, width: width)
+                    let center = width * 0.5
+
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.08))
+                            .frame(height: 32)
+
+                        Rectangle()
+                            .fill(BrandingColors.glyphGreen.opacity(0.18))
+                            .frame(width: max(0, min(abs(x - center), width)), height: 32)
+                            .offset(x: min(x, center))
+
+                        Rectangle()
+                            .fill(Color.white.opacity(0.22))
+                            .frame(width: 1, height: 32)
+                            .offset(x: center)
+
+                        Rectangle()
+                            .fill((isDragging ? BrandingColors.aberrationCyan : BrandingColors.glyphGreen).opacity(0.9))
+                            .frame(width: 14, height: 40)
+                            .overlay {
+                                Rectangle()
+                                    .stroke(Color.white.opacity(0.55), lineWidth: 1)
+                            }
+                            .offset(x: max(0, min(width - 14, x - 7)))
+                            .chromaticAberration()
+                    }
+                    .overlay {
+                        Rectangle()
+                            .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                    }
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                            .onChanged { gesture in
+                                if !isDragging {
+                                    isDragging = true
+                                    onEditingChanged(true)
+                                }
+                                onChange(CommandVectorRailMath.normalizedValue(for: gesture.location.x, width: width))
+                            }
+                            .onEnded { _ in
+                                if isDragging {
+                                    isDragging = false
+                                    onEditingChanged(false)
+                                }
+                            }
+                    )
+                }
+                .frame(height: 44)
 
                 Button {
                     onChange(min(1, value + 0.05))
@@ -1142,6 +1676,12 @@ private struct SettingsVectorControlRow: View {
                         }
                 }
                 .buttonStyle(.plain)
+            }
+        }
+        .onDisappear {
+            if isDragging {
+                isDragging = false
+                onEditingChanged(false)
             }
         }
     }
@@ -1186,6 +1726,7 @@ private struct SettingsPowerUnlockOverlay: View {
                             }
                     }
                     .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("settings.unlock.abort")
                 }
 
@@ -1303,7 +1844,8 @@ private struct SettingsPowerUnlockOverlay: View {
             HStack(spacing: 10) {
                 chip(title: "ROUND", value: "\(viewModel.roundDisplay)/\(viewModel.roundsTotal)")
                 chip(title: "TARGET", value: viewModel.targetToken)
-                chip(title: "STRIKES", value: "\(viewModel.strikes)/3")
+                chip(title: "LIVES", value: "\(viewModel.livesRemaining)/3")
+                chip(title: "TIME", value: viewModel.interruptionActive ? String(format: "%.1fs", viewModel.qteRemaining) : String(format: "%.1fs", viewModel.roundTimeRemaining))
             }
 
             Text(viewModel.statusLine)
@@ -1313,6 +1855,8 @@ private struct SettingsPowerUnlockOverlay: View {
 
             if isFailureState {
                 failurePanel
+            } else if viewModel.transitionActive {
+                transitionPanel
             } else if viewModel.interruptionActive {
                 interruptionPanel
             } else {
@@ -1356,10 +1900,15 @@ private struct SettingsPowerUnlockOverlay: View {
 
     private var interruptionPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("WARNING: LINK DESTABILIZED. BUILD PATCH EFFORT.")
+            Text("SYSTEM COUNTERMEASURE DETECTED.")
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .tracking(1.0)
                 .foregroundStyle(Color.white.opacity(0.74))
+
+            Text("TAP PATCH FAST UNTIL EFFORT CROSSES THE MARKER BEFORE TIME HITS 0.")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .tracking(1.0)
+                .foregroundStyle(BrandingColors.warningYellow)
 
             VStack(alignment: .leading, spacing: 6) {
                 ZStack(alignment: .leading) {
@@ -1391,11 +1940,43 @@ private struct SettingsPowerUnlockOverlay: View {
         .padding(.vertical, 8)
     }
 
+    private var transitionPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(viewModel.transitionTitle)
+                .font(.system(size: 16, weight: .black, design: .monospaced))
+                .tracking(1.5)
+                .foregroundStyle(.white)
+                .chromaticAberration()
+            Text(viewModel.transitionSubtitle)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(1.0)
+                .foregroundStyle(BrandingColors.warningYellow)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(height: 10)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(BrandingColors.glyphGreen.opacity(0.82))
+                        .frame(maxWidth: 220)
+                }
+        }
+        .padding(.vertical, 8)
+    }
+
     private var primaryActionButton: some View {
-        Button {
+        CommandRailButton(
+            title: primaryActionLabel,
+            isEnabled: primaryActionEnabled,
+            isActive: true,
+            isSolid: true,
+            accent: viewModel.interruptionActive || viewModel.transitionActive || isFailureState ? BrandingColors.warningYellow : BrandingColors.glyphGreen
+        ) {
             switch viewModel.state {
             case .inChallenge:
-                if viewModel.interruptionActive {
+                if viewModel.transitionActive {
+                    break
+                } else if viewModel.interruptionActive {
                     viewModel.interruptionTap()
                 } else {
                     viewModel.matchTapped()
@@ -1405,30 +1986,18 @@ private struct SettingsPowerUnlockOverlay: View {
             default:
                 break
             }
-        } label: {
-            Text(primaryActionLabel)
-                .font(.system(size: 13, weight: .bold, design: .monospaced))
-                .tracking(1.2)
-                .foregroundStyle(primaryActionEnabled ? .white : Color.white.opacity(0.4))
-                .frame(maxWidth: .infinity, minHeight: 54)
-                .background {
-                    if isFailureState, primaryActionEnabled {
-                        Rectangle().fill(BrandingColors.warningYellow.opacity(0.2))
-                    }
-                }
-                .overlay {
-                    Rectangle()
-                        .stroke(primaryActionStroke, lineWidth: 1)
-                }
         }
-        .buttonStyle(.plain)
-        .disabled(!primaryActionEnabled)
+        .frame(minHeight: 54)
+        .keyboardShortcut(.defaultAction)
         .accessibilityIdentifier(primaryActionIdentifier)
     }
 
     private var primaryActionLabel: String {
         switch viewModel.state {
         case .inChallenge:
+            if viewModel.transitionActive {
+                return "SYNCING..."
+            }
             return viewModel.interruptionActive ? "PATCH LINK" : "MATCH"
         case .cooldown:
             return "LOCKED \(Int(ceil(viewModel.cooldownRemaining)))s"
@@ -1444,7 +2013,7 @@ private struct SettingsPowerUnlockOverlay: View {
     private var primaryActionEnabled: Bool {
         switch viewModel.state {
         case .inChallenge, .locked:
-            return true
+            return !viewModel.transitionActive
         default:
             return false
         }
@@ -1460,6 +2029,9 @@ private struct SettingsPowerUnlockOverlay: View {
     private var primaryActionIdentifier: String {
         switch viewModel.state {
         case .inChallenge:
+            if viewModel.transitionActive {
+                return "settings.unlock.transition"
+            }
             return viewModel.interruptionActive ? "settings.unlock.patch" : "settings.unlock.match"
         default:
             return "settings.unlock.retry"

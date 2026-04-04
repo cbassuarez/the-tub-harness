@@ -18,6 +18,7 @@ struct AccessPasswordModal: View {
     @State private var input: String = ""
     @State private var statusLine: String = "ENTER 6-LETTER ACCESS TOKEN."
     @State private var deniedPulse = false
+    @State private var hasFailedTokenAuth = false
     @FocusState private var inputFocused: Bool
 
     private var sanitizedInput: String {
@@ -39,19 +40,44 @@ struct AccessPasswordModal: View {
                         .tracking(1.3)
                         .foregroundStyle(Color.white.opacity(0.86))
                     Spacer()
-                    Button(action: onCancel) {
-                        Text("CANCEL")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .tracking(1.1)
-                            .foregroundStyle(Color.white.opacity(0.82))
-                            .frame(minWidth: 84, minHeight: 44)
-                            .overlay {
-                                Rectangle()
-                                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+
+                    HStack(spacing: 8) {
+                        if hasFailedTokenAuth {
+                            Button(action: runHack) {
+                                Text("PLUGIN:HACK")
+                                    .font(.system(size: 10, weight: .black, design: .monospaced))
+                                    .tracking(1.2)
+                                    .foregroundStyle(BrandingColors.aberrationMagenta.opacity(0.95))
+                                    .frame(minWidth: 112, minHeight: 44)
+                                    .background(Color.black)
+                                    .overlay {
+                                        Rectangle()
+                                            .stroke(
+                                                BrandingColors.aberrationMagenta.opacity(0.88),
+                                                style: StrokeStyle(lineWidth: 1, dash: [4, 2])
+                                            )
+                                    }
                             }
+                            .buttonStyle(.plain)
+                            .rotationEffect(.degrees(-0.8))
+                            .accessibilityIdentifier("\(idPrefix).hack")
+                        }
+
+                        Button(action: onCancel) {
+                            Text("CANCEL")
+                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                .tracking(1.1)
+                                .foregroundStyle(Color.white.opacity(0.82))
+                                .frame(minWidth: 84, minHeight: 44)
+                                .overlay {
+                                    Rectangle()
+                                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.cancelAction)
+                        .accessibilityIdentifier("\(idPrefix).cancel")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("\(idPrefix).cancel")
                 }
 
                 Text(subtitle.uppercased())
@@ -100,18 +126,8 @@ struct AccessPasswordModal: View {
                         runEnter()
                     }
                     .frame(minHeight: 46)
+                    .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("\(idPrefix).enter")
-
-                    CommandRailButton(
-                        title: "HACK",
-                        isEnabled: true,
-                        isActive: true,
-                        accent: BrandingColors.warningYellow
-                    ) {
-                        runHack()
-                    }
-                    .frame(minHeight: 46)
-                    .accessibilityIdentifier("\(idPrefix).hack")
                 }
             }
             .padding(.horizontal, 18)
@@ -127,6 +143,7 @@ struct AccessPasswordModal: View {
         .onAppear {
             statusLine = "ENTER 6-LETTER ACCESS TOKEN."
             deniedPulse = false
+            hasFailedTokenAuth = false
             inputFocused = true
         }
         .accessibilityIdentifier("\(idPrefix).modal")
@@ -166,7 +183,8 @@ struct AccessPasswordModal: View {
         }
 
         input = ""
-        statusLine = "ACCESS DENIED. TRY AGAIN."
+        hasFailedTokenAuth = true
+        statusLine = "ACCESS DENIED. PLUGIN CHANNEL EXPOSED."
         deniedPulse = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             deniedPulse = false

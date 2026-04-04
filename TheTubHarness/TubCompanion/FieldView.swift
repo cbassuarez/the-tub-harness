@@ -157,6 +157,15 @@ final class SteerViewModel: ObservableObject {
         updatePad(normalizedPoint: target, previousPoint: start, forceEmit: true)
     }
 
+    func nudgeDirectional(deltaX: CGFloat, deltaY: CGFloat) {
+        let start = padState.point
+        let target = CGPoint(
+            x: max(0, min(1, start.x + deltaX)),
+            y: max(0, min(1, start.y + deltaY))
+        )
+        updatePad(normalizedPoint: target, previousPoint: start, forceEmit: true)
+    }
+
     func beginTouch(normalizedPoint: CGPoint) {
         holdStartAt = Date()
         holdDuration = 0
@@ -415,6 +424,9 @@ struct SteerView: View {
                 steerInfoModal
             }
         }
+        .overlay(alignment: .topLeading) {
+            keyboardNudgeCommandLayer
+        }
         .onAppear {
             if let sessionId = appState.sessionId {
                 harnessClient.setSessionId(sessionId)
@@ -460,8 +472,8 @@ struct SteerView: View {
                 )
                 statusChip(
                     label: "ACCESS",
-                    value: appState.steerAccessState.chipLabel,
-                    isActive: appState.steerAccessState == .unlocked,
+                    value: appState.steerAccessDisplayState.chipLabel,
+                    isActive: appState.steerAccessDisplayState == .unlocked,
                     id: "steer.chip.access"
                 )
             }
@@ -622,9 +634,11 @@ struct SteerView: View {
                 commandButton("LESS", id: "steer.button.less") {
                     viewModel.nudgeLess()
                 }
+                .keyboardShortcut("[", modifiers: [])
                 commandButton("MORE", id: "steer.button.more") {
                     viewModel.nudgeMore()
                 }
+                .keyboardShortcut("]", modifiers: [])
             }
 
             HStack(spacing: 10) {
@@ -679,6 +693,7 @@ struct SteerView: View {
                             }
                     }
                     .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("steer.info.close")
                     .accessibilityLabel("Close steer info")
                 }
@@ -687,10 +702,10 @@ struct SteerView: View {
                     .fill(Color.white.opacity(0.2))
                     .frame(height: 1)
 
-                Text("1. DRAG THE DOT TO BIAS LIVE DESCRIPTORS.")
+                Text("1. DRAG THE DOT TO BIAS LIVE MODEL PARAMETER WEIGHTS.")
                 Text("2. HOLD TO REINFORCE, RELEASE TO COMMIT.")
                 Text("3. USE LESS / MORE FOR QUICK INTENSITY NUDGES.")
-                Text("4. ACCESS TOKEN: THETUB")
+                Text("4. USER NOTE: PASSWORD – THETUB")
                     .foregroundStyle(BrandingColors.glyphGreen)
             }
             .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -708,6 +723,31 @@ struct SteerView: View {
             .accessibilityIdentifier("steer.info.modal")
         }
         .transition(.opacity)
+    }
+
+    private var keyboardNudgeCommandLayer: some View {
+        HStack(spacing: 0) {
+            Button("") {
+                viewModel.nudgeDirectional(deltaX: -0.035, deltaY: 0)
+            }
+            .keyboardShortcut(.leftArrow, modifiers: [])
+            Button("") {
+                viewModel.nudgeDirectional(deltaX: 0.035, deltaY: 0)
+            }
+            .keyboardShortcut(.rightArrow, modifiers: [])
+            Button("") {
+                viewModel.nudgeDirectional(deltaX: 0, deltaY: -0.035)
+            }
+            .keyboardShortcut(.upArrow, modifiers: [])
+            Button("") {
+                viewModel.nudgeDirectional(deltaX: 0, deltaY: 0.035)
+            }
+            .keyboardShortcut(.downArrow, modifiers: [])
+        }
+        .frame(width: 1, height: 1)
+        .opacity(0.0001)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private var currentComparePair: SteerComparePair? {
@@ -788,17 +828,21 @@ final class SteerAccessChallengeViewModel: ObservableObject {
     @Published private(set) var roundDisplay: Int = 1
     @Published private(set) var roundsTotal: Int = 3
     @Published private(set) var strikes: Int = 0
+    @Published private(set) var roundTimeRemaining: TimeInterval = 0
     @Published private(set) var cooldownRemaining: TimeInterval = 0
     @Published private(set) var statusLine: String = "ACCESS REQUIRED."
     @Published private(set) var commandLog: [String] = ["SECURITY SUBSYSTEM ARMED."]
 
     private unowned let appState: TubCompanionAppState
     private var rollTimer: Timer?
+    private var roundTimer: Timer?
     private var cooldownTimer: Timer?
     private var targetSlotIndex: Int = 0
     private var configuredRoundKey = ""
     private var lastTickAt: Date?
+    private var roundEndsAt: Date?
     private var cancellables: Set<AnyCancellable> = []
+    private let roundDurations: [TimeInterval] = [40.0, 40.0, 40.0]
 
     init(appState: TubCompanionAppState) {
         self.appState = appState
@@ -829,6 +873,7 @@ final class SteerAccessChallengeViewModel: ObservableObject {
 
     deinit {
         rollTimer?.invalidate()
+        roundTimer?.invalidate()
         cooldownTimer?.invalidate()
     }
 
@@ -916,6 +961,7 @@ final class SteerAccessChallengeViewModel: ObservableObject {
             statusLine = "ACCESS REQUIRED."
             configuredRoundKey = ""
             stopRollTimer()
+            stopRoundTimer()
             stopCooldownTimer()
         case .inChallenge:
             cooldownRemaining = 0
@@ -924,14 +970,17 @@ final class SteerAccessChallengeViewModel: ObservableObject {
         case .cooldown(let until):
             statusLine = "LOCKOUT ACTIVE."
             stopRollTimer()
+            stopRoundTimer()
             startCooldownTimer(until: until)
         case .grantedAnimating:
             statusLine = "ACCESS GRANTED."
             stopRollTimer()
+            stopRoundTimer()
             stopCooldownTimer()
         case .unlocked:
             statusLine = "ACCESS UNLOCKED."
             stopRollTimer()
+            stopRoundTimer()
             stopCooldownTimer()
         }
     }
@@ -952,6 +1001,7 @@ final class SteerAccessChallengeViewModel: ObservableObject {
         statusLine = "ROUND \(roundDisplay): ALIGN \(targetToken)"
         appendLog("ROUND \(roundDisplay) TARGET \(targetToken).")
         startRollTimer(stripSpeed: spec.stripSpeed)
+        startRoundTimer(roundIndex: roundIndex)
     }
 
     private func buildStrip(roundIndex: Int, targetToken: String) {
@@ -979,6 +1029,42 @@ final class SteerAccessChallengeViewModel: ObservableObject {
     private func stopRollTimer() {
         rollTimer?.invalidate()
         rollTimer = nil
+    }
+
+    private func startRoundTimer(roundIndex: Int) {
+        stopRoundTimer()
+        let duration = roundDurations[min(max(0, roundIndex), roundDurations.count - 1)]
+        roundEndsAt = Date().addingTimeInterval(duration)
+        roundTimeRemaining = duration
+        roundTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard case .inChallenge = self.appState.steerAccessState else {
+                    self.stopRoundTimer()
+                    return
+                }
+                guard let endsAt = self.roundEndsAt else {
+                    self.stopRoundTimer()
+                    return
+                }
+
+                self.roundTimeRemaining = max(0, endsAt.timeIntervalSinceNow)
+                if self.roundTimeRemaining <= 0 {
+                    self.stopRoundTimer()
+                    self.statusLine = "ROUND TIMEOUT."
+                    self.appendLog("ROUND \(self.roundDisplay) TIMEOUT. TRACE RESET.")
+                    self.appState.failSteerChallenge()
+                }
+            }
+        }
+        roundTimer?.tolerance = 0.03
+    }
+
+    private func stopRoundTimer() {
+        roundTimer?.invalidate()
+        roundTimer = nil
+        roundEndsAt = nil
+        roundTimeRemaining = 0
     }
 
     private func startCooldownTimer(until: Date) {
@@ -1012,6 +1098,10 @@ final class SteerAccessChallengeViewModel: ObservableObject {
             commandLog.removeFirst(commandLog.count - 6)
         }
     }
+
+    var livesRemaining: Int {
+        max(0, 3 - strikes)
+    }
 }
 
 struct SteerAccessOverlay: View {
@@ -1033,7 +1123,7 @@ struct SteerAccessOverlay: View {
             VStack(spacing: 0) {
             HStack(spacing: 10) {
                 accessChip(label: "LINK", value: appState.isBackendPathSatisfied ? "CONNECTED" : "OFFLINE", isActive: appState.isBackendPathSatisfied)
-                accessChip(label: "ACCESS", value: appState.steerAccessState.chipLabel, isActive: appState.steerAccessState == .unlocked)
+                accessChip(label: "ACCESS", value: appState.steerAccessDisplayState.chipLabel, isActive: appState.steerAccessDisplayState == .unlocked)
                 accessChip(label: "STATE", value: viewModel.compactStateChip, isActive: true)
             }
             .padding(.horizontal, 20)
@@ -1046,16 +1136,27 @@ struct SteerAccessOverlay: View {
 
                 Spacer(minLength: 16)
 
-                if case .grantedAnimating = appState.steerAccessState {
-                    SteerAccessGrantedView(reduceMotion: reduceMotion)
-                        .accessibilityIdentifier("steer.access.granted")
-                } else if isChallengeVisible {
-                    accessChallengeBody
-                        .accessibilityIdentifier("steer.access.challenge")
-                } else {
-                    accessLockedBody
-                        .accessibilityIdentifier("steer.access.required")
+                Group {
+                    if case .grantedAnimating = appState.steerAccessState {
+                        SteerAccessGrantedView(reduceMotion: reduceMotion)
+                            .accessibilityIdentifier("steer.access.granted")
+                    } else if isChallengeVisible {
+                        accessChallengeBody
+                            .accessibilityIdentifier("steer.access.challenge")
+                    } else {
+                        accessLockedBody
+                            .accessibilityIdentifier("steer.access.required")
+                    }
                 }
+                .frame(maxWidth: 760, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+                .background(Color.black.opacity(0.84))
+                .overlay {
+                    Rectangle()
+                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                }
+                .padding(.horizontal, 20)
 
                 Spacer(minLength: 20)
             }
@@ -1175,7 +1276,8 @@ struct SteerAccessOverlay: View {
                 metricToken(title: "ROUND", value: "\(viewModel.roundDisplay)/\(max(1, viewModel.roundsTotal))")
                 metricToken(title: "TARGET", value: viewModel.targetToken)
                     .accessibilityIdentifier("steer.access.target")
-                metricToken(title: "STRIKES", value: "\(viewModel.strikes)/3")
+                metricToken(title: "LIVES", value: "\(viewModel.livesRemaining)/3")
+                metricToken(title: "TIME", value: String(format: "%.1fs", viewModel.roundTimeRemaining))
             }
 
             if isFailureState {
@@ -1238,7 +1340,13 @@ struct SteerAccessOverlay: View {
     }
 
     private var challengeActionButton: some View {
-        Button {
+        CommandRailButton(
+            title: challengeActionLabel,
+            isEnabled: challengeActionEnabled,
+            isActive: true,
+            isSolid: true,
+            accent: isFailureState ? BrandingColors.warningYellow : BrandingColors.glyphGreen
+        ) {
             switch appState.steerAccessState {
             case .inChallenge:
                 viewModel.matchTapped()
@@ -1247,35 +1355,8 @@ struct SteerAccessOverlay: View {
             default:
                 break
             }
-        } label: {
-            Text(challengeActionLabel)
-                .font(.system(size: 13, weight: .bold, design: .monospaced))
-                .tracking(1.2)
-                .foregroundStyle(
-                    challengeActionEnabled
-                    ? (isFailureState ? BrandingColors.warningYellow : Color.white)
-                    : Color.white.opacity(0.38)
-                )
-                .frame(maxWidth: .infinity, minHeight: 52)
-                .background {
-                    if challengeActionEnabled, isFailureState {
-                        Rectangle().fill(BrandingColors.warningYellow.opacity(0.2))
-                    }
-                }
-                .overlay {
-                    Rectangle()
-                        .stroke(
-                            isFailureState
-                            ? BrandingColors.warningYellow.opacity(0.72)
-                            : BrandingColors.glyphGreen.opacity(0.74),
-                            lineWidth: 1
-                        )
-                }
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
-        .disabled(!challengeActionEnabled)
+        .frame(minHeight: 52)
         .accessibilityIdentifier(challengeActionID)
     }
 
