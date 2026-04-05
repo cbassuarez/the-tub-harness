@@ -325,6 +325,192 @@ struct TheTubHarnessTests {
         #expect(decoded[0].operatorVector?.ttlSeconds == 1800)
     }
 
+    @Test("AudienceSessionServer NDJSON parser decodes operator activity envelopes")
+    func audienceEnvelopeParserDecodesOperatorActivity() throws {
+        let server = AudienceSessionServer()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        let event = OperatorActivityEvent(
+            sessionId: "session-ops",
+            surface: .play,
+            action: .playGridTrigger,
+            label: "0A",
+            intensity: 0.64,
+            position: CGPoint(x: 0.5, y: 0.25)
+        )
+        let snapshot = OperatorActivitySnapshot(events: [event], serverTimestamp: Date())
+
+        let eventEnvelope = AudienceEnvelope(
+            kind: .operatorActivity,
+            sessionId: "session-ops",
+            operatorActivity: event
+        )
+        let snapshotEnvelope = AudienceEnvelope(
+            kind: .operatorActivitySnapshot,
+            sessionId: "SYSTEM",
+            operatorActivitySnapshot: snapshot
+        )
+
+        var lineOne = try encoder.encode(eventEnvelope)
+        var lineTwo = try encoder.encode(snapshotEnvelope)
+        lineOne.append(0x0A)
+        lineTwo.append(0x0A)
+
+        let decoded = server.decodeEnvelopesForTesting(chunks: [lineOne + lineTwo])
+        #expect(decoded.count == 2)
+        #expect(decoded[0].kind == .operatorActivity)
+        #expect(decoded[0].operatorActivity?.action == .playGridTrigger)
+        #expect(decoded[1].kind == .operatorActivitySnapshot)
+        #expect(decoded[1].operatorActivitySnapshot?.events.count == 1)
+    }
+
+    @Test("AudienceSessionServer includes operator activity snapshot on session open and query state")
+    func audienceSessionServerSendsOperatorActivitySnapshotOnOpenAndQuery() {
+        let server = AudienceSessionServer()
+        server.enableOutgoingEnvelopeCaptureForTesting(true)
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(kind: .sessionOpen, sessionId: "session-open"),
+            connectionKey: "conn-open"
+        )
+        let openEnvelopes = server.takeOutgoingEnvelopesForTesting()
+        #expect(openEnvelopes.contains(where: { $0.kind == .operatorActivitySnapshot }))
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(kind: .queryState, sessionId: "session-open"),
+            connectionKey: "conn-open"
+        )
+        let queryEnvelopes = server.takeOutgoingEnvelopesForTesting()
+        #expect(queryEnvelopes.contains(where: { $0.kind == .operatorActivitySnapshot }))
+    }
+
+    @Test("AudienceSessionServer turns steer vectors into operator activity broadcasts")
+    func audienceSessionServerBroadcastsSteerOperatorActivity() {
+        let server = AudienceSessionServer()
+        server.enableOutgoingEnvelopeCaptureForTesting(true)
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(kind: .sessionOpen, sessionId: "session-a"),
+            connectionKey: "conn-a"
+        )
+        _ = server.takeOutgoingEnvelopesForTesting()
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(kind: .sessionOpen, sessionId: "session-b"),
+            connectionKey: "conn-b"
+        )
+        _ = server.takeOutgoingEnvelopesForTesting()
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(
+                kind: .steerVector,
+                sessionId: "session-a",
+                steerVector: SteerVectorPayload(
+                    pointX: 0.34,
+                    pointY: 0.62,
+                    velocityX: 0.04,
+                    velocityY: -0.03,
+                    intensity: 0.79,
+                    descriptorId: "dense",
+                    descriptorLabel: "DENSE"
+                )
+            ),
+            connectionKey: "conn-a"
+        )
+
+        let activity = server
+            .takeOutgoingEnvelopesForTesting()
+            .filter { $0.kind == .operatorActivity }
+
+        #expect(activity.count == 2)
+        #expect(activity.allSatisfy { $0.operatorActivity?.surface == .steer })
+        #expect(activity.allSatisfy { $0.operatorActivity?.action == .steerVector })
+    }
+
+    @Test("AudienceSessionServer rebroadcasts play activity and throttles long sweeps")
+    func audienceSessionServerRebroadcastsPlayActivityAndThrottlesSweep() {
+        let server = AudienceSessionServer()
+        server.enableOutgoingEnvelopeCaptureForTesting(true)
+
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(kind: .sessionOpen, sessionId: "session-a"),
+            connectionKey: "conn-a"
+        )
+        _ = server.takeOutgoingEnvelopesForTesting()
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(kind: .sessionOpen, sessionId: "session-b"),
+            connectionKey: "conn-b"
+        )
+        _ = server.takeOutgoingEnvelopesForTesting()
+
+        let sweepOne = OperatorActivityEvent(
+            eventId: "sweep-1",
+            sessionId: "session-a",
+            surface: .play,
+            action: .playLongSweep,
+            label: "LONG_A",
+            intensity: 0.35,
+            position: CGPoint(x: 0.2, y: 0.5)
+        )
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(
+                kind: .operatorActivity,
+                sessionId: "session-a",
+                timestamp: sweepOne.timestamp,
+                operatorActivity: sweepOne
+            ),
+            connectionKey: "conn-a"
+        )
+        let firstSweepBroadcast = server
+            .takeOutgoingEnvelopesForTesting()
+            .filter { $0.kind == .operatorActivity && $0.operatorActivity?.eventId == "sweep-1" }
+        #expect(firstSweepBroadcast.count == 2)
+
+        let sweepTwo = OperatorActivityEvent(
+            eventId: "sweep-2",
+            sessionId: "session-a",
+            surface: .play,
+            action: .playLongSweep,
+            label: "LONG_A",
+            intensity: 0.36,
+            position: CGPoint(x: 0.23, y: 0.5)
+        )
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(
+                kind: .operatorActivity,
+                sessionId: "session-a",
+                timestamp: sweepTwo.timestamp,
+                operatorActivity: sweepTwo
+            ),
+            connectionKey: "conn-a"
+        )
+        let secondSweepBroadcast = server
+            .takeOutgoingEnvelopesForTesting()
+            .filter { $0.kind == .operatorActivity && $0.operatorActivity?.eventId == "sweep-2" }
+        #expect(secondSweepBroadcast.isEmpty)
+
+        let gridTrigger = OperatorActivityEvent(
+            eventId: "grid-1",
+            sessionId: "session-a",
+            surface: .play,
+            action: .playGridTrigger,
+            label: "0A"
+        )
+        server.simulateEnvelopeForTesting(
+            AudienceEnvelope(
+                kind: .operatorActivity,
+                sessionId: "session-a",
+                timestamp: gridTrigger.timestamp,
+                operatorActivity: gridTrigger
+            ),
+            connectionKey: "conn-a"
+        )
+        let gridBroadcast = server
+            .takeOutgoingEnvelopesForTesting()
+            .filter { $0.kind == .operatorActivity && $0.operatorActivity?.eventId == "grid-1" }
+        #expect(gridBroadcast.count == 2)
+    }
+
     @Test("AudiencePreferenceOverlay less action uses symmetric intensity key path")
     func audiencePreferenceOverlayLessActionSymmetry() {
         let overlay = AudiencePreferenceOverlay()

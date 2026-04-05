@@ -8,6 +8,7 @@
 
 import SwiftUI
 import Combine
+import UIKit
 
 @main
 struct TubCompanionApp: App {
@@ -42,6 +43,12 @@ struct TubCompanionApp: App {
             }
             .onReceive(harnessClient.$connectionState.receive(on: RunLoop.main)) { state in
                 appState.syncHarnessState(state)
+            }
+            .onReceive(harnessClient.$lastOperatorActivity.compactMap { $0 }.receive(on: RunLoop.main)) { event in
+                appState.ingestOperatorActivityEvent(event)
+            }
+            .onReceive(harnessClient.$lastOperatorActivitySnapshot.compactMap { $0 }.receive(on: RunLoop.main)) { snapshot in
+                appState.ingestOperatorActivitySnapshot(snapshot)
             }
             .onReceive(externalAudioRouteMonitor.$isExternalAudioRouteActive.receive(on: RunLoop.main)) { _ in
                 appState.syncExternalAudioRoute(
@@ -86,7 +93,7 @@ enum EntryIntent: String, Codable {
     var title: String {
         switch self {
         case .playLive: return "Play into THE TUB"
-        case .feedBank: return "Feed the sound bank"
+        case .feedBank: return "Steer the ML"
         }
     }
 }
@@ -137,10 +144,19 @@ enum AppTab: String, Hashable {
 
 enum ShellLayoutClass: String, Equatable {
     case compact
+    case phoneLandscapeCompact
     case regular
     case wide
 
-    static func classify(width: CGFloat, metrics: ShellLayoutMetrics = .default) -> ShellLayoutClass {
+    static func classify(
+        width: CGFloat,
+        height: CGFloat,
+        isPhone: Bool,
+        metrics: ShellLayoutMetrics = .default
+    ) -> ShellLayoutClass {
+        if isPhone, width > height, height <= metrics.phoneLandscapeHeightUpperBound {
+            return .phoneLandscapeCompact
+        }
         if width < metrics.compactUpperBound {
             return .compact
         }
@@ -153,20 +169,24 @@ enum ShellLayoutClass: String, Equatable {
 
 struct ShellLayoutMetrics: Equatable {
     let compactUpperBound: CGFloat
+    let phoneLandscapeHeightUpperBound: CGFloat
     let regularUpperBound: CGFloat
     let railWidthRegular: CGFloat
     let railWidthWide: CGFloat
     let inspectorWidthRegular: CGFloat
     let inspectorWidthWide: CGFloat
+    let inspectorWidthPhoneLandscape: CGFloat
     let paneSpacing: CGFloat
 
     static let `default` = ShellLayoutMetrics(
         compactUpperBound: 700,
+        phoneLandscapeHeightUpperBound: 430,
         regularUpperBound: 1024,
         railWidthRegular: 140,
         railWidthWide: 152,
         inspectorWidthRegular: 312,
         inspectorWidthWide: 360,
+        inspectorWidthPhoneLandscape: 280,
         paneSpacing: 12
     )
 }
@@ -175,7 +195,9 @@ struct ShellLayoutMetrics: Equatable {
 final class ShellLayoutModel: ObservableObject {
     @Published private(set) var layoutClass: ShellLayoutClass = .compact
     @Published private(set) var measuredWidth: CGFloat = 0
+    @Published private(set) var measuredHeight: CGFloat = 0
     @Published private(set) var isRegularInspectorVisible: Bool
+    @Published private(set) var isPhoneLandscapeInspectorVisible = false
 
     let metrics: ShellLayoutMetrics
 
@@ -197,13 +219,20 @@ final class ShellLayoutModel: ObservableObject {
     }
 
     var usesLeftRail: Bool {
-        layoutClass != .compact
+        switch layoutClass {
+        case .compact, .phoneLandscapeCompact:
+            return false
+        case .regular, .wide:
+            return true
+        }
     }
 
     var showsSecondaryPane: Bool {
         switch layoutClass {
         case .compact:
             return false
+        case .phoneLandscapeCompact:
+            return isPhoneLandscapeInspectorVisible
         case .regular:
             return isRegularInspectorVisible
         case .wide:
@@ -216,23 +245,62 @@ final class ShellLayoutModel: ObservableObject {
     }
 
     var inspectorWidth: CGFloat {
-        layoutClass == .wide ? metrics.inspectorWidthWide : metrics.inspectorWidthRegular
+        switch layoutClass {
+        case .wide:
+            return metrics.inspectorWidthWide
+        case .regular:
+            return metrics.inspectorWidthRegular
+        case .phoneLandscapeCompact:
+            return metrics.inspectorWidthPhoneLandscape
+        case .compact:
+            return metrics.inspectorWidthRegular
+        }
     }
 
-    func update(for width: CGFloat) {
-        measuredWidth = width
-        let nextClass = ShellLayoutClass.classify(width: width, metrics: metrics)
+    func update(for size: CGSize, idiom: UIUserInterfaceIdiom) {
+        measuredWidth = size.width
+        measuredHeight = size.height
+        let nextClass = ShellLayoutClass.classify(
+            width: size.width,
+            height: size.height,
+            isPhone: idiom == .phone,
+            metrics: metrics
+        )
         if nextClass != layoutClass {
             layoutClass = nextClass
+            if nextClass != .phoneLandscapeCompact {
+                isPhoneLandscapeInspectorVisible = false
+            }
         }
     }
 
     func toggleInspectorPane() {
-        guard layoutClass == .regular else { return }
-        isRegularInspectorVisible.toggle()
-        if persistRegularInspectorVisibility {
-            defaults.set(isRegularInspectorVisible, forKey: Self.regularInspectorVisibilityKey)
+        switch layoutClass {
+        case .regular:
+            isRegularInspectorVisible.toggle()
+            if persistRegularInspectorVisibility {
+                defaults.set(isRegularInspectorVisible, forKey: Self.regularInspectorVisibilityKey)
+            }
+        case .phoneLandscapeCompact:
+            isPhoneLandscapeInspectorVisible.toggle()
+        case .compact, .wide:
+            break
         }
+    }
+
+    func hideTransientInspector() {
+        isPhoneLandscapeInspectorVisible = false
+    }
+}
+
+private struct ShellLayoutClassEnvironmentKey: EnvironmentKey {
+    static let defaultValue: ShellLayoutClass = .compact
+}
+
+extension EnvironmentValues {
+    var shellLayoutClass: ShellLayoutClass {
+        get { self[ShellLayoutClassEnvironmentKey.self] }
+        set { self[ShellLayoutClassEnvironmentKey.self] = newValue }
     }
 }
 
@@ -300,7 +368,8 @@ struct CompanionRootView: View {
                 .zIndex(10)
             }
             if showLaunchScreen {
-                TubLaunchScreenView()
+                TubLaunchScreenView(isPlaySurfaceReady: isPlaySurfaceReady)
+                    .allowsHitTesting(false)
                     .transition(.opacity)
                     .zIndex(20)
             }
@@ -310,7 +379,9 @@ struct CompanionRootView: View {
             didScheduleLaunchDismiss = true
 
             #if DEBUG
-            let shouldSkip = ProcessInfo.processInfo.arguments.contains("-DEBUG_SKIP_CUSTOM_LAUNCH")
+            // Debug default: skip custom launch overlay for reliable first-touch iteration.
+            // Opt back in explicitly with `-DEBUG_ENABLE_CUSTOM_LAUNCH YES`.
+            let shouldSkip = !ProcessInfo.processInfo.arguments.contains("-DEBUG_ENABLE_CUSTOM_LAUNCH")
             #else
             let shouldSkip = false
             #endif
@@ -321,12 +392,16 @@ struct CompanionRootView: View {
             }
 
             Task { @MainActor in
-                let minLaunchDuration: UInt64 = 2_900_000_000
-                try? await Task.sleep(nanoseconds: minLaunchDuration)
-                let readinessDeadline = Date().addingTimeInterval(1.8)
-                while !isPlaySurfaceReady, Date() < readinessDeadline {
-                    try? await Task.sleep(nanoseconds: 80_000_000)
+                let minimumVisibleUntil = Date().addingTimeInterval(1.25)
+                let hardDeadline = Date().addingTimeInterval(5.0)
+
+                while Date() < minimumVisibleUntil {
+                    try? await Task.sleep(nanoseconds: 40_000_000)
                 }
+                while !isPlaySurfaceReady, Date() < hardDeadline {
+                    try? await Task.sleep(nanoseconds: 70_000_000)
+                }
+
                 withAnimation(.easeOut(duration: 0.35)) {
                     showLaunchScreen = false
                 }
@@ -343,8 +418,9 @@ struct MainShellView: View {
     @ObservedObject var externalAudioRouteMonitor: ExternalAudioRouteMonitor
     var onPlaySurfaceReady: () -> Void = {}
     @State private var selectedTab: AppTab = .steer
-    @State private var isPlaySurfacePrimed = false
     @State private var didApplyInitialTab = false
+    @State private var didReportShellReady = false
+    @State private var lastHarnessDiscoveryAttemptAt: Date?
     @StateObject private var shellLayout = ShellLayoutModel()
 
     var body: some View {
@@ -352,32 +428,25 @@ struct MainShellView: View {
             ZStack {
                 Color.black.ignoresSafeArea()
                 if shellLayout.layoutClass == .compact {
-                    compactShell
+                    compactShell(safeAreaInsets: proxy.safeAreaInsets)
+                } else if shellLayout.layoutClass == .phoneLandscapeCompact {
+                    phoneLandscapeShell(safeAreaInsets: proxy.safeAreaInsets)
                 } else {
                     wideShell(safeAreaInsets: proxy.safeAreaInsets)
                 }
-                if selectedTab != .play, !isPlaySurfacePrimed {
-                    PlayTabHostView(
-                        appState: appState,
-                        harnessClient: harnessClient,
-                        externalAudioRouteMonitor: externalAudioRouteMonitor,
-                        isActivated: true,
-                        isPrimed: $isPlaySurfacePrimed
-                    )
-                    .frame(width: 1, height: 1)
-                    .opacity(0.01)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-                }
             }
             .onAppear {
-                shellLayout.update(for: proxy.size.width)
+                shellLayout.update(for: proxy.size, idiom: UIDevice.current.userInterfaceIdiom)
             }
-            .onChange(of: proxy.size.width) { _, width in
-                shellLayout.update(for: width)
+            .onChange(of: proxy.size) { _, size in
+                shellLayout.update(for: size, idiom: UIDevice.current.userInterfaceIdiom)
             }
         }
         .onAppear {
+            if !didReportShellReady {
+                didReportShellReady = true
+                onPlaySurfaceReady()
+            }
             guard !didApplyInitialTab else { return }
             didApplyInitialTab = true
             if let requested = appState.tabNavigationRequest {
@@ -390,24 +459,29 @@ struct MainShellView: View {
         }
         .onChange(of: selectedTab) { _, tab in
             appState.persistSelectedTab(tab)
+            if shellLayout.layoutClass == .phoneLandscapeCompact,
+               (tab == .learn || tab == .settings) {
+                shellLayout.hideTransientInspector()
+            }
         }
         .onChange(of: appState.tabNavigationRequest) { _, requested in
             guard let requested else { return }
             selectTab(requested)
             appState.consumeTabNavigationRequest()
         }
-        .onChange(of: isPlaySurfacePrimed) { _, primed in
-            guard primed else { return }
-            onPlaySurfaceReady()
-        }
     }
 
-    private var compactShell: some View {
-        ZStack {
+    private func compactShell(safeAreaInsets: EdgeInsets) -> some View {
+        let navBottom = max(10, safeAreaInsets.bottom)
+        let navReservedHeight: CGFloat = 66 + navBottom
+
+        return ZStack(alignment: .bottom) {
             currentTabView
+                .environment(\.shellLayoutClass, .compact)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+                .clipped()
+                .padding(.bottom, navReservedHeight)
+
             VStack(spacing: 0) {
                 CommandSignalRule()
                 ShellCommandNavigator(
@@ -424,10 +498,102 @@ struct MainShellView: View {
                 )
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
-                .padding(.bottom, 10)
+                .padding(.bottom, navBottom)
             }
             .background(Color.black.opacity(0.96))
+            .zIndex(1_000)
         }
+    }
+
+    private func phoneLandscapeShell(safeAreaInsets: EdgeInsets) -> some View {
+        let inspectorAllowed = selectedTab == .steer || selectedTab == .play
+        let inspectorVisible = inspectorAllowed && shellLayout.showsSecondaryPane
+        let contentBottomInset = (selectedTab == .learn || selectedTab == .settings)
+            ? 0
+            : max(0, safeAreaInsets.bottom)
+        let inspectorWidth = min(
+            max(220, shellLayout.inspectorWidth),
+            max(220, shellLayout.measuredWidth * 0.44)
+        )
+
+        return VStack(spacing: 0) {
+            ShellCommandNavigator(
+                selectedTab: selectedTab,
+                layoutClass: .phoneLandscapeCompact,
+                appState: appState,
+                harnessClient: harnessClient,
+                onSelect: { tab in
+                    selectTab(tab)
+                },
+                showsInspectorToggle: inspectorAllowed,
+                inspectorVisible: inspectorVisible,
+                onToggleInspector: inspectorAllowed ? {
+                    shellLayout.toggleInspectorPane()
+                } : nil
+            )
+            .padding(.horizontal, 10)
+            .padding(.top, max(4, safeAreaInsets.top + 2))
+            .padding(.bottom, 6)
+            .accessibilityIdentifier("shell.nav.top")
+
+            CommandSignalRule(opacity: 0.18)
+
+            ZStack(alignment: .trailing) {
+                currentTabView
+                    .environment(\.shellLayoutClass, .phoneLandscapeCompact)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("shell.content.primary")
+
+                if inspectorVisible {
+                    HStack(spacing: 0) {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.13))
+                            .frame(width: 1)
+
+                        ShellInspectorPane(
+                            selectedTab: selectedTab,
+                            steerState: steerInspectorState,
+                            playState: playInspectorState,
+                            learnState: learnInspectorState,
+                            settingsState: settingsInspectorState,
+                            onSteerLess: {
+                                harnessClient.sendIntensityNudge(direction: .less, intensity: 1, sessionId: appState.sessionId)
+                                appState.recordPreference(
+                                    AudiencePreferenceEvent(
+                                        sessionId: appState.sessionId ?? "unknown",
+                                        eventType: .lessAction,
+                                        intensity: 1
+                                    )
+                                )
+                            },
+                            onSteerMore: {
+                                harnessClient.sendIntensityNudge(direction: .more, intensity: 1, sessionId: appState.sessionId)
+                                appState.recordPreference(
+                                    AudiencePreferenceEvent(
+                                        sessionId: appState.sessionId ?? "unknown",
+                                        eventType: .moreAction,
+                                        intensity: 1
+                                    )
+                                )
+                            },
+                            onJumpSteer: {
+                                selectTab(.steer)
+                            },
+                            onJumpPlay: {
+                                selectTab(.play)
+                            }
+                        )
+                        .frame(width: inspectorWidth)
+                        .background(Color.black.opacity(0.96))
+                        .accessibilityIdentifier("shell.inspector")
+                    }
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.bottom, contentBottomInset)
+        }
+        .animation(.easeInOut(duration: 0.2), value: inspectorVisible)
     }
 
     private func wideShell(safeAreaInsets: EdgeInsets) -> some View {
@@ -454,6 +620,7 @@ struct MainShellView: View {
                 .frame(width: 1)
 
             currentTabView
+                .environment(\.shellLayoutClass, shellLayout.layoutClass)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityIdentifier("shell.content.primary")
 
@@ -515,12 +682,10 @@ struct MainShellView: View {
             )
             .accessibilityIdentifier("shell.content.steer")
         case .play:
-            PlayTabHostView(
+            PlayIntoTUBView(
                 appState: appState,
                 harnessClient: harnessClient,
-                externalAudioRouteMonitor: externalAudioRouteMonitor,
-                isActivated: true,
-                isPrimed: $isPlaySurfacePrimed
+                externalAudioRouteMonitor: externalAudioRouteMonitor
             )
             .accessibilityIdentifier("shell.content.play")
         case .learn:
@@ -538,7 +703,11 @@ struct MainShellView: View {
 
     private func selectTab(_ tab: AppTab) {
         if tab == .steer {
+            appState.rememberEntryIntent(.feedBank)
             attemptQuietHarnessReconnectIfNeeded()
+        }
+        if tab == .play {
+            appState.rememberEntryIntent(.playLive)
         }
         selectedTab = tab
     }
@@ -558,14 +727,33 @@ struct MainShellView: View {
         appState.syncHarnessState(.connecting)
         harnessClient.connectToHarness(host: resolvedHost, port: port)
         harnessClient.preflightHandshake(host: resolvedHost, port: port) { result in
-            guard case .success(let payload) = result else { return }
-            let hintedHost = payload.hostHints?.first?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let handshakeHost = (hintedHost?.isEmpty == false) ? hintedHost! : resolvedHost
-            let handshakePort = payload.audiencePort.flatMap { UInt16(exactly: $0) } ?? port
-            guard handshakeHost != resolvedHost || handshakePort != port else { return }
-            appState.updateHarnessAddress(host: handshakeHost, port: handshakePort)
-            harnessClient.disconnect(manual: false)
-            harnessClient.connectToHarness(host: handshakeHost, port: handshakePort)
+            switch result {
+            case .success(let payload):
+                let hintedHost = payload.hostHints?.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let handshakeHost = (hintedHost?.isEmpty == false) ? hintedHost! : resolvedHost
+                let handshakePort = payload.audiencePort.flatMap { UInt16(exactly: $0) } ?? port
+                guard handshakeHost != resolvedHost || handshakePort != port else { return }
+                appState.updateHarnessAddress(host: handshakeHost, port: handshakePort)
+                harnessClient.disconnect(manual: false)
+                harnessClient.connectToHarness(host: handshakeHost, port: handshakePort)
+            case .failure:
+                guard harnessClient.shouldAttemptLocalDiscovery(for: resolvedHost) else { return }
+                let now = Date()
+                if let lastHarnessDiscoveryAttemptAt,
+                   now.timeIntervalSince(lastHarnessDiscoveryAttemptAt) < 12 {
+                    return
+                }
+                lastHarnessDiscoveryAttemptAt = now
+                harnessClient.discoverHarnessOnLocalNetwork(port: port) { discovery in
+                    guard case .success(let found) = discovery else { return }
+                    let discoveredPort = found.payload.audiencePort
+                        .flatMap { UInt16(exactly: $0) }
+                        ?? port
+                    appState.updateHarnessAddress(host: found.host, port: discoveredPort)
+                    harnessClient.disconnect(manual: false)
+                    harnessClient.connectToHarness(host: found.host, port: discoveredPort)
+                }
+            }
         }
     }
 
@@ -647,6 +835,7 @@ private struct ShellCommandNavigator: View {
     let onSelect: (AppTab) -> Void
     let showsInspectorToggle: Bool
     let inspectorVisible: Bool
+    let inspectorEnabled: Bool = true
     let onToggleInspector: (() -> Void)?
 
     private let allTabs: [AppTab] = [.steer, .play, .learn, .settings]
@@ -658,6 +847,20 @@ private struct ShellCommandNavigator: View {
             if layoutClass == .compact {
                 HStack(spacing: 8) {
                     tabButtons
+                }
+            } else if layoutClass == .phoneLandscapeCompact {
+                HStack(spacing: 8) {
+                    tabButtons
+                    if showsInspectorToggle, let onToggleInspector {
+                        inspectorToggleButton(
+                            title: inspectorVisible ? "INSPECT ON" : "INSPECT",
+                            isActive: inspectorVisible,
+                            isEnabled: inspectorEnabled,
+                            accent: BrandingColors.aberrationCyan,
+                            action: onToggleInspector
+                        )
+                        .frame(minWidth: 92, maxWidth: 108)
+                    }
                 }
             } else {
                 VStack(alignment: .leading, spacing: 10) {
@@ -672,30 +875,13 @@ private struct ShellCommandNavigator: View {
                     }
 
                     if showsInspectorToggle, let onToggleInspector {
-                        Button {
-                            onToggleInspector()
-                        } label: {
-                            Text(inspectorVisible ? "INSPECTOR ON" : "INSPECTOR OFF")
-                                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                .tracking(1.0)
-                                .foregroundStyle(inspectorVisible ? BrandingColors.aberrationCyan : Color.white.opacity(0.7))
-                                .frame(maxWidth: .infinity, minHeight: 44)
-                                .background(
-                                    hoveringInspector
-                                    ? BrandingColors.aberrationCyan.opacity(0.12)
-                                    : Color.clear
-                                )
-                                .overlay {
-                                    Rectangle()
-                                        .stroke(
-                                            inspectorVisible
-                                            ? BrandingColors.aberrationCyan.opacity(0.66)
-                                            : Color.white.opacity(0.2),
-                                            lineWidth: 1
-                                        )
-                                }
-                        }
-                        .buttonStyle(.plain)
+                        inspectorToggleButton(
+                            title: inspectorVisible ? "INSPECTOR ON" : "INSPECTOR OFF",
+                            isActive: inspectorVisible,
+                            isEnabled: inspectorEnabled,
+                            accent: BrandingColors.aberrationCyan,
+                            action: onToggleInspector
+                        )
                         .keyboardShortcut("0", modifiers: [.command])
                         .onHover { hovering in
                             hoveringInspector = hovering
@@ -731,10 +917,15 @@ private struct ShellCommandNavigator: View {
                 onSelect(tab)
             } label: {
                 Text(tabTitle(tab))
-                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .font(.system(size: layoutClass == .phoneLandscapeCompact ? 11 : 12, weight: .bold, design: .monospaced))
                     .tracking(1.0)
                     .foregroundStyle(selected ? BrandingColors.glyphGreen : Color.white.opacity(0.76))
-                    .frame(maxWidth: .infinity, minHeight: layoutClass == .compact ? 46 : 50)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: layoutClass == .compact
+                        ? 46
+                        : (layoutClass == .phoneLandscapeCompact ? 38 : 50)
+                    )
                     .background(
                         hovered
                         ? BrandingColors.glyphGreen.opacity(0.08)
@@ -763,6 +954,44 @@ private struct ShellCommandNavigator: View {
             .accessibilityLabel(tabTitle(tab).lowercased())
             .accessibilityAddTraits(selected ? [.isSelected] : [])
         }
+    }
+
+    private func inspectorToggleButton(
+        title: String,
+        isActive: Bool,
+        isEnabled: Bool,
+        accent: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            action()
+        } label: {
+            Text(title)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .tracking(1.0)
+                .foregroundStyle(
+                    isEnabled
+                    ? (isActive ? accent : Color.white.opacity(0.72))
+                    : Color.white.opacity(0.34)
+                )
+                .frame(maxWidth: .infinity, minHeight: layoutClass == .phoneLandscapeCompact ? 38 : 44)
+                .background(
+                    isEnabled && (hoveringInspector || (layoutClass == .phoneLandscapeCompact && isActive))
+                    ? accent.opacity(0.12)
+                    : Color.clear
+                )
+                .overlay {
+                    Rectangle()
+                        .stroke(
+                            isEnabled
+                            ? (isActive ? accent.opacity(0.66) : Color.white.opacity(0.2))
+                            : Color.white.opacity(0.14),
+                            lineWidth: 1
+                        )
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
     }
 
     private func tabTitle(_ tab: AppTab) -> String {
@@ -1018,9 +1247,13 @@ class TubCompanionAppState: NSObject, ObservableObject {
     @Published private(set) var steerHackRoundSpecs: [SteerHackRoundSpec]
     @Published var forcePresentEntryGate = false
     @Published var bypassPreferredEntryIntentOnce = false
+    @Published private(set) var operatorActivityTimeline: [OperatorActivityEvent] = []
 
     private let defaults = UserDefaults.standard
     private let debugBypassSteerLockOverride: Bool?
+    private let operatorActivityMaxCount = 300
+    private let operatorActivityMaxAge: TimeInterval = 5 * 60
+    private var operatorActivityEventIds: Set<String> = []
     
     #if DEBUG
     private func debugFlag(_ name: String, defaultValue: Bool) -> Bool {
@@ -1151,6 +1384,9 @@ class TubCompanionAppState: NSObject, ObservableObject {
             entryIntent = lastEntryIntent
         }
 
+        operatorActivityTimeline.removeAll(keepingCapacity: false)
+        operatorActivityEventIds.removeAll(keepingCapacity: false)
+
         resetSteerAccess()
 
     }
@@ -1167,16 +1403,22 @@ class TubCompanionAppState: NSObject, ObservableObject {
     func chooseEntryIntent(_ intent: EntryIntent) {
         forcePresentEntryGate = false
         bypassPreferredEntryIntentOnce = false
+        rememberEntryIntent(intent)
+        requestTabNavigation(defaultTab(for: intent))
+    }
+
+    func rememberEntryIntent(_ intent: EntryIntent) {
         entryIntent = intent
         lastEntryIntent = intent
         defaults.set(intent.rawValue, forKey: DefaultsKey.lastEntryIntent)
-        requestTabNavigation(defaultTab(for: intent))
     }
 
     func markCablePathSatisfied() {
         isCablePathSatisfied = true
         didCompleteCableGuidance = true
         defaults.set(true, forKey: DefaultsKey.didCompleteCableGuidance)
+        forcePresentEntryGate = false
+        bypassPreferredEntryIntentOnce = false
     }
 
     func clearCablePath() {
@@ -1212,6 +1454,10 @@ class TubCompanionAppState: NSObject, ObservableObject {
         return false
     }
 
+    var isPlayPathSatisfied: Bool {
+        isExternalAudioRouteActive || isCableRouteSimulated || isCablePathSatisfied || isDebugOutputSimulated
+    }
+
     var shouldPresentConnectionGate: Bool {
         if forcePresentEntryGate {
             return true
@@ -1226,11 +1472,11 @@ class TubCompanionAppState: NSObject, ObservableObject {
 
         switch entryIntent {
         case .playLive:
-            return false
+            return !isPlayPathSatisfied
         case .feedBank:
             // FeedBank should land directly in STEER and attempt quiet reconnect first.
             // Hard gating is handled in the STEER overlay so this full-screen ritual only
-            // appears when explicitly forced (e.g. RETURN TO ENTRY RITUAL).
+            // appears when explicitly forced (e.g. RETURN TO MAIN SCREEN).
             return false
         }
     }
@@ -1249,7 +1495,7 @@ class TubCompanionAppState: NSObject, ObservableObject {
         case .steer:
             return !isBackendPathSatisfied
         case .play:
-            return false
+            return !isPlayPathSatisfied
         }
     }
 
@@ -1273,6 +1519,94 @@ class TubCompanionAppState: NSObject, ObservableObject {
 
     func recordContribution(_ contribution: AudienceAudioContribution) {
         audioContributions.append(contribution)
+    }
+
+    func ingestOperatorActivitySnapshot(_ snapshot: OperatorActivitySnapshot) {
+        var uniqueIds: Set<String> = []
+        let normalized = snapshot.events
+            .map { normalizeOperatorActivityEvent($0) }
+            .sorted { $0.timestamp > $1.timestamp }
+            .filter { event in
+                if uniqueIds.contains(event.eventId) {
+                    return false
+                }
+                uniqueIds.insert(event.eventId)
+                return true
+            }
+
+        operatorActivityTimeline = normalized
+        operatorActivityEventIds = uniqueIds
+        pruneOperatorActivityTimeline(now: Date())
+    }
+
+    func ingestOperatorActivityEvent(_ event: OperatorActivityEvent) {
+        let normalized = normalizeOperatorActivityEvent(event)
+        pruneOperatorActivityTimeline(now: Date())
+
+        if operatorActivityEventIds.contains(normalized.eventId) {
+            return
+        }
+
+        operatorActivityTimeline.insert(normalized, at: 0)
+        operatorActivityEventIds.insert(normalized.eventId)
+        pruneOperatorActivityTimeline(now: Date())
+    }
+
+    func operatorDisplayName(for sessionId: String) -> String {
+        let normalized = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty || normalized.uppercased() == "SYSTEM" {
+            return "SYSTEM"
+        }
+        if normalized == self.sessionId {
+            return "YOU"
+        }
+
+        var hash: UInt32 = 2166136261
+        for byte in normalized.utf8 {
+            hash ^= UInt32(byte)
+            hash &*= 16777619
+        }
+        let suffix = String(format: "%04X", Int(hash & 0xFFFF))
+        return "OP-\(suffix)"
+    }
+
+    func operatorActivityRecent(includeSelf: Bool = false, limit: Int = 60) -> [OperatorActivityEvent] {
+        let filtered = includeSelf
+            ? operatorActivityTimeline
+            : operatorActivityTimeline.filter { $0.sessionId != self.sessionId }
+        return Array(filtered.prefix(max(0, limit)))
+    }
+
+    func operatorActivityActiveNow(window: TimeInterval = 2.5, includeSelf: Bool = false) -> [OperatorActivityEvent] {
+        let threshold = Date().addingTimeInterval(-max(0, window))
+        let recent = operatorActivityRecent(includeSelf: includeSelf, limit: operatorActivityMaxCount)
+        return recent.filter { $0.timestamp >= threshold }
+    }
+
+    private func normalizeOperatorActivityEvent(_ event: OperatorActivityEvent) -> OperatorActivityEvent {
+        let resolvedId = event.eventId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedSession = event.sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return OperatorActivityEvent(
+            eventId: resolvedId.isEmpty ? UUID().uuidString : resolvedId,
+            sessionId: resolvedSession.isEmpty ? "SYSTEM" : resolvedSession,
+            surface: event.surface,
+            action: event.action,
+            label: event.label,
+            intensity: event.intensity,
+            position: event.position,
+            timestamp: event.timestamp
+        )
+    }
+
+    private func pruneOperatorActivityTimeline(now: Date) {
+        let cutoff = now.addingTimeInterval(-operatorActivityMaxAge)
+        operatorActivityTimeline = operatorActivityTimeline.filter { $0.timestamp >= cutoff }
+
+        if operatorActivityTimeline.count > operatorActivityMaxCount {
+            operatorActivityTimeline = Array(operatorActivityTimeline.prefix(operatorActivityMaxCount))
+        }
+
+        operatorActivityEventIds = Set(operatorActivityTimeline.map(\.eventId))
     }
 
     func requestTabNavigation(_ tab: AppTab) {

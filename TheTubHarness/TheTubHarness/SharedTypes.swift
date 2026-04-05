@@ -282,11 +282,79 @@ enum AudienceEnvelopeKind: String, Codable {
     case visualUpdate
     case ack
     case error
+    case operatorActivity
+    case operatorActivitySnapshot
 }
 
 enum IntensityNudgeDirection: String, Codable {
     case more
     case less
+}
+
+
+enum OperatorActivitySurface: String, Codable {
+    case play
+    case steer
+}
+
+enum OperatorActivityAction: String, Codable {
+    case playGridTrigger
+    case playBankPrevious
+    case playBankNext
+    case playLongBankPrevious
+    case playLongBankNext
+    case playLongTransportPause
+    case playLongTransportResume
+    case playLongFadeStart
+    case playLongFadeComplete
+    case playLongSweep
+
+    case steerVector
+    case steerHoldStart
+    case steerHoldEnd
+    case steerNudgeMore
+    case steerNudgeLess
+    case steerCompareChoice
+}
+
+struct OperatorActivityEvent: Codable, Equatable {
+    let eventId: String
+    let sessionId: String
+    let surface: OperatorActivitySurface
+    let action: OperatorActivityAction
+    let label: String?
+    let intensity: Double?
+    let position: CGPoint?
+    let timestamp: Date
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case eventId, sessionId, surface, action, label, intensity, position, timestamp
+    }
+
+    init(
+        eventId: String = UUID().uuidString,
+        sessionId: String,
+        surface: OperatorActivitySurface,
+        action: OperatorActivityAction,
+        label: String? = nil,
+        intensity: Double? = nil,
+        position: CGPoint? = nil,
+        timestamp: Date = Date()
+    ) {
+        self.eventId = eventId
+        self.sessionId = sessionId
+        self.surface = surface
+        self.action = action
+        self.label = label
+        self.intensity = intensity.map { value in max(0, min(1, value)) }
+        self.position = position
+        self.timestamp = timestamp
+    }
+}
+
+struct OperatorActivitySnapshot: Codable, Equatable {
+    let events: [OperatorActivityEvent]
+    let serverTimestamp: Date
 }
 
 struct SteerVectorPayload: Codable, Equatable {
@@ -384,6 +452,8 @@ struct AudienceEnvelope: Codable, Equatable {
     let visualUpdate: VisualOutput?
     let ack: AudienceAckPayload?
     let error: AudienceErrorPayload?
+    let operatorActivity: OperatorActivityEvent?
+    let operatorActivitySnapshot: OperatorActivitySnapshot?
 
     init(
         kind: AudienceEnvelopeKind,
@@ -399,7 +469,9 @@ struct AudienceEnvelope: Codable, Equatable {
         stageSnapshot: StageSnapshotPayload? = nil,
         visualUpdate: VisualOutput? = nil,
         ack: AudienceAckPayload? = nil,
-        error: AudienceErrorPayload? = nil
+        error: AudienceErrorPayload? = nil,
+        operatorActivity: OperatorActivityEvent? = nil,
+        operatorActivitySnapshot: OperatorActivitySnapshot? = nil
     ) {
         self.kind = kind
         self.messageId = messageId
@@ -415,6 +487,8 @@ struct AudienceEnvelope: Codable, Equatable {
         self.visualUpdate = visualUpdate
         self.ack = ack
         self.error = error
+        self.operatorActivity = operatorActivity
+        self.operatorActivitySnapshot = operatorActivitySnapshot
     }
 }
 

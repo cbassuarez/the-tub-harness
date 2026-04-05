@@ -373,11 +373,13 @@ struct SteerView: View {
     @ObservedObject var appState: TubCompanionAppState
     @ObservedObject var harnessClient: HarnessClient
     @ObservedObject var externalAudioRouteMonitor: ExternalAudioRouteMonitor
+    @Environment(\.shellLayoutClass) private var shellLayoutClass
 
     @StateObject private var viewModel: SteerViewModel
     @State private var activeTouch = false
     @State private var previousPoint: CGPoint?
     @State private var showSteerInfoModal = false
+    @State private var showOperatorLogModal = false
 
     init(
         appState: TubCompanionAppState,
@@ -392,18 +394,29 @@ struct SteerView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
-
-            VStack(spacing: 0) {
-                header
-                signalRule
-                mainDeck
-                signalRule
-                controlRail
+            if shellLayoutClass == .compact {
+                Color.black
+            } else {
+                Color.black.ignoresSafeArea()
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .padding(.bottom, 12)
+
+            if isPhoneLandscapeCompact {
+                compactLandscapeBody
+                    .padding(.horizontal, 10)
+                    .padding(.top, 4)
+                    .padding(.bottom, 6)
+            } else {
+                VStack(spacing: 0) {
+                    header
+                    signalRule
+                    mainDeck
+                    signalRule
+                    controlRail
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 12)
+            }
         }
         .preferredColorScheme(.dark)
         .accessibilityIdentifier("steer.root")
@@ -424,6 +437,20 @@ struct SteerView: View {
                 steerInfoModal
             }
         }
+        .overlay {
+            if showOperatorLogModal {
+                OperatorActivityLogModal(
+                    idPrefix: "steer.ops",
+                    title: "STEER // OPS LOG",
+                    appState: appState,
+                    connectionState: harnessClient.connectionState,
+                    surface: .steer,
+                    onClose: {
+                        showOperatorLogModal = false
+                    }
+                )
+            }
+        }
         .overlay(alignment: .topLeading) {
             keyboardNudgeCommandLayer
         }
@@ -431,6 +458,109 @@ struct SteerView: View {
             if let sessionId = appState.sessionId {
                 harnessClient.setSessionId(sessionId)
             }
+        }
+    }
+
+    private var isPhoneLandscapeCompact: Bool {
+        shellLayoutClass == .phoneLandscapeCompact
+    }
+
+    private var compactLandscapeBody: some View {
+        GeometryReader { proxy in
+            let commandWidth = max(148, min(192, proxy.size.width * 0.23))
+
+            VStack(spacing: 6) {
+                compactHeader
+                signalRule
+                HStack(spacing: 8) {
+                    mainDeck
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    landscapeCommandColumn
+                        .frame(width: commandWidth)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+        }
+    }
+
+    private var compactHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("STEER")
+                    .font(.system(size: 22, weight: .bold, design: .monospaced))
+                    .tracking(1.2)
+                    .foregroundStyle(.white)
+                    .chromaticAberration()
+                    .accessibilityIdentifier("steer.header.title")
+                Spacer()
+                statusChip(
+                    label: "LINK",
+                    value: appState.harnessConnectionState == .connected ? "CONNECTED" : "OFFLINE",
+                    isActive: appState.harnessConnectionState == .connected,
+                    id: "steer.chip.link"
+                )
+            }
+            Text("VECTOR SYSTEM PAD / LIVE OPERATOR MODE")
+                .font(.system(.caption2, design: .monospaced, weight: .semibold))
+                .tracking(1.0)
+                .foregroundStyle(Color.white.opacity(0.58))
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var landscapeCommandColumn: some View {
+        VStack(spacing: 8) {
+            statusChip(
+                label: "DESCRIPTORS",
+                value: viewModel.descriptorSourceLabel,
+                isActive: viewModel.descriptorSourceLabel == "SERVER",
+                id: "steer.compact.chip.source"
+            )
+            statusChip(
+                label: "MODE",
+                value: viewModel.mode.chipLabel,
+                isActive: true,
+                id: "steer.compact.chip.mode"
+            )
+            statusChip(
+                label: "ACCESS",
+                value: appState.steerAccessDisplayState.chipLabel,
+                isActive: appState.steerAccessDisplayState == .unlocked,
+                id: "steer.compact.chip.access"
+            )
+
+            CommandSignalRule(opacity: 0.14)
+
+            HStack(spacing: 6) {
+                commandButton("LESS", id: "steer.button.less") {
+                    viewModel.nudgeLess()
+                }
+                commandButton("MORE", id: "steer.button.more") {
+                    viewModel.nudgeMore()
+                }
+            }
+            commandButton("MORE INFO", id: "steer.button.info") {
+                showSteerInfoModal = true
+            }
+            opsLogButton(id: "steer.button.ops")
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("ACTIVE")
+                Text(viewModel.activeDescriptor?.label ?? "NONE")
+            }
+            .font(.system(.caption2, design: .monospaced, weight: .semibold))
+            .tracking(1)
+            .foregroundStyle(BrandingColors.glyphGreen.opacity(0.92))
+            .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+            .padding(.horizontal, 8)
+            .overlay {
+                Rectangle()
+                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+            }
+            .accessibilityIdentifier("steer.activeDescriptor")
+
+            Spacer(minLength: 0)
         }
     }
 
@@ -646,21 +776,23 @@ struct SteerView: View {
                     showSteerInfoModal = true
                 }
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("ACTIVE")
-                    Text(viewModel.activeDescriptor?.label ?? "NONE")
-                }
-                .font(.system(.caption2, design: .monospaced, weight: .semibold))
-                .tracking(1)
-                .foregroundStyle(BrandingColors.glyphGreen.opacity(0.92))
-                .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
-                .padding(.horizontal, 10)
-                .overlay {
-                    Rectangle()
-                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
-                }
-                .accessibilityIdentifier("steer.activeDescriptor")
+                opsLogButton(id: "steer.button.ops")
             }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("ACTIVE")
+                Text(viewModel.activeDescriptor?.label ?? "NONE")
+            }
+            .font(.system(.caption2, design: .monospaced, weight: .semibold))
+            .tracking(1)
+            .foregroundStyle(BrandingColors.glyphGreen.opacity(0.92))
+            .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+            .padding(.horizontal, 10)
+            .overlay {
+                Rectangle()
+                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+            }
+            .accessibilityIdentifier("steer.activeDescriptor")
         }
         .padding(.vertical, 10)
     }
@@ -781,11 +913,34 @@ struct SteerView: View {
                 .font(.system(.caption, design: .monospaced, weight: .bold))
                 .tracking(1.1)
                 .foregroundStyle(.white)
-                .frame(maxWidth: .infinity, minHeight: 46)
+                .frame(maxWidth: .infinity, minHeight: isPhoneLandscapeCompact ? 40 : 46)
                 .overlay {
                     Rectangle()
                         .stroke(BrandingColors.glyphGreen.opacity(0.66), lineWidth: 1)
                 }
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(id)
+    }
+
+    private func opsLogButton(id: String) -> some View {
+        Button {
+            showOperatorLogModal = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: isPhoneLandscapeCompact ? 10 : 12, weight: .bold))
+                    .foregroundStyle(BrandingColors.glyphGreen.opacity(0.85))
+                Text("OPS LOG")
+                    .font(.system(.caption, design: .monospaced, weight: .bold))
+                    .tracking(1.1)
+                    .foregroundStyle(.white)
+            }
+            .frame(maxWidth: .infinity, minHeight: isPhoneLandscapeCompact ? 40 : 46)
+            .overlay {
+                Rectangle()
+                    .stroke(BrandingColors.glyphGreen.opacity(0.66), lineWidth: 1)
+            }
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(id)
@@ -799,8 +954,8 @@ struct SteerView: View {
         }
         .font(.system(size: 10, weight: .semibold, design: .monospaced))
         .tracking(1)
-        .padding(.horizontal, 8)
-        .frame(minHeight: 28)
+        .padding(.horizontal, isPhoneLandscapeCompact ? 6 : 8)
+        .frame(minHeight: isPhoneLandscapeCompact ? 24 : 28)
         .overlay {
             Rectangle()
                 .stroke(

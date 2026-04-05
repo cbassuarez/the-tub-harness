@@ -14,8 +14,11 @@ enum ConnectionGatePresentation {
 }
 
 struct TubLaunchScreenView: View {
+    let isPlaySurfaceReady: Bool
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var startedAt = Date()
+    @State private var playReadyAt: Date?
     @State private var tracerX: CGFloat = -280
     @State private var sessionToken = TubLaunchScreenView.makeSessionToken()
     @State private var pulseSeed: Double = 0
@@ -34,18 +37,35 @@ struct TubLaunchScreenView: View {
 
     private let spinnerFrames = ["-", "\\", "|", "/"]
     private let bootSegments = 36
-    private let bootDuration: TimeInterval = 2.95
+    private let bootDuration: TimeInterval = 3.3
+    private let quickFinishDuration: TimeInterval = 0.44
+    private static let transcriptStepDurations: [TimeInterval] = [
+        0.16, 0.31, 0.49, 0.11, 0.1, 0.09, 0.09, 0.27, 0.38
+    ]
+    private static let transcriptStepTimeline: [TimeInterval] = {
+        var timeline: [TimeInterval] = []
+        timeline.reserveCapacity(transcriptStepDurations.count)
+        var sum: TimeInterval = 0
+        for step in transcriptStepDurations {
+            sum += max(0.04, step)
+            timeline.append(sum)
+        }
+        return timeline
+    }()
+    private static let transcriptTotalDuration: TimeInterval = transcriptStepTimeline.last ?? 1
+    private let transcriptRowHeight: CGFloat = 15
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
             let elapsed = max(0, timeline.date.timeIntervalSince(startedAt))
-            let progress = min(1, elapsed / bootDuration)
-            let revealCount = max(1, min(transcriptLines.count, Int((progress * Double(transcriptLines.count)).rounded(.up))))
+            let baseProgress = TubLaunchScreenView.physicalLoadingCurve(min(1, elapsed / bootDuration))
+            let progress = resolvedProgress(baseProgress: baseProgress, now: timeline.date)
+            let revealCount = revealCount(for: progress)
             let cursorOn = (Int((elapsed * 2).rounded(.down)) % 2) == 0
             let spinner = spinnerFrames[Int((elapsed * 12).rounded(.down)) % spinnerFrames.count]
             let litSegments = min(bootSegments, max(1, Int((progress * Double(bootSegments)).rounded(.down))))
             let pulse = 0.65 + 0.35 * sin((elapsed + pulseSeed) * 4.2)
-            let activeLineIndex = min(max(0, revealCount - 1), Int((elapsed * 6).rounded(.down)) % max(1, revealCount))
+            let activeLineIndex = min(max(0, revealCount - 1), transcriptLines.count - 1)
             let systemMillis = Int((elapsed * 1_000).rounded(.down)) % 1_000
             let systemSeconds = Int(elapsed.rounded(.down))
             let statusPulse = 0.4 + 0.6 * abs(sin(elapsed * 2.2))
@@ -75,10 +95,14 @@ struct TubLaunchScreenView: View {
                         Text("TUBCORP ENTERPRISE SCLI // THE TUB")
                             .launchMono(11, weight: .semibold)
                             .foregroundStyle(Color.white.opacity(0.92))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                         Spacer()
                         Text("BOOT \(spinner) 00:\(String(format: "%02d", systemSeconds)):\(String(format: "%03d", systemMillis))")
                             .launchMono(10, weight: .bold)
+                            .monospacedDigit()
                             .foregroundStyle(Color.white.opacity(0.64 + statusPulse * 0.3))
+                            .frame(width: 190, alignment: .trailing)
                     }
 
                     Rectangle()
@@ -105,9 +129,12 @@ struct TubLaunchScreenView: View {
                             Text("SESSION \(sessionToken)")
                                 .launchMono(10, weight: .semibold)
                                 .foregroundStyle(Color.white.opacity(0.64))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
                             Text("NODE IOS")
                                 .launchMono(10, weight: .semibold)
                                 .foregroundStyle(Color.white.opacity(0.64))
+                                .frame(width: 86, alignment: .trailing)
                         }
                     }
                     .padding(.horizontal, 14)
@@ -120,20 +147,24 @@ struct TubLaunchScreenView: View {
                     Spacer(minLength: 20)
 
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(transcriptLines.prefix(revealCount).enumerated()), id: \.offset) { index, line in
+                        ForEach(Array(transcriptLines.enumerated()), id: \.offset) { index, line in
+                            let isRevealed = index < revealCount
+                            let isActive = isRevealed && index == activeLineIndex
                             HStack(spacing: 8) {
                                 Text(">")
                                     .launchMono(10, weight: .bold)
-                                    .foregroundStyle(index == activeLineIndex ? Color.white : Color.white.opacity(0.7))
-                                Text(line)
+                                    .foregroundStyle(isActive ? Color.white : Color.white.opacity(0.7))
+                                Text(isRevealed ? line : "")
                                     .launchMono(10, weight: .medium)
-                                    .foregroundStyle(index == activeLineIndex ? Color.white : Color.white.opacity(0.74))
+                                    .foregroundStyle(isActive ? Color.white : Color.white.opacity(0.74))
                                 Spacer(minLength: 0)
                             }
-                            .opacity(index == activeLineIndex ? 1 : 0.72)
+                            .frame(height: transcriptRowHeight, alignment: .leading)
+                            .opacity(isRevealed ? (isActive ? 1 : 0.72) : 0.16)
                             .animation(.easeInOut(duration: 0.08), value: activeLineIndex)
                         }
                     }
+                    .frame(height: (transcriptRowHeight * CGFloat(transcriptLines.count)) + 2, alignment: .top)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 11)
                     .overlay {
@@ -176,10 +207,12 @@ struct TubLaunchScreenView: View {
                 .padding(.top, 22)
                 .padding(.bottom, 24)
                 .opacity(reduceMotion ? 1 : (0.9 + 0.1 * pulse))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
         .onAppear {
             startedAt = Date()
+            playReadyAt = isPlaySurfaceReady ? Date() : nil
             sessionToken = TubLaunchScreenView.makeSessionToken()
             pulseSeed = Double.random(in: 0.2...1.1)
             tracerX = -280
@@ -188,9 +221,49 @@ struct TubLaunchScreenView: View {
                 tracerX = 280
             }
         }
+        .onChange(of: isPlaySurfaceReady) { _, isReady in
+            if isReady, playReadyAt == nil {
+                playReadyAt = Date()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("THE TUB is initializing")
         .accessibilityIdentifier("launch.screen")
+    }
+
+    private func resolvedProgress(baseProgress: Double, now: Date) -> Double {
+        guard let playReadyAt else { return baseProgress }
+        let readyElapsed = max(0, now.timeIntervalSince(playReadyAt))
+        let quick = min(1, readyElapsed / quickFinishDuration)
+        let quickCurve = TubLaunchScreenView.quickFinishCurve(quick)
+        let blended = baseProgress + ((1 - baseProgress) * quickCurve)
+        return max(baseProgress, min(1, blended))
+    }
+
+    private func revealCount(for progress: Double) -> Int {
+        let clock = max(0, min(1, progress)) * TubLaunchScreenView.transcriptTotalDuration
+        var count = 0
+        for threshold in TubLaunchScreenView.transcriptStepTimeline where clock >= threshold {
+            count += 1
+        }
+        return max(1, min(transcriptLines.count, count))
+    }
+
+    private static func physicalLoadingCurve(_ t: Double) -> Double {
+        let clamped = max(0, min(1, t))
+        if clamped <= 0.68 {
+            let early = clamped / 0.68
+            return 0.82 * pow(early, 0.58)
+        }
+        let tail = (clamped - 0.68) / 0.32
+        return 0.82 + (0.18 * pow(tail, 1.9))
+    }
+
+    private static func quickFinishCurve(_ t: Double) -> Double {
+        let clamped = max(0, min(1, t))
+        return 1 - pow(1 - clamped, 2.2)
     }
 
     private static func makeSessionToken() -> String {
@@ -267,13 +340,13 @@ struct ConnectionGateView: View {
     @State private var isAttemptingLocalConnect = false
     @State private var showCableHelp = false
     @State private var toasts: [Toast] = []
-    @State private var showPlayLiveConfirmation = false
     @State private var fadeInButtons = false
     @State private var pulseScale: CGFloat = 1.0
     @State private var slideInPills = false
     @State private var loaderRotation: Double = 0
     @State private var handshakeStatus: String?
     @State private var hasAttemptedAutoHarnessConnect = false
+    @State private var didPrimeRuntimePermissions = false
 
     enum GateStep {
         case chooseIntent
@@ -332,18 +405,19 @@ struct ConnectionGateView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
+            .allowsHitTesting(false)
         }
-        .overlay(
-            Group {
-                if showPlayLiveConfirmation {
-                    playLiveConfirmationModal
-                }
-            }
-        )
         .onAppear {
+            primeRuntimePermissionsIfNeeded()
             if let preferredIntent {
-                appState.chooseEntryIntent(preferredIntent)
-                step = preferredIntent == .playLive ? .playLive : .feedBank
+                switch preferredIntent {
+                case .playLive:
+                    presentPlayCableGate()
+                case .feedBank:
+                    primeRuntimePermissionsIfNeeded()
+                    appState.chooseEntryIntent(preferredIntent)
+                    step = .feedBank
+                }
             }
             withAnimation(.easeIn(duration: 0.5)) {
                 fadeInButtons = true
@@ -399,7 +473,7 @@ struct ConnectionGateView: View {
                 .foregroundColor(.gray)
 
             Button(action: {
-                showPlayLiveConfirmation = true
+                presentPlayCableGate()
             }) {
                 gateCommandWithIcon(
                     icon: "waveform.circle",
@@ -414,6 +488,7 @@ struct ConnectionGateView: View {
             .accessibilityHint(Text("Enter live play mode using USB-C cable connection"))
 
             Button(action: {
+                primeRuntimePermissionsIfNeeded()
                 appState.chooseEntryIntent(.feedBank)
                 step = .feedBank
             }) {
@@ -431,8 +506,14 @@ struct ConnectionGateView: View {
 
             if let last = appState.lastEntryIntent {
                 Button(action: {
-                    appState.chooseEntryIntent(last)
-                    step = last == .playLive ? .playLive : .feedBank
+                    switch last {
+                    case .playLive:
+                        presentPlayCableGate()
+                    case .feedBank:
+                        primeRuntimePermissionsIfNeeded()
+                        appState.chooseEntryIntent(last)
+                        step = .feedBank
+                    }
                 }) {
                     Text(last == .playLive ? "Resume live cable session" : "Reconnect to harness link")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -443,32 +524,60 @@ struct ConnectionGateView: View {
         }
     }
 
+    private func presentPlayCableGate() {
+        primeRuntimePermissionsIfNeeded()
+        appState.rememberEntryIntent(.playLive)
+        appState.clearCablePath()
+        appState.forcePresentEntryGate = true
+        appState.bypassPreferredEntryIntentOnce = false
+        step = .playLive
+    }
+
+    private func primeRuntimePermissionsIfNeeded() {
+        guard !didPrimeRuntimePermissions else { return }
+        didPrimeRuntimePermissions = true
+
+        externalAudioRouteMonitor.refreshRouteState()
+
+        harnessClient.discoverHarnessOnLocalNetwork(port: appState.lastKnownHarnessPort) { _ in }
+    }
+
     private var playLiveContent: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("PLAY INTO THE TUB")
+        let routeActive = appState.isExternalAudioRouteActive
+            || appState.isCablePathSatisfied
+            || appState.isCableRouteSimulated
+
+        return VStack(alignment: .leading, spacing: 18) {
+            Text("CABLE REQUIRED")
                 .font(.system(size: 18, weight: .semibold, design: .monospaced))
                 .foregroundColor(.white)
 
-            Text("Connect the USB-C audio cable. This path uses the phone’s external audio route.")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.gray)
-
-            gateCommand(
-                title: (appState.isExternalAudioRouteActive || appState.isCablePathSatisfied) ? "CABLE READY" : "CONNECT USB-C CABLE",
-                subtitle: (appState.isExternalAudioRouteActive || appState.isCablePathSatisfied)
-                    ? "External audio route detected."
-                    : "Waiting for external audio route."
-            )
-
-            HStack(spacing: 8) {
-                Image(systemName: (appState.isExternalAudioRouteActive || appState.isCablePathSatisfied) ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .foregroundColor((appState.isExternalAudioRouteActive || appState.isCablePathSatisfied) ? Color(UIColor(named: "GlyphGreen") ?? .green) : .red)
-                    .font(.system(size: 12, weight: .semibold))
-
-                Text(appState.externalAudioRouteDescription)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor((appState.isExternalAudioRouteActive || appState.isCablePathSatisfied) ? Color(UIColor(named: "GlyphGreen") ?? .green) : .gray)
+            HStack(spacing: 14) {
+                Image(systemName: "cable.connector")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.75))
+                    .accessibilityHidden(true)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    .accessibilityHidden(true)
+                Image(systemName: "waveform")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.75))
+                    .accessibilityHidden(true)
+                Spacer()
             }
+            .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
+            .padding(.horizontal, 16)
+            .overlay {
+                Rectangle()
+                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+            }
+
+            Text("NO SOUND WILL BE OUTPUT UNLESS YOU ARE CONNECTED TO THE TUB USB-C.")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundColor(.gray)
+                .fixedSize(horizontal: false, vertical: true)
 
             Button(action: {
                 externalAudioRouteMonitor.refreshRouteState()
@@ -485,23 +594,23 @@ struct ConnectionGateView: View {
             .accessibilityLabel(Text("Check cable connection"))
             .accessibilityHint(Text("Refresh cable detection"))
 
-            if !(appState.isExternalAudioRouteActive || appState.isCablePathSatisfied) {
-                Button(action: {
+            Button(action: {
+                if !routeActive {
                     appState.markCablePathSatisfied()
                     addToast("✓ Cable confirmed manually.", style: .success)
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.seal")
-                            .font(.system(size: 9, weight: .semibold))
-                            .accessibilityHidden(true)
-                        Text("I'M CONNECTED")
-                    }
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
                 }
-                .accessibilityLabel(Text("Confirm cable connected"))
-                .accessibilityHint(Text("Proceed even if iOS does not expose a cable route"))
+                appState.forcePresentEntryGate = false
+                appState.requestTabNavigation(.play)
+            }) {
+                Text(routeActive ? "CABLE READY" : "I'M CONNECTED")
+                    .font(.system(size: 20, weight: .heavy, design: .monospaced))
+                    .foregroundColor(.black)
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .background(Color(UIColor(named: "GlyphGreen") ?? .green))
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(routeActive ? "Continue to play" : "Confirm cable connected"))
+            .accessibilityHint(Text("Proceed even if iOS does not expose a cable route"))
 
             Button(action: {
                 showCableHelp.toggle()
@@ -552,7 +661,7 @@ struct ConnectionGateView: View {
 
     private var feedBankContent: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("FEED THE SOUND BANK")
+            Text("STEER THE ML")
                 .font(.system(size: 18, weight: .semibold, design: .monospaced))
                 .foregroundColor(.white)
 
@@ -717,7 +826,9 @@ struct ConnectionGateView: View {
         HStack(spacing: 18) {
             gateStatusPill(
                 label: "CABLE",
-                active: appState.isExternalAudioRouteActive || appState.isCablePathSatisfied
+                active: appState.isExternalAudioRouteActive
+                    || appState.isCablePathSatisfied
+                    || appState.isCableRouteSimulated
             )
             .offset(x: slideInPills ? 0 : -20)
             .opacity(slideInPills ? 1 : 0)
@@ -831,78 +942,6 @@ struct ConnectionGateView: View {
         .cornerRadius(4)
     }
     
-    private var playLiveConfirmationModal: some View {
-        ZStack {
-            Color.black.opacity(0.6)
-                .ignoresSafeArea()
-            
-            VStack(spacing: 20) {
-                VStack(spacing: 12) {
-                    Image(systemName: "waveform.circle")
-                        .font(.system(size: 32, weight: .semibold))
-                        .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
-                    
-                    Text("PLAY INTO THE TUB")
-                        .font(.system(size: 16, weight: .bold, design: .monospaced))
-                        .foregroundColor(.white)
-                    
-                    Text("You're about to enter live play mode. Make sure:")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.gray)
-                    
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("USB-C cable connected", systemImage: "checkmark.circle")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor((appState.isExternalAudioRouteActive || appState.isCablePathSatisfied) ? Color(UIColor(named: "GlyphGreen") ?? .green) : .gray)
-                        
-                        Label("Audio input routed correctly", systemImage: "checkmark.circle")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.gray)
-                    }
-                    .padding(12)
-                    .background(Color.white.opacity(0.04))
-                    .cornerRadius(4)
-                }
-                
-                HStack(spacing: 12) {
-                    Button(action: {
-                        showPlayLiveConfirmation = false
-                    }) {
-                        Text("Cancel")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.gray)
-                            .frame(maxWidth: .infinity)
-                            .padding(10)
-                            .background(Color.white.opacity(0.04))
-                            .cornerRadius(4)
-                    }
-                    .accessibilityLabel(Text("Cancel"))
-                    .accessibilityHint(Text("Close this confirmation dialog"))
-                    
-                    Button(action: {
-                        appState.chooseEntryIntent(.playLive)
-                        step = .playLive
-                        showPlayLiveConfirmation = false
-                        addToast("✓ Entering live mode", style: .success)
-                    }) {
-                        Text("ENTER")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.black)
-                            .frame(maxWidth: .infinity)
-                            .padding(10)
-                            .background(Color(UIColor(named: "GlyphGreen") ?? .green))
-                            .cornerRadius(4)
-                    }
-                    .accessibilityLabel(Text("Enter live mode"))
-                    .accessibilityHint(Text("Proceed to live play mode"))
-                }
-            }
-            .padding(20)
-            .background(BrandingColors.darkBackground)
-            .cornerRadius(8)
-            .padding(20)
-        }
-    }
 }
 
 struct ConnectionRequiredOverlay: View {
@@ -933,9 +972,26 @@ struct ConnectionRequiredOverlay: View {
                         .foregroundColor(.gray)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    Text(statusText)
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    if isReconnecting {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(Color(UIColor(named: "GlyphGreen") ?? .green))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("RECONNECTING HARNESS…")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                                Text("HOLDING GATE WHILE LINK RECOVERS.")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    } else {
+                        Text(statusText)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    }
 
                     Button(action: primaryAction) {
                         Text(primaryActionLabel)
@@ -1012,6 +1068,11 @@ struct ConnectionRequiredOverlay: View {
                 beginQuietReconnectIfNeeded(force: false)
             }
         }
+    }
+
+    private var isReconnecting: Bool {
+        if case .connecting = appState.harnessConnectionState { return true }
+        return false
     }
 
     private var primaryActionLabel: String {

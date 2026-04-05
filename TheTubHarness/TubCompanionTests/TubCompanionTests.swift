@@ -7,6 +7,7 @@
 
 import Foundation
 import Testing
+import UIKit
 @testable import TubCompanion
 
 @MainActor
@@ -517,32 +518,33 @@ struct TubCompanionTests {
     @Test
     func shellLayoutClassifierRespectsBreakpoints() {
         let metrics = ShellLayoutMetrics.default
-        #expect(ShellLayoutClass.classify(width: 699, metrics: metrics) == .compact)
-        #expect(ShellLayoutClass.classify(width: 700, metrics: metrics) == .regular)
-        #expect(ShellLayoutClass.classify(width: 1023, metrics: metrics) == .regular)
-        #expect(ShellLayoutClass.classify(width: 1024, metrics: metrics) == .wide)
+        #expect(ShellLayoutClass.classify(width: 699, height: 920, isPhone: false, metrics: metrics) == .compact)
+        #expect(ShellLayoutClass.classify(width: 700, height: 920, isPhone: false, metrics: metrics) == .regular)
+        #expect(ShellLayoutClass.classify(width: 1023, height: 920, isPhone: false, metrics: metrics) == .regular)
+        #expect(ShellLayoutClass.classify(width: 1024, height: 920, isPhone: false, metrics: metrics) == .wide)
+        #expect(ShellLayoutClass.classify(width: 820, height: 390, isPhone: true, metrics: metrics) == .phoneLandscapeCompact)
     }
 
     @Test
     func shellLayoutPaneVisibilityTransitions() {
         let model = ShellLayoutModel(persistRegularInspectorVisibility: false)
 
-        model.update(for: 680)
+        model.update(for: CGSize(width: 680, height: 980), idiom: .pad)
         #expect(model.layoutClass == .compact)
         #expect(!model.showsSecondaryPane)
 
-        model.update(for: 900)
+        model.update(for: CGSize(width: 900, height: 980), idiom: .pad)
         #expect(model.layoutClass == .regular)
         #expect(!model.showsSecondaryPane)
 
         model.toggleInspectorPane()
         #expect(model.showsSecondaryPane)
 
-        model.update(for: 1180)
+        model.update(for: CGSize(width: 1180, height: 980), idiom: .pad)
         #expect(model.layoutClass == .wide)
         #expect(model.showsSecondaryPane)
 
-        model.update(for: 680)
+        model.update(for: CGSize(width: 680, height: 980), idiom: .pad)
         #expect(model.layoutClass == .compact)
         #expect(!model.showsSecondaryPane)
     }
@@ -936,6 +938,152 @@ struct TubCompanionTests {
         #expect(harnessClient.lastOperatorVectorState?.sessionId == "session-peer")
         #expect(abs((harnessClient.lastOperatorVectorState?.param ?? 0) - 0.33) < 0.001)
     }
+
+    @Test
+    func harnessClientPublishesIncomingOperatorActivityAndSnapshotEnvelopes() async {
+        let harnessClient = HarnessClient()
+        let event = OperatorActivityEvent(
+            sessionId: "session-peer",
+            surface: .play,
+            action: .playGridTrigger,
+            label: "0A",
+            intensity: 0.62
+        )
+        let snapshot = OperatorActivitySnapshot(events: [event], serverTimestamp: Date())
+
+        harnessClient.injectEnvelopeForTesting(
+            AudienceEnvelope(
+                kind: .operatorActivity,
+                sessionId: "session-peer",
+                operatorActivity: event
+            )
+        )
+        harnessClient.injectEnvelopeForTesting(
+            AudienceEnvelope(
+                kind: .operatorActivitySnapshot,
+                sessionId: "SYSTEM",
+                operatorActivitySnapshot: snapshot
+            )
+        )
+
+        let eventPublished = await waitUntil(timeout: 0.4) {
+            harnessClient.lastOperatorActivity?.action == .playGridTrigger
+        }
+        let snapshotPublished = await waitUntil(timeout: 0.4) {
+            harnessClient.lastOperatorActivitySnapshot?.events.count == 1
+        }
+
+        #expect(eventPublished)
+        #expect(snapshotPublished)
+        #expect(harnessClient.lastOperatorActivity?.sessionId == "session-peer")
+        #expect(harnessClient.lastOperatorActivitySnapshot?.events.first?.label == "0A")
+    }
+
+    @Test
+    func appStateOperatorActivityTimelineDedupAndIdentityLabeling() {
+        let appState = TubCompanionAppState()
+        appState.initializeSession()
+
+        guard let localSessionId = appState.sessionId else {
+            Issue.record("Expected initialized local session id.")
+            return
+        }
+
+        let remoteSessionId = "session-remote-1"
+        let now = Date()
+        let duplicateEvent = OperatorActivityEvent(
+            eventId: "dup-1",
+            sessionId: remoteSessionId,
+            surface: .steer,
+            action: .steerVector,
+            label: "DENSE",
+            intensity: 0.77,
+            timestamp: now
+        )
+
+        appState.ingestOperatorActivityEvent(duplicateEvent)
+        appState.ingestOperatorActivityEvent(duplicateEvent)
+
+        let localEvent = OperatorActivityEvent(
+            eventId: "local-1",
+            sessionId: localSessionId,
+            surface: .play,
+            action: .playBankNext,
+            label: "01/08",
+            timestamp: now
+        )
+        appState.ingestOperatorActivityEvent(localEvent)
+
+        let recentAll = appState.operatorActivityRecent(includeSelf: true, limit: 20)
+        #expect(recentAll.count == 2)
+        #expect(appState.operatorDisplayName(for: localSessionId) == "YOU")
+        #expect(appState.operatorDisplayName(for: "SYSTEM") == "SYSTEM")
+        #expect(appState.operatorDisplayName(for: remoteSessionId).hasPrefix("OP-"))
+    }
+
+    @Test
+    func operatorActivityLogFeedFiltersAndGroupsBySurfaceAndAudienceScope() {
+        let now = Date()
+        let sessionId = "session-local"
+        let timeline: [OperatorActivityEvent] = [
+            OperatorActivityEvent(
+                eventId: "a",
+                sessionId: "session-peer-a",
+                surface: .play,
+                action: .playGridTrigger,
+                label: "0A",
+                timestamp: now.addingTimeInterval(-0.5)
+            ),
+            OperatorActivityEvent(
+                eventId: "b",
+                sessionId: sessionId,
+                surface: .play,
+                action: .playBankNext,
+                label: "02/08",
+                timestamp: now.addingTimeInterval(-0.3)
+            ),
+            OperatorActivityEvent(
+                eventId: "c",
+                sessionId: "session-peer-a",
+                surface: .steer,
+                action: .steerVector,
+                label: "DENSE",
+                timestamp: now.addingTimeInterval(-0.2)
+            ),
+            OperatorActivityEvent(
+                eventId: "d",
+                sessionId: "session-peer-b",
+                surface: .play,
+                action: .playLongSweep,
+                label: "LONG_A",
+                timestamp: now.addingTimeInterval(-0.1)
+            )
+        ]
+
+        let othersPlay = OperatorActivityLogFeed.recentEvents(
+            timeline: timeline,
+            sessionId: sessionId,
+            includeSelf: false,
+            surface: .play,
+            limit: 20
+        )
+        #expect(othersPlay.count == 2)
+        #expect(othersPlay.allSatisfy { $0.surface == .play })
+        #expect(othersPlay.allSatisfy { $0.sessionId != sessionId })
+
+        let activeSections = OperatorActivityLogFeed.activeSections(
+            timeline: timeline,
+            sessionId: sessionId,
+            includeSelf: false,
+            surface: .play,
+            window: 2.5,
+            now: now,
+            displayName: { _ in "OP" }
+        )
+        #expect(activeSections.count == 1)
+        #expect(activeSections.first?.eventCount == 2)
+    }
+
 
     @Test
     func settingsCommandVectorRailMappingDeterminism() {

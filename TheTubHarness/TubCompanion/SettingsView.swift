@@ -1162,7 +1162,10 @@ struct SettingsView: View {
     @ObservedObject var appState: TubCompanionAppState
     @ObservedObject var harnessClient: HarnessClient
     @ObservedObject var externalAudioRouteMonitor: ExternalAudioRouteMonitor
+    @Environment(\.shellLayoutClass) private var shellLayoutClass
+    @Environment(\.openURL) private var openURL
     @StateObject private var viewModel: SettingsViewModel
+    @State private var showAdvancedTools = false
 
     init(
         appState: TubCompanionAppState,
@@ -1192,29 +1195,53 @@ struct SettingsView: View {
 
                     ScrollView(.vertical, showsIndicators: true) {
                         VStack(alignment: .leading, spacing: 18) {
-                            SettingsSection(title: "SYSTEM STATUS") {
-                                statusLine("HARNESS LINK", viewModel.harnessStatusLabel, active: viewModel.isHarnessLinked)
-                                statusLine("STAGE FEED", harnessClient.stageFeedState.chipLabel, active: harnessClient.stageFeedState != .standby)
-                                statusLine("SESSION ID", appState.sessionId ?? "NONE")
-                                statusLine("ROUTE", appState.externalAudioRouteDescription)
-                                statusLine("LAST LINK", viewModel.lastSessionTimestampLabel)
+                            HStack(spacing: 8) {
+                                CommandStatusChip(
+                                    title: "LINK",
+                                    value: viewModel.harnessStatusLabel,
+                                    isActive: viewModel.isHarnessLinked,
+                                    accent: BrandingColors.glyphGreen
+                                )
+                                CommandStatusChip(
+                                    title: "STAGE",
+                                    value: harnessClient.stageFeedState.chipLabel,
+                                    isActive: isStageFeedOnline,
+                                    accent: BrandingColors.aberrationCyan
+                                )
+                                CommandStatusChip(
+                                    title: "AUDIO",
+                                    value: audioChipValue,
+                                    isActive: isAudioOutputAvailable,
+                                    accent: BrandingColors.warningYellow
+                                )
                             }
 
-                            SettingsSection(title: "HARNESS LINK") {
-                                actionRow(
-                                    title: "RECONNECT",
-                                    action: viewModel.reconnectHarness
-                                )
-                                actionRow(
-                                    title: "RE-PROBE HANDSHAKE",
-                                    action: viewModel.reprobeHarnessLink
-                                )
-                                actionRow(
-                                    title: "DISCONNECT",
-                                    role: .destructive
-                                ) {
-                                    viewModel.requestGuardedAction(.disconnectHarness)
+                            SettingsSection(title: "CONNECTION") {
+                                statusLine("HARNESS LINK", viewModel.harnessStatusLabel, active: viewModel.isHarnessLinked)
+                                statusLine("STAGE FEED", harnessClient.stageFeedState.chipLabel, active: isStageFeedOnline)
+                                statusLine("OUTPUT", appState.externalAudioRouteDescription, active: isAudioOutputAvailable)
+
+                                HStack(spacing: 8) {
+                                    CommandRailButton(
+                                        title: "RECONNECT",
+                                        isEnabled: true,
+                                        isActive: true,
+                                        isSolid: true,
+                                        accent: BrandingColors.glyphGreen
+                                    ) {
+                                        viewModel.reconnectHarness()
+                                    }
+
+                                    CommandRailButton(
+                                        title: "RE-PROBE",
+                                        isEnabled: true,
+                                        isActive: false,
+                                        accent: BrandingColors.aberrationCyan
+                                    ) {
+                                        viewModel.reprobeHarnessLink()
+                                    }
                                 }
+
                                 Text(viewModel.harnessActionStatus)
                                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                     .tracking(0.9)
@@ -1222,18 +1249,15 @@ struct SettingsView: View {
                                     .fixedSize(horizontal: false, vertical: true)
                             }
 
-                            SettingsSection(title: "SESSION + ENTRY") {
-                                statusLine("LAST ENTRY PATH", appState.lastEntryIntent?.title ?? "NONE")
-                                statusLine("ENTRY FLOW", appState.entryIntent?.title ?? "UNSET")
-
-                                actionRow(title: "ROTATE SESSION") {
-                                    viewModel.requestGuardedAction(.rotateSession)
-                                }
+                            SettingsSection(title: "APP") {
+                                statusLine("SESSION ID", appState.sessionId ?? "NONE")
+                                statusLine("ENTRY PATH", appState.lastEntryIntent?.title ?? "NONE")
+                                statusLine("STEER ACCESS", appState.steerAccessState.chipLabel, active: isSteerAccessUnlocked)
                                 actionRow(
-                                    title: "CLEAR PRESET",
+                                    title: "RELOCK STEER",
                                     role: .destructive
                                 ) {
-                                    viewModel.requestGuardedAction(.clearPreset)
+                                    viewModel.requestGuardedAction(.relockSteer)
                                 }
                                 actionRow(
                                     title: "RESET ENTRY FLOW",
@@ -1243,34 +1267,154 @@ struct SettingsView: View {
                                 }
                             }
 
-                            SettingsSection(title: "RECOVERY") {
-                                actionRow(
-                                    title: "RELOCK STEER",
-                                    role: .destructive
-                                ) {
-                                    viewModel.requestGuardedAction(.relockSteer)
+                            SettingsSection(title: "ABOUT") {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "building.columns.fill")
+                                        .font(.system(size: 18, weight: .semibold))
+                                        .foregroundStyle(BrandingColors.glyphGreen)
+                                        .frame(width: 28, height: 28)
+                                        .background(BrandingColors.glyphGreen.opacity(0.12))
+                                        .overlay {
+                                            RoundedRectangle(cornerRadius: 4)
+                                                .stroke(BrandingColors.glyphGreen.opacity(0.5), lineWidth: 1)
+                                        }
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("TUBCORP")
+                                            .font(.system(size: 13, weight: .black, design: .monospaced))
+                                            .tracking(1.2)
+                                            .foregroundStyle(.white)
+                                            .chromaticAberration()
+                                        Text("PUBLIC SPACE GOVERNANCE PLATFORM")
+                                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                            .tracking(1.1)
+                                            .foregroundStyle(Color.white.opacity(0.58))
+                                    }
+
+                                    Spacer(minLength: 0)
                                 }
-                                actionRow(
-                                    title: "CLEAR TEMP OVERLAYS",
-                                    role: .destructive
-                                ) {
-                                    viewModel.requestGuardedAction(.clearTemporaryOverlays)
+
+                                HStack(spacing: 8) {
+                                    CommandStatusChip(
+                                        title: "POLICY",
+                                        value: "CONTROLLED",
+                                        isActive: true,
+                                        accent: BrandingColors.glyphGreen
+                                    )
+                                    CommandStatusChip(
+                                        title: "OPS",
+                                        value: "SUPERVISED",
+                                        isActive: true,
+                                        accent: BrandingColors.aberrationCyan
+                                    )
+                                    CommandStatusChip(
+                                        title: "TRUST",
+                                        value: "AUDITABLE",
+                                        isActive: true,
+                                        accent: BrandingColors.warningYellow
+                                    )
                                 }
-                                actionRow(
-                                    title: "CLEAR LEARN CONTEXT",
-                                    role: .destructive
-                                ) {
-                                    viewModel.requestGuardedAction(.clearLearnContext)
+
+                                Text("TubCorp provides end-to-end infrastructure for governed interaction in public spaces. From signal acquisition to behavioral inference to stage projection, every layer is policy-controlled, operator-supervised, and fully auditable.")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .tracking(0.9)
+                                    .foregroundStyle(Color.white.opacity(0.72))
+                                    .fixedSize(horizontal: false, vertical: true)
+
+                                HStack(spacing: 8) {
+                                    externalLinkButton(
+                                        title: "WEBSITE",
+                                        url: "https://cbassuarez.github.io/tubcorp-command-site",
+                                        accent: BrandingColors.glyphGreen,
+                                        isSolid: true
+                                    )
+                                    externalLinkButton(
+                                        title: "COMPANY",
+                                        url: "https://cbassuarez.github.io/tubcorp-command-site/company",
+                                        accent: BrandingColors.aberrationCyan
+                                    )
                                 }
+
+                                HStack(spacing: 8) {
+                                    externalLinkButton(
+                                        title: "PLATFORM",
+                                        url: "https://cbassuarez.github.io/tubcorp-command-site/platform",
+                                        accent: BrandingColors.glyphGreen
+                                    )
+                                    externalLinkButton(
+                                        title: "OPERATORS",
+                                        url: "https://cbassuarez.github.io/tubcorp-command-site/operators",
+                                        accent: BrandingColors.aberrationCyan
+                                    )
+                                }
+
+                                HStack(spacing: 8) {
+                                    externalLinkButton(
+                                        title: "SOLUTIONS",
+                                        url: "https://cbassuarez.github.io/tubcorp-command-site/solutions",
+                                        accent: BrandingColors.warningYellow
+                                    )
+                                    externalLinkButton(
+                                        title: "PROCUREMENT",
+                                        url: "https://cbassuarez.github.io/tubcorp-command-site/procurement",
+                                        accent: BrandingColors.warningYellow
+                                    )
+                                }
+
+                                externalLinkButton(
+                                    title: "CASE STUDIES",
+                                    url: "https://cbassuarez.github.io/tubcorp-command-site/case-studies",
+                                    accent: BrandingColors.aberrationCyan
+                                )
                             }
 
-                            SettingsSection(title: "DEBUG DIAGNOSTICS (READ-ONLY)") {
-                                ForEach(viewModel.debugLines, id: \.self) { line in
-                                    Text(line)
-                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                        .tracking(0.9)
-                                        .foregroundStyle(Color.white.opacity(0.72))
-                                        .fixedSize(horizontal: false, vertical: true)
+                            SettingsSection(title: "ADVANCED") {
+                                CommandRailButton(
+                                    title: showAdvancedTools ? "HIDE ADVANCED TOOLS" : "SHOW ADVANCED TOOLS",
+                                    isEnabled: true,
+                                    isActive: showAdvancedTools,
+                                    accent: BrandingColors.warningYellow
+                                ) {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        showAdvancedTools.toggle()
+                                    }
+                                }
+
+                                if showAdvancedTools {
+                                    actionRow(
+                                        title: "DISCONNECT",
+                                        role: .destructive
+                                    ) {
+                                        viewModel.requestGuardedAction(.disconnectHarness)
+                                    }
+                                    actionRow(title: "ROTATE SESSION") {
+                                        viewModel.requestGuardedAction(.rotateSession)
+                                    }
+                                    actionRow(
+                                        title: "CLEAR TEMP OVERLAYS",
+                                        role: .destructive
+                                    ) {
+                                        viewModel.requestGuardedAction(.clearTemporaryOverlays)
+                                    }
+                                    actionRow(
+                                        title: "CLEAR LEARN CONTEXT",
+                                        role: .destructive
+                                    ) {
+                                        viewModel.requestGuardedAction(.clearLearnContext)
+                                    }
+                                    actionRow(
+                                        title: "CLEAR PRESET",
+                                        role: .destructive
+                                    ) {
+                                        viewModel.requestGuardedAction(.clearPreset)
+                                    }
+                                    ForEach(viewModel.debugLines, id: \.self) { line in
+                                        Text(line)
+                                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                            .tracking(0.9)
+                                            .foregroundStyle(Color.white.opacity(0.52))
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
                                 }
                             }
 
@@ -1278,11 +1422,11 @@ struct SettingsView: View {
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 14)
-                        .padding(.bottom, 10)
+                        .padding(.bottom, isPhoneLandscapeCompact ? 0 : 10)
                     }
                 }
-                .padding(.top, 10)
-                .padding(.bottom, 10)
+                .padding(.top, isPhoneLandscapeCompact ? 6 : 10)
+                .padding(.bottom, isPhoneLandscapeCompact ? 0 : 10)
 
                 if viewModel.showPowerUnlockGate {
                     SettingsPowerUnlockOverlay(
@@ -1329,6 +1473,10 @@ struct SettingsView: View {
         }
     }
 
+    private var isPhoneLandscapeCompact: Bool {
+        shellLayoutClass == .phoneLandscapeCompact
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("SETTINGS")
@@ -1336,13 +1484,12 @@ struct SettingsView: View {
                 .tracking(1.3)
                 .foregroundStyle(Color.white.opacity(0.56))
 
-            Text("OPERATOR CONSOLE")
+            Text("SYSTEM CONTROLS")
                 .font(.system(.title2, design: .monospaced, weight: .black))
                 .tracking(1.2)
                 .foregroundStyle(.white)
-                .chromaticAberration()
 
-            Text("AUTO-LINK // RECOVERY // COVERT CONTROL LAYER")
+            Text("CLEAR STATUS, QUICK ACTIONS, OPTIONAL ADVANCED TOOLS.")
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
                 .tracking(1.0)
                 .foregroundStyle(Color.white.opacity(0.68))
@@ -1358,7 +1505,7 @@ struct SettingsView: View {
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .tracking(1.1)
                 .foregroundStyle(Color.white.opacity(0.52))
-                .frame(minWidth: 112, alignment: .leading)
+                .frame(minWidth: 106, alignment: .leading)
             Text(value.uppercased())
                 .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .tracking(0.9)
@@ -1366,6 +1513,31 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
+    }
+
+    private var isSteerAccessUnlocked: Bool {
+        if case .unlocked = appState.steerAccessState {
+            return true
+        }
+        return false
+    }
+
+    private var isStageFeedOnline: Bool {
+        harnessClient.stageFeedState != .standby
+    }
+
+    private var isAudioOutputAvailable: Bool {
+        appState.isExternalAudioRouteActive || appState.isDebugOutputSimulated
+    }
+
+    private var audioChipValue: String {
+        if appState.isExternalAudioRouteActive {
+            return "DEVICE"
+        }
+        if appState.isDebugOutputSimulated {
+            return "SPEAKER"
+        }
+        return "MISSING"
     }
 
     private func actionRow(
@@ -1381,6 +1553,26 @@ struct SettingsView: View {
             action: action
         )
         .accessibilityLabel(title.lowercased())
+    }
+
+    private func externalLinkButton(
+        title: String,
+        url: String,
+        accent: Color,
+        isSolid: Bool = false
+    ) -> some View {
+        CommandRailButton(
+            title: title,
+            isEnabled: true,
+            isActive: !isSolid,
+            isSolid: isSolid,
+            accent: accent
+        ) {
+            guard let destination = URL(string: url) else { return }
+            openURL(destination)
+        }
+        .accessibilityLabel("\(title.lowercased()) link")
+        .accessibilityHint("Opens \(url)")
     }
 
     private var covertTrigger: some View {

@@ -9,6 +9,7 @@
 import Foundation
 import Network
 import Combine
+import CoreGraphics
 import Darwin
 
 struct AudienceInfluenceTelemetry: Equatable {
@@ -63,6 +64,11 @@ class AudienceSessionServer: ObservableObject {
     private var lastOperatorVectorBroadcastSignature: OperatorVectorBroadcastSignature?
     private let stageBroadcastInterval: TimeInterval = 1.0 / 30.0
     private let preferenceOverlay = AudiencePreferenceOverlay()
+    private let operatorActivityMaxCount = 300
+    private let operatorActivityMaxAge: TimeInterval = 5 * 60
+    private var operatorActivityEvents: [OperatorActivityEvent] = []
+    private var operatorActivityEventIds: Set<String> = []
+    private var lastActivityEmissionByKey: [String: Date] = [:]
 
     private let descriptorFallback: [AudienceDescriptorState] = [
         .init(descriptorId: "dense", label: "DENSE", priority: 1.0, isVisible: true, systemStateId: nil),
@@ -371,31 +377,76 @@ class AudienceSessionServer: ObservableObject {
                 sendStageSnapshot(stageSnapshot, to: sessionId)
             }
             sendCanonicalOperatorVectorSnapshot(to: sessionId)
+            sendOperatorActivitySnapshot(to: sessionId)
             sendAck(to: sessionId, message: "SESSION OPEN")
         case .sessionClose:
             cleanupSession(sessionId)
             broadcastCanonicalOperatorVectorIfChanged()
         case .queryState:
             sendDescriptorSnapshot(to: sessionId)
+            sendOperatorActivitySnapshot(to: sessionId)
         case .steerVector:
             if let payload = envelope.steerVector {
                 let event = preferenceEvent(sessionId: sessionId, from: payload)
                 recordPreferenceEvent(event)
+
+                let activity = OperatorActivityEvent(
+                    eventId: envelope.messageId,
+                    sessionId: sessionId,
+                    surface: .steer,
+                    action: .steerVector,
+                    label: canonicalDescriptorLabel(payload.descriptorLabel ?? payload.descriptorId),
+                    intensity: payload.intensity,
+                    position: CGPoint(x: payload.pointX, y: payload.pointY),
+                    timestamp: envelope.timestamp
+                )
+                appendOperatorActivityEvent(activity)
             }
         case .holdState:
             if let payload = envelope.holdState {
                 let event = preferenceEvent(sessionId: sessionId, from: payload)
                 recordPreferenceEvent(event)
+
+                let activity = OperatorActivityEvent(
+                    eventId: envelope.messageId,
+                    sessionId: sessionId,
+                    surface: .steer,
+                    action: payload.isHolding ? .steerHoldStart : .steerHoldEnd,
+                    intensity: payload.intensity,
+                    timestamp: envelope.timestamp
+                )
+                appendOperatorActivityEvent(activity)
             }
         case .intensityNudge:
             if let payload = envelope.intensityNudge {
                 let event = preferenceEvent(sessionId: sessionId, from: payload)
                 recordPreferenceEvent(event)
+
+                let activity = OperatorActivityEvent(
+                    eventId: envelope.messageId,
+                    sessionId: sessionId,
+                    surface: .steer,
+                    action: payload.direction == .more ? .steerNudgeMore : .steerNudgeLess,
+                    intensity: payload.intensity,
+                    timestamp: envelope.timestamp
+                )
+                appendOperatorActivityEvent(activity)
             }
         case .compareChoice:
             if let payload = envelope.compareChoice {
                 let event = preferenceEvent(sessionId: sessionId, from: payload)
                 recordPreferenceEvent(event)
+
+                let activity = OperatorActivityEvent(
+                    eventId: envelope.messageId,
+                    sessionId: sessionId,
+                    surface: .steer,
+                    action: .steerCompareChoice,
+                    label: canonicalDescriptorLabel(payload.chosenDescriptorId),
+                    intensity: payload.intensity,
+                    timestamp: envelope.timestamp
+                )
+                appendOperatorActivityEvent(activity)
             }
         case .operatorVector:
             if let payload = envelope.operatorVector {
@@ -404,6 +455,25 @@ class AudienceSessionServer: ObservableObject {
                 sendAck(to: sessionId, message: summary)
                 broadcastCanonicalOperatorVectorIfChanged()
             }
+        case .operatorActivity:
+            if let activity = envelope.operatorActivity {
+                let normalized = OperatorActivityEvent(
+                    eventId: activity.eventId.isEmpty ? envelope.messageId : activity.eventId,
+                    sessionId: activity.sessionId.isEmpty ? sessionId : activity.sessionId,
+                    surface: activity.surface,
+                    action: activity.action,
+                    label: activity.label,
+                    intensity: activity.intensity,
+                    position: activity.position,
+                    timestamp: activity.timestamp
+                )
+                if normalized.surface == .play {
+                    appendOperatorActivityEvent(normalized)
+                }
+            }
+        case .operatorActivitySnapshot:
+            // Companion should not send snapshots.
+            break
         case .descriptorSnapshot:
             // Companion is not authoritative for descriptors in this path.
             break
@@ -434,6 +504,7 @@ class AudienceSessionServer: ObservableObject {
         sessionConnectionKeys.removeValue(forKey: sessionId)
         sessionDescriptorLabelHints.removeValue(forKey: sessionId)
         preferenceOverlay.clearSession(sessionId)
+        lastActivityEmissionByKey = lastActivityEmissionByKey.filter { !($0.key.hasPrefix("\(sessionId)|")) }
         DispatchQueue.main.async {
             self.activeSessions.removeValue(forKey: sessionId)
             self.claimStates.removeValue(forKey: sessionId)
@@ -584,6 +655,77 @@ class AudienceSessionServer: ObservableObject {
     private func quantizedBin(_ value: Double, step: Double) -> Int {
         guard step > 0 else { return 0 }
         return Int((value / step).rounded())
+    }
+
+    private func sendOperatorActivitySnapshot(to sessionId: String) {
+        pruneOperatorActivityEvents(now: Date())
+        let payload = OperatorActivitySnapshot(events: operatorActivityEvents, serverTimestamp: Date())
+        let envelope = AudienceEnvelope(
+            kind: .operatorActivitySnapshot,
+            sessionId: "SYSTEM",
+            operatorActivitySnapshot: payload
+        )
+        sendEnvelope(envelope, to: sessionId)
+    }
+
+    private func appendOperatorActivityEvent(_ event: OperatorActivityEvent) {
+        let now = Date()
+        pruneOperatorActivityEvents(now: now)
+
+        if operatorActivityEventIds.contains(event.eventId) {
+            return
+        }
+
+        if shouldThrottleOperatorActivity(event, now: now) {
+            return
+        }
+
+        operatorActivityEvents.insert(event, at: 0)
+        operatorActivityEventIds.insert(event.eventId)
+
+        if operatorActivityEvents.count > operatorActivityMaxCount {
+            operatorActivityEvents = Array(operatorActivityEvents.prefix(operatorActivityMaxCount))
+            operatorActivityEventIds = Set(operatorActivityEvents.map(\.eventId))
+        }
+
+        let sessions = Array(sessionConnectionKeys.keys)
+        sessions.forEach { destinationSessionId in
+            let envelope = AudienceEnvelope(
+                kind: .operatorActivity,
+                sessionId: event.sessionId,
+                timestamp: event.timestamp,
+                operatorActivity: event
+            )
+            sendEnvelope(envelope, to: destinationSessionId)
+        }
+    }
+
+    private func shouldThrottleOperatorActivity(_ event: OperatorActivityEvent, now: Date) -> Bool {
+        let minimumInterval: TimeInterval
+        switch event.action {
+        case .steerVector:
+            minimumInterval = 0.25
+        case .playLongSweep:
+            minimumInterval = 0.1
+        default:
+            minimumInterval = 0
+        }
+
+        guard minimumInterval > 0 else { return false }
+
+        let key = "\(event.sessionId)|\(event.surface.rawValue)|\(event.action.rawValue)"
+        if let lastEmission = lastActivityEmissionByKey[key], now.timeIntervalSince(lastEmission) < minimumInterval {
+            return true
+        }
+
+        lastActivityEmissionByKey[key] = now
+        return false
+    }
+
+    private func pruneOperatorActivityEvents(now: Date) {
+        let cutoff = now.addingTimeInterval(-operatorActivityMaxAge)
+        operatorActivityEvents = operatorActivityEvents.filter { $0.timestamp >= cutoff }
+        operatorActivityEventIds = Set(operatorActivityEvents.map(\.eventId))
     }
 
     private func sendEnvelope(_ envelope: AudienceEnvelope, to sessionId: String) {

@@ -293,8 +293,8 @@ final class TubCompanionUITests: XCTestCase {
         app.launchArguments += ["-DEBUG_RESET_APP_STATE", "YES", "-DEBUG_SKIP_ENTRY_GATE", "NO"]
         app.launch()
 
-        XCTAssertTrue(app.buttons["Feed the sound bank"].waitForExistence(timeout: 8))
-        app.buttons["Feed the sound bank"].tap()
+        XCTAssertTrue(app.buttons["Steer the ML"].waitForExistence(timeout: 8))
+        app.buttons["Steer the ML"].tap()
 
         XCTAssertTrue(app.staticTexts["CONNECT LOCALLY"].waitForExistence(timeout: 8))
         XCTAssertFalse(deckElement(in: app, id: "steer.pad").exists)

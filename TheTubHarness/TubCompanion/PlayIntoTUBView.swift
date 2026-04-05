@@ -15,29 +15,39 @@ struct PlayIntoTUBView: View {
     @ObservedObject var appState: TubCompanionAppState
     @ObservedObject var harnessClient: HarnessClient
     @ObservedObject var externalAudioRouteMonitor: ExternalAudioRouteMonitor
+    @Environment(\.shellLayoutClass) private var shellLayoutClass
 
     @StateObject private var viewModel = PlayGridViewModel()
     @Environment(\.scenePhase) private var scenePhase
     @State private var hoveredGridCellID: PlayGridCell.ID?
     @State private var gridContainerWidth: CGFloat = 0
+    @State private var showOperatorLogModal = false
+    @State private var fadeBlinkOpacity: Double = 1.0
+    @State private var fadeDimOpacity: Double = 1.0
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
-            PlayGridScanlines().ignoresSafeArea().opacity(0.22)
-
-            VStack(alignment: .leading, spacing: 14) {
-                header
-                chips
-                gridSurface
-                CommandSignalRule(opacity: 0.2)
-                footer
-                CommandSignalRule(opacity: 0.2)
-                longStripSurface
+            if shellLayoutClass == .compact {
+                Color.black
+                PlayGridScanlines().opacity(0.22)
+            } else {
+                Color.black.ignoresSafeArea()
+                PlayGridScanlines().ignoresSafeArea().opacity(0.22)
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 10)
-            .padding(.bottom, 10)
+
+            if isPhoneLandscapeCompact {
+                GeometryReader { proxy in
+                    compactLandscapeStack(availableWidth: proxy.size.width)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 4)
+                        .padding(.bottom, 6)
+                }
+            } else {
+                defaultStack
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+                    .padding(.bottom, 10)
+            }
 
             if appState.shouldPresentOverlay(for: .play) {
                 ConnectionRequiredOverlay(
@@ -50,7 +60,7 @@ struct PlayIntoTUBView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
-            viewModel.start(using: appState)
+            viewModel.start(using: appState, harnessClient: harnessClient)
         }
         .onChange(of: scenePhase) { _, phase in
             viewModel.setScenePhase(phase)
@@ -64,15 +74,75 @@ struct PlayIntoTUBView: View {
         .onChange(of: appState.isCableRouteSimulated) { _, _ in
             viewModel.updateRoute(using: appState)
         }
+        .onChange(of: appState.isCablePathSatisfied) { _, _ in
+            viewModel.updateRoute(using: appState)
+        }
+        .overlay {
+            if showOperatorLogModal {
+                OperatorActivityLogModal(
+                    idPrefix: "play.ops",
+                    title: "PLAY // OPS LOG",
+                    appState: appState,
+                    connectionState: harnessClient.connectionState,
+                    surface: .play,
+                    onClose: {
+                        showOperatorLogModal = false
+                    }
+                )
+            }
+        }
+    }
+
+    private var isPhoneLandscapeCompact: Bool {
+        shellLayoutClass == .phoneLandscapeCompact
+    }
+
+    private var defaultStack: some View {
+        VStack(alignment: .leading, spacing: isPhoneLandscapeCompact ? 8 : 14) {
+            header
+            chips
+            gridSurface
+            CommandSignalRule(opacity: 0.2)
+            footer
+            CommandSignalRule(opacity: 0.2)
+            longStripSurface
+        }
+    }
+
+    private func compactLandscapeStack(availableWidth: CGFloat) -> some View {
+        let rightColumnWidth = max(226, min(312, availableWidth * 0.34))
+
+        return VStack(alignment: .leading, spacing: 4) {
+            header
+            chips
+
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
+                    gridSurface
+                    footer
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                Rectangle()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(width: 1)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    longStripSurface
+                }
+                .frame(width: rightColumnWidth, alignment: .topLeading)
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
+        }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("PLAY")
-                .playMono(12, weight: .semibold)
+                .playMono(isPhoneLandscapeCompact ? 10 : 12, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.7))
             Text("LIVE SAMPLE GRID")
-                .playMono(28, weight: .bold)
+                .playMono(isPhoneLandscapeCompact ? 16 : 28, weight: .bold)
                 .foregroundStyle(BrandingColors.glyphGreen)
                 .chromaticAberration()
                 .lineLimit(1)
@@ -85,23 +155,45 @@ struct PlayIntoTUBView: View {
             PlayStatusChip(
                 title: "LINK",
                 value: viewModel.linkStatus,
-                tone: viewModel.linkTone
+                tone: viewModel.linkTone,
+                compact: isPhoneLandscapeCompact
             )
             PlayStatusChip(
                 title: "OUTPUT",
                 value: viewModel.outputStatus,
-                tone: viewModel.outputTone
+                tone: viewModel.outputTone,
+                compact: isPhoneLandscapeCompact
             )
             PlayStatusChip(
                 title: "SOURCE",
                 value: viewModel.libraryStatus,
-                tone: viewModel.libraryTone
+                tone: viewModel.libraryTone,
+                compact: isPhoneLandscapeCompact
             )
-            PlayStatusChip(
-                title: "DEBUG",
-                value: viewModel.debugStatus,
-                tone: viewModel.debugTone
-            )
+            Button {
+                showOperatorLogModal = true
+            } label: {
+                HStack(spacing: isPhoneLandscapeCompact ? 4 : 5) {
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: isPhoneLandscapeCompact ? 9 : 10, weight: .bold))
+                        .foregroundStyle(BrandingColors.glyphGreen.opacity(0.85))
+                    Text("OPS LOG")
+                        .playMono(isPhoneLandscapeCompact ? 9 : 10, weight: .bold)
+                        .foregroundStyle(Color.white.opacity(0.88))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.68)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, isPhoneLandscapeCompact ? 6 : 8)
+                .padding(.vertical, isPhoneLandscapeCompact ? 5 : 7)
+                .background(Color.black)
+                .overlay {
+                    Rectangle()
+                        .stroke(BrandingColors.glyphGreen.opacity(0.5), lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("play.button.ops")
         }
     }
 
@@ -109,10 +201,16 @@ struct PlayIntoTUBView: View {
         GeometryReader { proxy in
             let width = max(1, proxy.size.width)
             let height = max(1, proxy.size.height)
-            let meterLeftInset: CGFloat = 8
-            let targetMeterWidth = meterWidthForGrid(totalWidth: width)
+            let meterLeftInset: CGFloat = isPhoneLandscapeCompact ? 4 : 8
+            let meterSlots = 1
+            let targetMeterWidth = meterWidthForGrid(totalWidth: width, meterSlots: meterSlots)
             let side = min(max(1, width - targetMeterWidth - meterLeftInset), height)
-            let meterWidth = max(0, width - side - meterLeftInset)
+            let meterWidth = isPhoneLandscapeCompact
+                ? targetMeterWidth
+                : max(0, width - side - meterLeftInset)
+            let contentWidth = isPhoneLandscapeCompact
+                ? min(width, side + meterLeftInset + meterWidth)
+                : width
 
             let cell = side / CGFloat(viewModel.gridDimension)
 
@@ -202,10 +300,10 @@ struct PlayIntoTUBView: View {
                 .accessibilityHint("DRAG ACROSS GRID CELLS TO TRIGGER AUDIO EVENTS.")
                 .accessibilityIdentifier("play.grid.surface")
             }
-            .frame(width: width, height: side, alignment: .leading)
+            .frame(width: contentWidth, height: side, alignment: .leading)
             .contentShape(Rectangle())
             .overlay(alignment: .topLeading) {
-                if meterWidth > 0.5 && width > side + meterLeftInset {
+                if meterWidth > 0.5 && contentWidth > side + meterLeftInset {
                     PlayOutputMeter(level: viewModel.outputMeterLevel)
                         .frame(width: meterWidth, height: side)
                         .offset(x: side + meterLeftInset, y: 0)
@@ -229,14 +327,26 @@ struct PlayIntoTUBView: View {
         }
     }
 
-    private func meterWidthForGrid(totalWidth: CGFloat) -> CGFloat {
-        max(10, min(34, totalWidth * 0.09))
+    private func meterWidthForGrid(totalWidth: CGFloat, meterSlots: Int) -> CGFloat {
+        if meterSlots <= 1 {
+            if isPhoneLandscapeCompact {
+                return max(8, min(12, totalWidth * 0.028))
+            }
+            return max(10, min(34, totalWidth * 0.09))
+        }
+        let singleWidth = max(6, min(11, totalWidth * 0.024))
+        let spacing = CGFloat(max(0, meterSlots - 1)) * 2
+        return (singleWidth * CGFloat(meterSlots)) + spacing
     }
 
     private func gridHeightForContainer(width: CGFloat) -> CGFloat {
         guard width > 0 else { return 252 }
-        let meterLeftInset: CGFloat = 2
-        let side = width - meterWidthForGrid(totalWidth: width) - meterLeftInset
+        let meterLeftInset: CGFloat = isPhoneLandscapeCompact ? 4 : 2
+        let meterSlots = 1
+        let side = width - meterWidthForGrid(totalWidth: width, meterSlots: meterSlots) - meterLeftInset
+        if isPhoneLandscapeCompact {
+            return min(232, max(164, side))
+        }
         return min(320, max(252, side))
     }
 
@@ -346,10 +456,10 @@ struct PlayIntoTUBView: View {
     }
 
     private var longStripSurface: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: isPhoneLandscapeCompact ? 6 : 8) {
             HStack(spacing: 8) {
                 Text("LONG SOUNDS GRADIENT STRIP")
-                    .playMono(11, weight: .bold)
+                    .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
                     .foregroundStyle(Color.white.opacity(0.8))
                 Spacer()
                 Text("BANK \(viewModel.longBankStatus)")
@@ -359,18 +469,22 @@ struct PlayIntoTUBView: View {
                     .minimumScaleFactor(0.75)
                     .accessibilityIdentifier("play.long.bank.status")
             }
-            Text("TOUCH OR DRAG ACROSS THE STRIP TO BLEND THE BANK'S LEFT/RIGHT LONG SOUNDS. NO NEED TO HOLD.")
-                .playMono(10, weight: .regular)
-                .foregroundStyle(Color.white.opacity(0.62))
-                .fixedSize(horizontal: false, vertical: true)
+            if !isPhoneLandscapeCompact {
+                Text("TOUCH OR DRAG ACROSS THE STRIP TO BLEND THE BANK'S LEFT/RIGHT LONG SOUNDS. NO NEED TO HOLD.")
+                    .playMono(10, weight: .regular)
+                    .foregroundStyle(Color.white.opacity(0.62))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             GeometryReader { proxy in
                 let width = max(1, proxy.size.width)
                 let height = max(1, proxy.size.height)
-                let meterInset: CGFloat = 2
-                let meterWidth = max(10, min(18, width * 0.06))
-                let stripWidth = max(1, width - meterWidth - meterInset)
+                let meterInset: CGFloat = isPhoneLandscapeCompact ? 1 : 2
+                let meterWidth = isPhoneLandscapeCompact ? 8 : max(10, min(18, width * 0.06))
+                let stripWidth = max(1, width - (meterWidth > 0 ? meterWidth + meterInset : 0))
                 let playheadX = CGFloat(viewModel.longBlendPosition) * stripWidth
+                let clampedPlayheadX = max(0, min(stripWidth - 2, playheadX - 1))
+                let playheadGlowWidth: CGFloat = 38
 
                 HStack(spacing: 0) {
                     ZStack(alignment: .topLeading) {
@@ -423,10 +537,51 @@ struct PlayIntoTUBView: View {
                         .padding(.horizontal, 10)
                         .padding(.top, 8)
 
-                        Rectangle()
-                            .fill(BrandingColors.glyphGreen.opacity(0.9))
-                            .frame(width: 2, height: height)
-                            .offset(x: max(0, min(stripWidth - 2, playheadX - 1)))
+                        ZStack {
+                            Rectangle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [.clear, BrandingColors.glyphGreen.opacity(0.12), .clear],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(width: playheadGlowWidth, height: height)
+                                .blendMode(.screen)
+
+                            Rectangle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [.clear, BrandingColors.glyphGreen.opacity(0.38), .clear],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(width: 24, height: height)
+                                .blur(radius: 3.2)
+                                .blendMode(.screen)
+
+                            Rectangle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            BrandingColors.glyphGreen.opacity(0.4),
+                                            BrandingColors.glyphGreen.opacity(0.92),
+                                            Color.white.opacity(0.95)
+                                        ],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(width: 2, height: height)
+                                .shadow(color: BrandingColors.glyphGreen.opacity(0.55), radius: 6, x: 0, y: 0)
+
+                            Rectangle()
+                                .fill(Color.white.opacity(0.96))
+                                .frame(width: 1, height: height)
+                                .offset(x: 1)
+                        }
+                        .offset(x: clampedPlayheadX - (playheadGlowWidth / 2))
                     }
                     .frame(width: stripWidth, height: height)
                     .contentShape(Rectangle())
@@ -466,28 +621,32 @@ struct PlayIntoTUBView: View {
                         }
                     }
 
-                    PlayOutputMeter(level: viewModel.longOutputMeterLevel)
-                        .frame(width: meterWidth, height: height)
-                        .padding(.leading, meterInset)
-                        .allowsHitTesting(false)
-                        .accessibilityIdentifier("play.long.scope")
+                    if meterWidth > 0 {
+                        PlayOutputMeter(level: viewModel.longOutputMeterLevel)
+                            .frame(width: meterWidth, height: height)
+                            .padding(.leading, meterInset)
+                            .allowsHitTesting(false)
+                            .accessibilityIdentifier("play.long.scope")
+                    }
                 }
             }
-            .frame(height: 86)
+            .frame(height: isPhoneLandscapeCompact ? 60 : 86)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("LONG SOUNDS GRADIENT STRIP")
             .accessibilityHint("TOUCH OR DRAG HORIZONTALLY TO BLEND LONG SAMPLE PLAYBACK.")
             .accessibilityIdentifier("play.long.strip.surface")
 
-            CommandSignalRule(opacity: 0.2)
+            if !isPhoneLandscapeCompact {
+                CommandSignalRule(opacity: 0.2)
+            }
 
             HStack(spacing: 8) {
                 Button(action: viewModel.previousLongBank) {
                     Text("LONG -")
-                        .playMono(11, weight: .bold)
+                        .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
                         .foregroundStyle(Color.white.opacity(viewModel.hasMultipleLongBanks ? 0.86 : 0.35))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
                         .background(Color.black)
                         .overlay {
                             Rectangle()
@@ -499,29 +658,104 @@ struct PlayIntoTUBView: View {
                 .accessibilityIdentifier("play.long.bank.previous")
                 .accessibilityLabel("Previous Long Sample Bank")
 
-                Button(action: viewModel.stopLong) {
-                    Text("STOP LONG")
-                        .playMono(11, weight: .bold)
-                        .foregroundStyle(Color.white.opacity(viewModel.hasActiveLongSample ? 0.86 : 0.35))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Color.black)
-                        .overlay {
-                            Rectangle()
-                                .stroke(Color.white.opacity(viewModel.hasActiveLongSample ? 0.42 : 0.2), lineWidth: 1)
-                        }
+                Button(action: viewModel.toggleLongPlayback) {
+                    HStack(spacing: 6) {
+                        LongTransportGlyph(
+                            systemName: viewModel.isLongPaused ? "play.fill" : "pause.fill",
+                            animate: viewModel.hasActiveLongSample && !viewModel.isLongFadingOut
+                        )
+                        Text(viewModel.isLongPaused ? "PLAY" : "PAUSE")
+                            .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
+                    }
+                    .foregroundStyle(
+                        viewModel.hasActiveLongSample
+                        ? Color.white.opacity(0.92)
+                        : Color.white.opacity(0.35)
+                    )
+                    .frame(minWidth: isPhoneLandscapeCompact ? 74 : 92, maxWidth: isPhoneLandscapeCompact ? 92 : 108)
+                    .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
+                    .background(
+                        viewModel.hasActiveLongSample
+                        ? BrandingColors.glyphGreen.opacity(0.14)
+                        : Color.black
+                    )
+                    .overlay {
+                        Rectangle()
+                            .stroke(
+                                viewModel.hasActiveLongSample
+                                ? BrandingColors.glyphGreen.opacity(0.62)
+                                : Color.white.opacity(0.2),
+                                lineWidth: 1
+                            )
+                    }
                 }
                 .buttonStyle(.plain)
-                .disabled(!viewModel.hasActiveLongSample)
-                .accessibilityIdentifier("play.long.stop")
-                .accessibilityLabel("Stop Long Sample")
+                .disabled(!viewModel.hasActiveLongSample || viewModel.isLongFadingOut)
+                .accessibilityIdentifier("play.long.transport")
+                .accessibilityLabel(viewModel.isLongPaused ? "Resume Long Sample Playback" : "Pause Long Sample Playback")
+
+                Button(action: viewModel.fadeOutLong) {
+                    HStack(spacing: 6) {
+                        LongTransportGlyph(
+                            systemName: "arrow.down.to.line.compact",
+                            animate: viewModel.isLongFadingOut
+                        )
+                        Text(viewModel.isLongFadingOut ? "FADING…" : "FADE 8S")
+                            .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
+                    }
+                    .foregroundStyle(
+                        viewModel.hasActiveLongSample
+                        ? BrandingColors.warningYellow.opacity(0.94)
+                        : Color.white.opacity(0.35)
+                    )
+                    .frame(minWidth: isPhoneLandscapeCompact ? 74 : 92, maxWidth: isPhoneLandscapeCompact ? 92 : 108)
+                    .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
+                    .background(
+                        viewModel.isLongFadingOut
+                        ? BrandingColors.warningYellow.opacity(0.14)
+                        : Color.black
+                    )
+                    .overlay {
+                        Rectangle()
+                            .stroke(
+                                viewModel.hasActiveLongSample
+                                ? BrandingColors.warningYellow.opacity(0.62)
+                                : Color.white.opacity(0.2),
+                                lineWidth: 1
+                            )
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(!viewModel.hasActiveLongSample || viewModel.isLongFadingOut)
+                .opacity(viewModel.isLongFadingOut ? fadeDimOpacity * fadeBlinkOpacity : 1.0)
+                .onChange(of: viewModel.isLongFadingOut) { _, isFading in
+                    if isFading {
+                        fadeDimOpacity = 1.0
+                        fadeBlinkOpacity = 1.0
+                        withAnimation(.easeIn(duration: 8)) {
+                            fadeDimOpacity = 0.12
+                        }
+                        withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
+                            fadeBlinkOpacity = 0.3
+                        }
+                    } else {
+                        var t = Transaction()
+                        t.disablesAnimations = true
+                        withTransaction(t) {
+                            fadeDimOpacity = 1.0
+                            fadeBlinkOpacity = 1.0
+                        }
+                    }
+                }
+                .accessibilityIdentifier("play.long.fade")
+                .accessibilityLabel("Fade Out Long Sample Over Eight Seconds")
 
                 Button(action: viewModel.nextLongBank) {
                     Text("LONG +")
-                        .playMono(11, weight: .bold)
+                        .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
                         .foregroundStyle(Color.white.opacity(viewModel.hasMultipleLongBanks ? 0.86 : 0.35))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
                         .background(Color.black)
                         .overlay {
                             Rectangle()
@@ -536,16 +770,25 @@ struct PlayIntoTUBView: View {
 
             HStack(spacing: 8) {
                 Text("LONG")
-                    .playMono(10, weight: .bold)
+                    .playMono(isPhoneLandscapeCompact ? 9 : 10, weight: .bold)
                     .foregroundStyle(Color.white.opacity(0.5))
                 Text(viewModel.activeLongLabel)
-                    .playMono(11, weight: .bold)
+                    .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
                     .foregroundStyle(BrandingColors.glyphGreen)
                     .lineLimit(1)
                     .minimumScaleFactor(0.66)
                 Spacer(minLength: 8)
+                if viewModel.isLongFadingOut {
+                    Text("FADE")
+                        .playMono(isPhoneLandscapeCompact ? 9 : 10, weight: .bold)
+                        .foregroundStyle(BrandingColors.warningYellow.opacity(0.9))
+                } else if viewModel.isLongPaused {
+                    Text("PAUSED")
+                        .playMono(isPhoneLandscapeCompact ? 9 : 10, weight: .bold)
+                        .foregroundStyle(Color.white.opacity(0.72))
+                }
                 Text(viewModel.longElapsedLabel)
-                    .playMono(11, weight: .bold)
+                    .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
                     .foregroundStyle(Color.white.opacity(0.76))
             }
 
@@ -554,18 +797,20 @@ struct PlayIntoTUBView: View {
                 .foregroundStyle(Color.white.opacity(0.62))
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
+                .opacity(isPhoneLandscapeCompact ? 0 : 1)
+                .frame(height: isPhoneLandscapeCompact ? 0 : nil)
         }
     }
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: isPhoneLandscapeCompact ? 4 : 6) {
             HStack(spacing: 8) {
                 Button(action: viewModel.previousBank) {
                     Text("BANK -")
-                        .playMono(11, weight: .bold)
+                        .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
                         .foregroundStyle(Color.white.opacity(viewModel.hasMultipleBanks ? 0.86 : 0.35))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
                         .background(Color.black)
                         .overlay {
                             Rectangle()
@@ -578,7 +823,7 @@ struct PlayIntoTUBView: View {
                 .accessibilityLabel("Previous Sample Bank")
 
                 Text("BANK \(viewModel.bankStatus)")
-                    .playMono(11, weight: .bold)
+                    .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
                     .foregroundStyle(BrandingColors.glyphGreen)
                     .frame(maxWidth: .infinity)
                     .lineLimit(1)
@@ -587,10 +832,10 @@ struct PlayIntoTUBView: View {
 
                 Button(action: viewModel.nextBank) {
                     Text("BANK +")
-                        .playMono(11, weight: .bold)
+                        .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
                         .foregroundStyle(Color.white.opacity(viewModel.hasMultipleBanks ? 0.86 : 0.35))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
                         .background(Color.black)
                         .overlay {
                             Rectangle()
@@ -603,21 +848,57 @@ struct PlayIntoTUBView: View {
                 .accessibilityLabel("Next Sample Bank")
             }
 
-            HStack(spacing: 8) {
-                Text("LAST")
-                    .playMono(10, weight: .bold)
-                    .foregroundStyle(Color.white.opacity(0.5))
-                Text(viewModel.lastEventLabel)
-                    .playMono(12, weight: .bold)
-                    .foregroundStyle(BrandingColors.glyphGreen)
+            if isPhoneLandscapeCompact {
+                HStack(spacing: 8) {
+                    Text("LAST")
+                        .playMono(9, weight: .bold)
+                        .foregroundStyle(Color.white.opacity(0.5))
+                    Text(viewModel.lastEventLabel)
+                        .playMono(10, weight: .bold)
+                        .foregroundStyle(BrandingColors.glyphGreen)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    Text("LAST")
+                        .playMono(10, weight: .bold)
+                        .foregroundStyle(Color.white.opacity(0.5))
+                    Text(viewModel.lastEventLabel)
+                        .playMono(12, weight: .bold)
+                        .foregroundStyle(BrandingColors.glyphGreen)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+                Text(viewModel.activityLine)
+                    .playMono(10, weight: .regular)
+                    .foregroundStyle(Color.white.opacity(0.62))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.75)
+                    .minimumScaleFactor(0.72)
             }
-            Text(viewModel.activityLine)
-                .playMono(10, weight: .regular)
-                .foregroundStyle(Color.white.opacity(0.62))
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
+
+        }
+    }
+}
+
+private struct LongTransportGlyph: View {
+    let systemName: String
+    let animate: Bool
+
+    var body: some View {
+        let image = Image(systemName: systemName)
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(
+                BrandingColors.glyphGreen.opacity(0.95),
+                Color.white.opacity(0.92)
+            )
+            .font(.system(size: 13, weight: .bold))
+
+        if #available(iOS 17.0, *) {
+            image
+                .symbolEffect(.pulse.byLayer, value: animate)
+        } else {
+            image
         }
     }
 }
@@ -647,6 +928,8 @@ private final class PlayGridViewModel: ObservableObject {
     @Published private(set) var longBankStatus = "01/08"
     @Published private(set) var debugStatus = "OFF"
     @Published private(set) var canOutput = false
+    @Published private(set) var isLongPaused = false
+    @Published private(set) var isLongFadingOut = false
 
     private let audio = PlayGridAudioEngine()
     private var sampleURLs: [URL] = []
@@ -662,16 +945,23 @@ private final class PlayGridViewModel: ObservableObject {
     private var lastLongBlendX: Double?
     private var activeLongURL: URL?
     private var longStartedAt: Date?
+    private var longElapsedAccumulated: TimeInterval = 0
     private var longElapsedTicker: AnyCancellable?
     private var meterTicker: AnyCancellable?
+    private var longFadeCompletionWorkItem: DispatchWorkItem?
     private var didStart = false
     private let preloadBankLookahead = 3
+    private weak var appState: TubCompanionAppState?
+    private weak var harnessClient: HarnessClient?
+    private var lastActivityEmissionByKey: [String: Date] = [:]
 
     init() {
         self.cells = Self.makeCells(gridDimension: gridDimension, bankIndex: 0)
     }
 
-    func start(using appState: TubCompanionAppState) {
+    func start(using appState: TubCompanionAppState, harnessClient: HarnessClient) {
+        self.appState = appState
+        self.harnessClient = harnessClient
         guard !didStart else { return }
         didStart = true
         startMeterTicker()
@@ -816,6 +1106,7 @@ private final class PlayGridViewModel: ObservableObject {
         endTouch()
         audio.stopAll()
         activityLine = "BANK \(bankStatus) ARMED."
+        emitActivity(action: .playBankNext, label: bankStatus)
     }
 
     func previousBank() {
@@ -825,6 +1116,7 @@ private final class PlayGridViewModel: ObservableObject {
         endTouch()
         audio.stopAll()
         activityLine = "BANK \(bankStatus) ARMED."
+        emitActivity(action: .playBankPrevious, label: bankStatus)
     }
 
     func nextLongBank() {
@@ -832,6 +1124,7 @@ private final class PlayGridViewModel: ObservableObject {
         activeLongBankIndex = (activeLongBankIndex + 1) % longBanks.count
         updateLongBankStatus()
         endLongTouch()
+        emitActivity(action: .playLongBankNext, label: longBankStatus)
         if hasActiveLongSample {
             triggerLongBlend(position: longBlendPosition, smoothTransition: true)
         } else {
@@ -844,6 +1137,7 @@ private final class PlayGridViewModel: ObservableObject {
         activeLongBankIndex = (activeLongBankIndex - 1 + longBanks.count) % longBanks.count
         updateLongBankStatus()
         endLongTouch()
+        emitActivity(action: .playLongBankPrevious, label: longBankStatus)
         if hasActiveLongSample {
             triggerLongBlend(position: longBlendPosition, smoothTransition: true)
         } else {
@@ -852,15 +1146,67 @@ private final class PlayGridViewModel: ObservableObject {
     }
 
     func stopLong() {
+        cancelLongFadeCompletion(resetState: true)
         audio.stopLong()
         stopLongElapsedTicker()
         activeLongURL = nil
+        isLongPaused = false
         longBlendMeterLevel = longBlendPosition
         longOutputMeterLevel = 0
         longStartedAt = nil
+        longElapsedAccumulated = 0
         activeLongLabel = "—"
         longElapsedLabel = "00:00.0"
         longActivityLine = "LONG STRIP IDLE."
+    }
+
+    func toggleLongPlayback() {
+        guard hasActiveLongSample else { return }
+        guard !isLongFadingOut else { return }
+
+        if isLongPaused {
+            audio.resumeLong()
+            isLongPaused = false
+            longStartedAt = Date()
+            startLongElapsedTicker()
+            longActivityLine = "LONG RESUMED."
+            emitActivity(action: .playLongTransportResume, label: activeLongLabel)
+            return
+        }
+
+        audio.pauseLong()
+        if let startedAt = longStartedAt {
+            longElapsedAccumulated += Date().timeIntervalSince(startedAt)
+        }
+        longStartedAt = nil
+        isLongPaused = true
+        stopLongElapsedTicker()
+        longActivityLine = "LONG PAUSED."
+        emitActivity(action: .playLongTransportPause, label: activeLongLabel)
+    }
+
+    func fadeOutLong() {
+        guard hasActiveLongSample else { return }
+        guard !isLongFadingOut else { return }
+
+        cancelLongFadeCompletion(resetState: false)
+        if isLongPaused {
+            audio.resumeLong()
+            isLongPaused = false
+            longStartedAt = Date()
+            startLongElapsedTicker()
+        }
+        isLongPaused = false
+        isLongFadingOut = true
+        audio.fadeOutLong(duration: 8)
+        longActivityLine = "LONG FADE OUT 08.0S."
+        emitActivity(action: .playLongFadeStart, label: activeLongLabel)
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.completeLongFadeOut()
+        }
+        longFadeCompletionWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.15, execute: workItem)
     }
 
     private func trigger(row: Int, column: Int) {
@@ -881,9 +1227,27 @@ private final class PlayGridViewModel: ObservableObject {
 
         lastEventLabel = token
         activityLine = "BANK \(bankStatus) / CELL \(row + 1):\(column + 1) -> \(url.deletingPathExtension().lastPathComponent.uppercased())"
+        emitActivity(
+            action: .playGridTrigger,
+            label: token,
+            intensity: Double(gain),
+            position: CGPoint(
+                x: CGFloat(column) / CGFloat(max(gridDimension - 1, 1)),
+                y: CGFloat(row) / CGFloat(max(gridDimension - 1, 1))
+            )
+        )
     }
 
     private func triggerLongBlend(position: Double, smoothTransition: Bool = false) {
+        if !isLongFadingOut {
+            cancelLongFadeCompletion(resetState: true)
+        }
+        if isLongPaused {
+            audio.resumeLong()
+            isLongPaused = false
+            longStartedAt = Date()
+            startLongElapsedTicker()
+        }
         guard !longBanks.isEmpty else {
             longActivityLine = "LONG EMPTY. NO STRIP EVENTS."
             return
@@ -927,6 +1291,14 @@ private final class PlayGridViewModel: ObservableObject {
         let secondaryLabel = plan.secondary?.displayName.uppercased() ?? "—"
         let prefix = smoothTransition ? "LONG \(longBankStatus) CROSSFADE" : "LONG \(longBankStatus)"
         longActivityLine = "\(prefix) \(primary.displayName.uppercased()) ↔ \(secondaryLabel) MIX \(Int((plan.mix * 100).rounded()))%"
+        emitActivity(
+            action: .playLongSweep,
+            label: plan.dominantLabel,
+            intensity: plan.mix,
+            position: CGPoint(x: position, y: 0.5),
+            throttleKey: "playLongSweep",
+            minimumInterval: 0.1
+        )
     }
 
     private func loadSampleLibrary() {
@@ -1091,6 +1463,78 @@ private final class PlayGridViewModel: ObservableObject {
         longElapsedTicker = nil
     }
 
+    private func cancelLongFadeCompletion(resetState: Bool) {
+        longFadeCompletionWorkItem?.cancel()
+        longFadeCompletionWorkItem = nil
+        if resetState {
+            isLongFadingOut = false
+        }
+    }
+
+    private func completeLongFadeOut() {
+        guard isLongFadingOut else { return }
+        longFadeCompletionWorkItem = nil
+        isLongFadingOut = false
+        isLongPaused = false
+        activeLongURL = nil
+        activeLongLabel = "—"
+        longStartedAt = nil
+        longElapsedAccumulated = 0
+        stopLongElapsedTicker()
+        longBlendMeterLevel = longBlendPosition
+        longOutputMeterLevel = 0
+        longElapsedLabel = "00:00.0"
+        longActivityLine = "LONG FADE COMPLETE."
+        emitActivity(action: .playLongFadeComplete)
+    }
+
+    private func emitActivity(
+        action: OperatorActivityAction,
+        label: String? = nil,
+        intensity: Double? = nil,
+        position: CGPoint? = nil,
+        throttleKey: String? = nil,
+        minimumInterval: TimeInterval = 0
+    ) {
+        guard let appState else { return }
+        let sessionId = appState.sessionId ?? "ios-local"
+        let now = Date()
+
+        if let throttleKey,
+           shouldThrottleActivity(key: "\(sessionId)|\(throttleKey)", minimumInterval: minimumInterval, now: now) {
+            return
+        }
+
+        let event = OperatorActivityEvent(
+            sessionId: sessionId,
+            surface: .play,
+            action: action,
+            label: label,
+            intensity: intensity,
+            position: position,
+            timestamp: now
+        )
+
+        appState.ingestOperatorActivityEvent(event)
+
+        if case .connected = harnessClient?.connectionState {
+            harnessClient?.sendOperatorActivity(event)
+        }
+    }
+
+    private func shouldThrottleActivity(
+        key: String,
+        minimumInterval: TimeInterval,
+        now: Date
+    ) -> Bool {
+        guard minimumInterval > 0 else { return false }
+        if let last = lastActivityEmissionByKey[key], now.timeIntervalSince(last) < minimumInterval {
+            return true
+        }
+        lastActivityEmissionByKey[key] = now
+        return false
+    }
+
     private func startMeterTicker() {
         guard meterTicker == nil else { return }
         meterTicker = Timer
@@ -1137,11 +1581,13 @@ private final class PlayGridViewModel: ObservableObject {
     }
 
     private func updateLongElapsedLabel(now: Date) {
-        guard let startedAt = longStartedAt else {
-            longElapsedLabel = "00:00.0"
-            return
+        let total: TimeInterval
+        if let startedAt = longStartedAt {
+            total = longElapsedAccumulated + now.timeIntervalSince(startedAt)
+        } else {
+            total = longElapsedAccumulated
         }
-        longElapsedLabel = Self.formatElapsed(now.timeIntervalSince(startedAt))
+        longElapsedLabel = Self.formatElapsed(total)
     }
 
     private static func formatElapsed(_ value: TimeInterval) -> String {
@@ -1484,21 +1930,22 @@ private struct PlayStatusChip: View {
     let title: String
     let value: String
     let tone: PlayChipTone
+    let compact: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .playMono(8, weight: .semibold)
+                .playMono(compact ? 7 : 8, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.56))
             Text(value)
-                .playMono(11, weight: .bold)
+                .playMono(compact ? 10 : 11, weight: .bold)
                 .foregroundStyle(tone.color)
                 .lineLimit(1)
                 .minimumScaleFactor(0.68)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
+        .padding(.horizontal, compact ? 6 : 8)
+        .padding(.vertical, compact ? 5 : 7)
         .background(Color.black)
         .overlay {
             Rectangle()

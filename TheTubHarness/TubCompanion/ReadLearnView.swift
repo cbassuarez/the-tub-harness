@@ -435,6 +435,7 @@ struct ReadLearnView: View {
     @ObservedObject var harnessClient: HarnessClient
     @StateObject private var viewModel: LearnViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.shellLayoutClass) private var shellLayoutClass
 
     init(appState: TubCompanionAppState, harnessClient: HarnessClient) {
         self.appState = appState
@@ -460,8 +461,8 @@ struct ReadLearnView: View {
                 ritualDeck()
             }
             .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .padding(.bottom, 10)
+            .padding(.top, isPhoneLandscapeCompact ? 6 : 10)
+            .padding(.bottom, isPhoneLandscapeCompact ? 0 : 10)
         }
         .preferredColorScheme(.dark)
         .accessibilityIdentifier("learn.root")
@@ -557,7 +558,7 @@ struct ReadLearnView: View {
                             accessibilityHint: "Open the Play tab now"
                         )
                     }
-                    .padding(.bottom, 20)
+                    .padding(.bottom, isPhoneLandscapeCompact ? 0 : 20)
                 }
                 .padding(.vertical, 10)
             }
@@ -570,6 +571,10 @@ struct ReadLearnView: View {
             }
         }
         .accessibilityIdentifier("learn.ritual.deck")
+    }
+
+    private var isPhoneLandscapeCompact: Bool {
+        shellLayoutClass == .phoneLandscapeCompact
     }
 
     private var ritualManualHeader: some View {

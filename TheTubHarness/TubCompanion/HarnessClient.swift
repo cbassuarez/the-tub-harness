@@ -60,6 +60,8 @@ class HarnessClient: NSObject, ObservableObject {
     @Published var lastAudienceAck: String?
     @Published var stageFeedState: StageFeedState = .standby
     @Published var lastOperatorVectorState: OperatorVectorLiveState?
+    @Published var lastOperatorActivity: OperatorActivityEvent?
+    @Published var lastOperatorActivitySnapshot: OperatorActivitySnapshot?
 
     var onVisualUpdate: ((VisualOutput) -> Void)?
     var onStageSnapshot: ((StageSnapshotPayload) -> Void)?
@@ -79,6 +81,8 @@ class HarnessClient: NSObject, ObservableObject {
     private var preferredHost: String = "tub-harness.local"
     private var preferredPort: UInt16 = 9911
     private var autoReconnectEnabled = false
+    private var bonjourBrowser: NWBrowser?
+    private var bonjourDiscoveredEndpoint: NWEndpoint?
 
     override init() {
         super.init()
@@ -95,11 +99,114 @@ class HarnessClient: NSObject, ObservableObject {
             .sink { [weak self] _ in
                 self?.attemptAutoReconnectIfNeeded()
             }
+        startBonjourDiscovery()
     }
 
     deinit {
         stageFeedTicker?.cancel()
         reconnectTicker?.cancel()
+        bonjourBrowser?.cancel()
+    }
+
+    // MARK: - Bonjour Discovery
+
+    func startBonjourDiscovery() {
+        guard bonjourBrowser == nil else { return }
+        let params = NWParameters()
+        params.includePeerToPeer = true
+        let browser = NWBrowser(for: .bonjour(type: "_tubharness._tcp", domain: nil), using: params)
+
+        browser.stateUpdateHandler = { state in
+            switch state {
+            case .failed:
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                    self?.restartBonjourDiscovery()
+                }
+            default:
+                break
+            }
+        }
+
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            guard let self else { return }
+            guard let result = results.first else {
+                self.bonjourDiscoveredEndpoint = nil
+                return
+            }
+            self.bonjourDiscoveredEndpoint = result.endpoint
+            self.connectViaBonjourIfNeeded(result.endpoint)
+        }
+
+        browser.start(queue: queue)
+        bonjourBrowser = browser
+    }
+
+    private func restartBonjourDiscovery() {
+        bonjourBrowser?.cancel()
+        bonjourBrowser = nil
+        startBonjourDiscovery()
+    }
+
+    private func connectViaBonjourIfNeeded(_ endpoint: NWEndpoint) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            switch self.connectionState {
+            case .connected:
+                return
+            default:
+                break
+            }
+            self.connectToEndpoint(endpoint)
+        }
+    }
+
+    func connectToEndpoint(_ endpoint: NWEndpoint) {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            self.connectTimeoutWorkItem?.cancel()
+            self.nwConnection?.cancel()
+            let params = NWParameters.tcp
+            params.includePeerToPeer = true
+            let connection = NWConnection(to: endpoint, using: params)
+            self.nwConnection = connection
+            self.receiveBuffer.removeAll(keepingCapacity: true)
+            self.autoReconnectEnabled = true
+
+            DispatchQueue.main.async {
+                self.connectionState = .connecting
+            }
+
+            connection.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    switch state {
+                    case .ready:
+                        self.cancelConnectTimeout()
+                        self.connectionState = .connected
+                        self.refreshStageFeedState()
+                        self.startReceivingData()
+                        self.sendSessionOpen()
+                        self.queryState()
+                    case .failed(let error):
+                        self.cancelConnectTimeout()
+                        self.connectionState = .error("Connection failed: \(error.localizedDescription)")
+                        self.refreshStageFeedState()
+                    case .waiting:
+                        self.connectionState = .connecting
+                        self.refreshStageFeedState()
+                    case .cancelled:
+                        self.cancelConnectTimeout()
+                        self.connectionState = .disconnected
+                        self.refreshStageFeedState()
+                    default:
+                        break
+                    }
+                }
+            }
+
+            connection.start(queue: self.queue)
+        }
     }
 
     func setSessionId(_ sessionId: String) {
@@ -508,6 +615,17 @@ class HarnessClient: NSObject, ObservableObject {
         sendEnvelope(envelope)
     }
 
+    func sendOperatorActivity(_ event: OperatorActivityEvent) {
+        let resolvedSession = event.sessionId.isEmpty ? activeSessionId : event.sessionId
+        let envelope = AudienceEnvelope(
+            kind: .operatorActivity,
+            sessionId: resolvedSession,
+            timestamp: event.timestamp,
+            operatorActivity: event
+        )
+        sendEnvelope(envelope)
+    }
+
     func queryState(sessionId: String? = nil) {
         let envelope = AudienceEnvelope(
             kind: .queryState,
@@ -695,6 +813,16 @@ class HarnessClient: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.lastOperatorVectorState = liveState
             }
+        case .operatorActivity:
+            guard let activity = envelope.operatorActivity else { return }
+            DispatchQueue.main.async {
+                self.lastOperatorActivity = activity
+            }
+        case .operatorActivitySnapshot:
+            guard let snapshot = envelope.operatorActivitySnapshot else { return }
+            DispatchQueue.main.async {
+                self.lastOperatorActivitySnapshot = snapshot
+            }
         default:
             break
         }
@@ -732,6 +860,8 @@ class HarnessClient: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.connectionState = .disconnected
             self.lastOperatorVectorState = nil
+            self.lastOperatorActivity = nil
+            self.lastOperatorActivitySnapshot = nil
             self.refreshStageFeedState()
         }
     }
@@ -743,7 +873,11 @@ class HarnessClient: NSObject, ObservableObject {
         case .connected, .connecting:
             return
         case .disconnected, .error:
-            connectToHarness(host: preferredHost, port: preferredPort)
+            if let endpoint = bonjourDiscoveredEndpoint {
+                connectToEndpoint(endpoint)
+            } else {
+                connectToHarness(host: preferredHost, port: preferredPort)
+            }
         }
     }
 

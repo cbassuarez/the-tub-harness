@@ -541,7 +541,7 @@ final class ManifestCatalog {
                 defaultProfileId: nil,
                 assets: [
                     BankAsset(id: "s000", path: "Assets/Samples/ultrachunk/S0001.wav", gain: 0.95, category: "general"),
-                    BankAsset(id: "s001", path: "Assets/Samples/ultrachunk/S0002.wav", gain: 0.95, category: "metal"),
+                    BankAsset(id: "s001", path: "Assets/Samples/ultrachunk/S0008.wav", gain: 0.95, category: "metal"),
                 ]
             ),
             "phrases_A": BankManifestEntry(
