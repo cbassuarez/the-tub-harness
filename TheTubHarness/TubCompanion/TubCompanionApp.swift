@@ -864,9 +864,8 @@ private struct ShellCommandNavigator: View {
                 }
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("COMMAND SHELL")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .tracking(1.2)
+                    Text("Command Shell")
+                        .playMono(11, weight: .bold)
                         .foregroundStyle(Color.white.opacity(0.64))
                         .padding(.horizontal, 2)
 
@@ -917,8 +916,7 @@ private struct ShellCommandNavigator: View {
                 onSelect(tab)
             } label: {
                 Text(tabTitle(tab))
-                    .font(.system(size: layoutClass == .phoneLandscapeCompact ? 11 : 12, weight: .bold, design: .monospaced))
-                    .tracking(1.0)
+                    .playMono(layoutClass == .phoneLandscapeCompact ? 11 : 12, weight: .bold)
                     .foregroundStyle(selected ? BrandingColors.glyphGreen : Color.white.opacity(0.76))
                     .frame(
                         maxWidth: .infinity,
@@ -967,8 +965,7 @@ private struct ShellCommandNavigator: View {
             action()
         } label: {
             Text(title)
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .tracking(1.0)
+                .playMono(11, weight: .bold)
                 .foregroundStyle(
                     isEnabled
                     ? (isActive ? accent : Color.white.opacity(0.72))
@@ -1031,9 +1028,8 @@ private struct ShellInspectorPane: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("\(selectedTabTitle) INSPECTOR")
-                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                    .tracking(1.2)
+                Text("\(selectedTabTitle) Inspector")
+                    .playMono(12, weight: .bold)
                     .foregroundStyle(Color.white.opacity(0.72))
 
                 CommandSignalRule(opacity: 0.14)
@@ -1081,9 +1077,8 @@ private struct ShellInspectorPane: View {
                 )
             }
 
-            Text("PRIMARY PAD REMAINS LIVE IN MAIN PANE.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(0.9)
+            Text("Primary Pad Remains Live in Main Pane.")
+                .playSans(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.54))
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1096,9 +1091,8 @@ private struct ShellInspectorPane: View {
             inspectorLine("SESSION", playState.sessionId)
             inspectorLine("CONTRIBUTIONS", "\(playState.contributionCount)")
             inspectorLine("DEBUG OUTPUT", playState.debugOutput, active: playState.debugOutput != "OFF")
-            Text("GRID + LONG STRIP RUN IN PRIMARY PANE.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(0.9)
+            Text("Grid + Long Strip Run in Primary Pane.")
+                .playSans(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.54))
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1110,9 +1104,8 @@ private struct ShellInspectorPane: View {
             inspectorLine("STAGE FEED", learnState.stageFeed, active: learnState.stageFeed == "LIVE")
             inspectorLine("RETURN MODE", learnState.lastReturnMode)
             inspectorLine("RETURN CHAPTER", learnState.lastReturnChapter)
-            Text("ATLAS INDEX STAYS SCANNABLE IN PRIMARY DOC PANE.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(0.9)
+            Text("Atlas Index Stays Scannable in Primary Doc Pane.")
+                .playSans(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.54))
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
@@ -1140,9 +1133,8 @@ private struct ShellInspectorPane: View {
             inspectorLine("STAGE FEED", settingsState.stageFeed, active: settingsState.stageFeed != "STANDBY")
             inspectorLine("SESSION", settingsState.sessionId)
             inspectorLine("LAST LINK", settingsState.lastSuccessfulSessionAt)
-            Text("RUN RECOVERY + COVERT CONTROLS IN PRIMARY SETTINGS PANE.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(0.9)
+            Text("Run Recovery + Covert Controls in Primary Settings Pane.")
+                .playSans(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.54))
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1164,13 +1156,11 @@ private struct ShellInspectorPane: View {
     private func inspectorLine(_ label: String, _ value: String, active: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(label)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.1)
+                .playMono(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.52))
                 .frame(minWidth: 92, alignment: .leading)
-            Text(value.uppercased())
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .tracking(0.9)
+            Text(value)
+                .playMono(11, weight: .bold)
                 .foregroundStyle(active ? BrandingColors.glyphGreen : Color.white.opacity(0.82))
                 .lineLimit(2)
             Spacer(minLength: 0)
@@ -1199,11 +1189,11 @@ private struct PlayTabHostView: View {
                 VStack(spacing: 10) {
                     ProgressView()
                         .tint(.white)
-                    Text("PREPARING LIVE DECK")
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    Text("Preparing Live Deck")
+                        .playMono(12, weight: .bold)
                         .foregroundStyle(.white.opacity(0.85))
-                    Text("SELECT PLAY TO INITIALIZE")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    Text("Select Play to Initialize")
+                        .playSans(10, weight: .medium)
                         .foregroundStyle(.white.opacity(0.55))
                 }
                 .accessibilityIdentifier("play.tab.placeholder")

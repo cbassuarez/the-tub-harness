@@ -15,13 +15,13 @@ struct SpectrumVisualizerView: View {
     var body: some View {
         VStack(spacing: 24) {
             Text("What We Hear")
-                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                .playSans(18, weight: .semibold)
                 .foregroundColor(.white)
             
             // Frequency spectrum
             VStack(spacing: 16) {
                 Text("Frequency Response")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .playSans(11, weight: .semibold)
                     .foregroundColor(.gray)
                 
                 ZStack {
@@ -46,7 +46,7 @@ struct SpectrumVisualizerView: View {
                                     .frame(height: spectrumBars[idx] * 60)
                                 
                                 Text("\(idx * 2)k")
-                                    .font(.system(size: 7, design: .monospaced))
+                                    .playMono(7)
                                     .foregroundColor(.gray)
                             }
                         }
@@ -58,8 +58,8 @@ struct SpectrumVisualizerView: View {
             
             // Onset detection
             VStack(spacing: 16) {
-                Text("Onset Detection (sudden changes)")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                Text("Onset Detection (Sudden Changes)")
+                    .playSans(11, weight: .semibold)
                     .foregroundColor(.gray)
                 
                 ZStack {
@@ -87,7 +87,7 @@ struct SpectrumVisualizerView: View {
                                 }
                                 
                                 Text("Peak \(idx + 1)")
-                                    .font(.system(size: 8, design: .monospaced))
+                                    .playMono(8)
                                     .foregroundColor(.gray)
                             }
                         }
@@ -100,7 +100,7 @@ struct SpectrumVisualizerView: View {
             }
             
             Text("THE TUB analyzes loudness, energy, spectral content, and sudden changes in real time.")
-                .font(.system(size: 10, design: .monospaced))
+                .playSans(10)
                 .foregroundColor(.gray)
                 .multilineTextAlignment(.center)
             

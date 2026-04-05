@@ -15,11 +15,11 @@ struct StateMachineView: View {
     var body: some View {
         VStack(spacing: 24) {
             Text("Audio Queue States")
-                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                .playSans(18, weight: .semibold)
                 .foregroundColor(.white)
             
             Text("Your audio contributions flow through several states before being admitted to the live system.")
-                .font(.system(size: 11, design: .monospaced))
+                .playSans(11)
                 .foregroundColor(.gray)
             
             // State flow diagram
@@ -51,7 +51,7 @@ struct StateMachineView: View {
                                     .fill(Color(UIColor(named: "GlyphGreen") ?? .green))
                                     .frame(width: 6, height: 6)
                                 Text("Admitted")
-                                    .font(.system(size: 9, design: .monospaced))
+                                    .playMono(9)
                                     .foregroundColor(.gray)
                             }
                             
@@ -60,7 +60,7 @@ struct StateMachineView: View {
                                     .fill(Color.gray)
                                     .frame(width: 6, height: 6)
                                 Text("Waiting")
-                                    .font(.system(size: 9, design: .monospaced))
+                                    .playMono(9)
                                     .foregroundColor(.gray)
                             }
                         }
@@ -119,7 +119,7 @@ struct StateBox: View {
                 )
                 .overlay(
                     Text(label)
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .playMono(9, weight: .semibold)
                         .foregroundColor(isActive ? Color(UIColor(named: "GlyphGreen") ?? .green) : .gray)
                 )
                 .frame(height: 40)
@@ -131,7 +131,7 @@ struct Arrow: View {
     var body: some View {
         HStack(spacing: 2) {
             Text("→")
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .playMono(12, weight: .bold)
                 .foregroundColor(Color.white.opacity(0.3))
         }
         .frame(maxWidth: .infinity)
@@ -145,12 +145,12 @@ struct StateDescription: View {
     var body: some View {
         HStack(spacing: 8) {
             Text(state)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .playMono(10, weight: .semibold)
                 .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
                 .frame(width: 70, alignment: .leading)
             
             Text(description)
-                .font(.system(size: 10, design: .monospaced))
+                .playSans(10)
                 .foregroundColor(.gray)
             
             Spacer()

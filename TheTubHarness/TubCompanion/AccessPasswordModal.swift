@@ -36,17 +36,15 @@ struct AccessPasswordModal: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     Text(title.uppercased())
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .tracking(1.3)
+                        .playMono(13, weight: .bold)
                         .foregroundStyle(Color.white.opacity(0.86))
                     Spacer()
 
                     HStack(spacing: 8) {
                         if hasFailedTokenAuth {
                             Button(action: runHack) {
-                                Text("PLUGIN:HACK")
-                                    .font(.system(size: 10, weight: .black, design: .monospaced))
-                                    .tracking(1.2)
+                                Text("Plugin:Hack")
+                                    .playMono(10, weight: .bold)
                                     .foregroundStyle(BrandingColors.aberrationMagenta.opacity(0.95))
                                     .frame(minWidth: 112, minHeight: 44)
                                     .background(Color.black)
@@ -64,9 +62,8 @@ struct AccessPasswordModal: View {
                         }
 
                         Button(action: onCancel) {
-                            Text("CANCEL")
-                                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                .tracking(1.1)
+                            Text("Cancel")
+                                .playMono(11, weight: .bold)
                                 .foregroundStyle(Color.white.opacity(0.82))
                                 .frame(minWidth: 84, minHeight: 44)
                                 .overlay {
@@ -81,8 +78,7 @@ struct AccessPasswordModal: View {
                 }
 
                 Text(subtitle.uppercased())
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(1.0)
+                    .playMono(10, weight: .semibold)
                     .foregroundStyle(BrandingColors.glyphGreen.opacity(0.9))
 
                 tokenRow
@@ -92,8 +88,7 @@ struct AccessPasswordModal: View {
                     }
 
                 Text(statusLine)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(1.0)
+                    .playMono(10, weight: .semibold)
                     .foregroundStyle(deniedPulse ? BrandingColors.warningYellow : Color.white.opacity(0.68))
 
                 TextField(
@@ -154,7 +149,7 @@ struct AccessPasswordModal: View {
             ForEach(0..<tokenLength, id: \.self) { index in
                 let filled = index < sanitizedInput.count
                 Text(filled ? "*" : "·")
-                    .font(.system(size: 20, weight: .bold, design: .monospaced))
+                    .playMono(20, weight: .bold)
                     .foregroundStyle(filled ? BrandingColors.glyphGreen : Color.white.opacity(0.42))
                     .frame(maxWidth: .infinity, minHeight: 44)
                     .overlay {

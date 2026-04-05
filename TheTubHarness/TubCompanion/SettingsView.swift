@@ -1243,8 +1243,7 @@ struct SettingsView: View {
                                 }
 
                                 Text(viewModel.harnessActionStatus)
-                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                    .tracking(0.9)
+                                    .playMono(10, weight: .semibold)
                                     .foregroundStyle(Color.white.opacity(0.66))
                                     .fixedSize(horizontal: false, vertical: true)
                             }
@@ -1269,25 +1268,16 @@ struct SettingsView: View {
 
                             SettingsSection(title: "ABOUT") {
                                 HStack(spacing: 12) {
-                                    Image(systemName: "building.columns.fill")
-                                        .font(.system(size: 18, weight: .semibold))
-                                        .foregroundStyle(BrandingColors.glyphGreen)
-                                        .frame(width: 28, height: 28)
-                                        .background(BrandingColors.glyphGreen.opacity(0.12))
-                                        .overlay {
-                                            RoundedRectangle(cornerRadius: 4)
-                                                .stroke(BrandingColors.glyphGreen.opacity(0.5), lineWidth: 1)
-                                        }
+                                    Image("AppIconDisplay")
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fit)
+                                        .frame(width: 48, height: 48)
+                                        .clipShape(RoundedRectangle(cornerRadius: 11))
 
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text("TUBCORP")
-                                            .font(.system(size: 13, weight: .black, design: .monospaced))
-                                            .tracking(1.2)
-                                            .foregroundStyle(.white)
-                                            .chromaticAberration()
-                                        Text("PUBLIC SPACE GOVERNANCE PLATFORM")
-                                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                                            .tracking(1.1)
+                                        TubCorpWordmark(height: 18)
+                                        Text("Public Space Governance Platform")
+                                            .playSans(9, weight: .semibold)
                                             .foregroundStyle(Color.white.opacity(0.58))
                                     }
 
@@ -1316,8 +1306,7 @@ struct SettingsView: View {
                                 }
 
                                 Text("TubCorp provides end-to-end infrastructure for governed interaction in public spaces. From signal acquisition to behavioral inference to stage projection, every layer is policy-controlled, operator-supervised, and fully auditable.")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .tracking(0.9)
+                                    .playSans(11, weight: .semibold)
                                     .foregroundStyle(Color.white.opacity(0.72))
                                     .fixedSize(horizontal: false, vertical: true)
 
@@ -1410,8 +1399,7 @@ struct SettingsView: View {
                                     }
                                     ForEach(viewModel.debugLines, id: \.self) { line in
                                         Text(line)
-                                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                            .tracking(0.9)
+                                            .playMono(10, weight: .semibold)
                                             .foregroundStyle(Color.white.opacity(0.52))
                                             .fixedSize(horizontal: false, vertical: true)
                                     }
@@ -1479,19 +1467,16 @@ struct SettingsView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("SETTINGS")
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .tracking(1.3)
+            Text("Settings")
+                .playSans(12, weight: .bold)
                 .foregroundStyle(Color.white.opacity(0.56))
 
-            Text("SYSTEM CONTROLS")
-                .font(.system(.title2, design: .monospaced, weight: .black))
-                .tracking(1.2)
+            Text("System Controls")
+                .playSans(22, weight: .black)
                 .foregroundStyle(.white)
 
-            Text("CLEAR STATUS, QUICK ACTIONS, OPTIONAL ADVANCED TOOLS.")
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+            Text("Clear status, quick actions, optional advanced tools.")
+                .playSans(11, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.68))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1502,13 +1487,11 @@ struct SettingsView: View {
     private func statusLine(_ key: String, _ value: String, active: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(key)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.1)
+                .playMono(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.52))
                 .frame(minWidth: 106, alignment: .leading)
             Text(value.uppercased())
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .tracking(0.9)
+                .playMono(11, weight: .bold)
                 .foregroundStyle(active ? BrandingColors.glyphGreen : Color.white.opacity(0.82))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -1580,8 +1563,7 @@ struct SettingsView: View {
             CommandSignalRule(opacity: 0.11)
             HStack(spacing: 8) {
                 Text("BUILD SIGNATURE \(String((appState.sessionId ?? "none").prefix(8)).uppercased())")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .tracking(1.0)
+                    .playMono(9, weight: .semibold)
                     .foregroundStyle(Color.white.opacity(0.36))
                     .lineLimit(1)
                 Spacer(minLength: 8)
@@ -1611,18 +1593,16 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("COVERT POWER LAYER")
-                        .font(.system(size: 14, weight: .black, design: .monospaced))
-                        .tracking(1.3)
+                    Text("Covert Power Layer")
+                        .playSans(14, weight: .black)
                         .foregroundStyle(.white)
                         .chromaticAberration()
                     Spacer()
                     Button {
                         viewModel.dismissPowerLayerModal()
                     } label: {
-                        Text("CLOSE")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .tracking(1.0)
+                        Text("Close")
+                            .playSans(11, weight: .bold)
                             .foregroundStyle(Color.white.opacity(0.85))
                             .frame(minWidth: 84, minHeight: 44)
                             .overlay {
@@ -1709,8 +1689,7 @@ struct SettingsView: View {
                 )
 
                 Text(viewModel.vectorAckDetail)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(0.9)
+                    .playMono(10, weight: .semibold)
                     .foregroundStyle(Color.white.opacity(0.68))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1739,8 +1718,7 @@ private struct SettingsSection<Content: View>: View {
                     .fill(BrandingColors.glyphGreen.opacity(0.86))
                     .frame(width: 2, height: 12)
                 Text(title.uppercased())
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .tracking(1.2)
+                    .playSans(11, weight: .bold)
                     .foregroundStyle(Color.white.opacity(0.9))
             }
             CommandSignalRule(opacity: 0.14)
@@ -1776,13 +1754,11 @@ private struct CommandVectorRail: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(title)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(1.0)
+                    .playMono(10, weight: .semibold)
                     .foregroundStyle(Color.white.opacity(0.8))
                 Spacer()
                 Text(Self.signed(value))
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .tracking(0.9)
+                    .playMono(11, weight: .bold)
                     .foregroundStyle(BrandingColors.aberrationCyan)
             }
 
@@ -1791,7 +1767,7 @@ private struct CommandVectorRail: View {
                     onChange(max(-1, value - 0.05))
                 } label: {
                     Text("-")
-                        .font(.system(size: 16, weight: .bold, design: .monospaced))
+                        .playSans(16, weight: .bold)
                         .foregroundStyle(Color.white.opacity(0.88))
                         .frame(width: 44, height: 44)
                         .overlay {
@@ -1859,7 +1835,7 @@ private struct CommandVectorRail: View {
                     onChange(min(1, value + 0.05))
                 } label: {
                     Text("+")
-                        .font(.system(size: 16, weight: .bold, design: .monospaced))
+                        .playSans(16, weight: .bold)
                         .foregroundStyle(Color.white.opacity(0.88))
                         .frame(width: 44, height: 44)
                         .overlay {
@@ -1899,17 +1875,15 @@ private struct SettingsPowerUnlockOverlay: View {
 
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Text("PRIVILEGED MODULE")
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .tracking(1.2)
+                    Text("Privileged Module")
+                        .playSans(12, weight: .bold)
                         .foregroundStyle(Color.white.opacity(0.72))
                     Spacer()
                     Button {
                         onCancel()
                     } label: {
-                        Text("ABORT")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .tracking(1.1)
+                        Text("Abort")
+                            .playSans(11, weight: .bold)
                             .foregroundStyle(Color.white.opacity(0.82))
                             .frame(minWidth: 72, minHeight: 44)
                             .overlay {
@@ -1926,15 +1900,13 @@ private struct SettingsPowerUnlockOverlay: View {
 
                 if case .grantedAnimating = viewModel.state {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("ACCESS GRANTED")
-                            .font(.system(size: 34, weight: .black, design: .monospaced))
-                            .tracking(2.0)
+                        Text("Access Granted")
+                            .playSans(34, weight: .black)
                             .foregroundStyle(.white)
                             .chromaticAberration()
                             .scaleEffect(reduceMotion ? 1.0 : 1.04)
-                        Text("COVERT CONTROLS EXPOSED. OPERATOR TRACE MINIMIZED.")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .tracking(1.0)
+                        Text("Covert controls exposed. Operator trace minimized.")
+                            .playSans(11, weight: .semibold)
                             .foregroundStyle(BrandingColors.glyphGreen.opacity(0.9))
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -1987,21 +1959,18 @@ private struct SettingsPowerUnlockOverlay: View {
 
     private var accessRequiredBody: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("ACCESS REQUIRED")
-                .font(.system(size: 28, weight: .black, design: .monospaced))
-                .tracking(2.0)
+            Text("Access Required")
+                .playSans(28, weight: .black)
                 .foregroundStyle(.white)
                 .chromaticAberration()
                 .accessibilityIdentifier("settings.unlock.required.title")
 
             Text("POWER LAYER SEALED.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+                .playMono(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.74))
 
-            Text("PRESS ENTER TO AUTHENTICATE ACCESS.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+            Text("Press enter to authenticate access.")
+                .playSans(10, weight: .semibold)
                 .foregroundStyle(BrandingColors.glyphGreen.opacity(0.88))
 
             CommandRailButton(
@@ -2022,15 +1991,13 @@ private struct SettingsPowerUnlockOverlay: View {
 
     private var challengeBody: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("TRACE ACTIVE")
-                .font(.system(size: 28, weight: .black, design: .monospaced))
-                .tracking(2.0)
+            Text("Trace Active")
+                .playSans(28, weight: .black)
                 .foregroundStyle(.white)
                 .chromaticAberration()
 
-            Text("ALIGN TARGET TOKENS TO MAINTAIN ACCESS.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+            Text("Align target tokens to maintain access.")
+                .playSans(10, weight: .semibold)
                 .foregroundStyle(BrandingColors.glyphGreen.opacity(0.88))
 
             HStack(spacing: 10) {
@@ -2041,8 +2008,7 @@ private struct SettingsPowerUnlockOverlay: View {
             }
 
             Text(viewModel.statusLine)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+                .playMono(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.7))
 
             if isFailureState {
@@ -2060,8 +2026,7 @@ private struct SettingsPowerUnlockOverlay: View {
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(Array(viewModel.commandLog.enumerated()), id: \.offset) { _, line in
                     Text(line)
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .tracking(0.9)
+                        .playMono(10, weight: .semibold)
                         .foregroundStyle(Color.white.opacity(0.56))
                         .lineLimit(1)
                 }
@@ -2093,13 +2058,11 @@ private struct SettingsPowerUnlockOverlay: View {
     private var interruptionPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("SYSTEM COUNTERMEASURE DETECTED.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+                .playMono(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.74))
 
-            Text("TAP PATCH FAST UNTIL EFFORT CROSSES THE MARKER BEFORE TIME HITS 0.")
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .tracking(1.0)
+            Text("Tap patch fast until effort crosses the marker before time hits 0.")
+                .playSans(10, weight: .bold)
                 .foregroundStyle(BrandingColors.warningYellow)
 
             VStack(alignment: .leading, spacing: 6) {
@@ -2124,8 +2087,7 @@ private struct SettingsPowerUnlockOverlay: View {
                     Text("THRESHOLD \(Int((viewModel.qteThreshold * 100).rounded()))%")
                     Text("TIME \(String(format: "%.1f", viewModel.qteRemaining))s")
                 }
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .tracking(1.0)
+                .playMono(10, weight: .bold)
                 .foregroundStyle(BrandingColors.warningYellow)
             }
         }
@@ -2135,13 +2097,11 @@ private struct SettingsPowerUnlockOverlay: View {
     private var transitionPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(viewModel.transitionTitle)
-                .font(.system(size: 16, weight: .black, design: .monospaced))
-                .tracking(1.5)
+                .playSans(16, weight: .black)
                 .foregroundStyle(.white)
                 .chromaticAberration()
             Text(viewModel.transitionSubtitle)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+                .playMono(10, weight: .semibold)
                 .foregroundStyle(BrandingColors.warningYellow)
 
             Rectangle()
@@ -2243,17 +2203,15 @@ private struct SettingsPowerUnlockOverlay: View {
 
     private var failurePanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("TRACE WIPED")
-                .font(.system(size: 20, weight: .black, design: .monospaced))
-                .tracking(1.8)
+            Text("Trace Wiped")
+                .playSans(20, weight: .black)
                 .foregroundStyle(BrandingColors.warningYellow)
                 .offset(x: failureGlitchPhase ? -5 : 4)
                 .opacity(failureGlitchPhase ? 0.82 : 1.0)
                 .chromaticAberration()
 
             Text("COUNTER-FORENSICS TRIGGERED. WAIT FOR RETRY WINDOW.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+                .playMono(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.66))
         }
     }
@@ -2279,8 +2237,7 @@ private struct SettingsPowerUnlockOverlay: View {
                             viewModel.matchTapped()
                         } label: {
                             Text(token)
-                                .font(.system(size: isActive ? 15 : 13, weight: .bold, design: .monospaced))
-                                .tracking(1.0)
+                                .playMono(isActive ? 15 : 13, weight: .bold)
                                 .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(0.56))
                                 .frame(maxWidth: .infinity, minHeight: 44)
                                 .overlay {
@@ -2301,12 +2258,10 @@ private struct SettingsPowerUnlockOverlay: View {
     private func chip(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .tracking(1.1)
+                .playMono(9, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.56))
             Text(value)
-                .font(.system(size: 13, weight: .bold, design: .monospaced))
-                .tracking(1.0)
+                .playMono(13, weight: .bold)
                 .foregroundStyle(.white)
         }
         .padding(.horizontal, 10)

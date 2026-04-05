@@ -487,9 +487,8 @@ struct SteerView: View {
     private var compactHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("STEER")
-                    .font(.system(size: 22, weight: .bold, design: .monospaced))
-                    .tracking(1.2)
+                Text("Steer")
+                    .playSans(22, weight: .bold)
                     .foregroundStyle(.white)
                     .chromaticAberration()
                     .accessibilityIdentifier("steer.header.title")
@@ -501,9 +500,8 @@ struct SteerView: View {
                     id: "steer.chip.link"
                 )
             }
-            Text("VECTOR SYSTEM PAD / LIVE OPERATOR MODE")
-                .font(.system(.caption2, design: .monospaced, weight: .semibold))
-                .tracking(1.0)
+            Text("Vector System Pad / Live Operator Mode")
+                .playSans(11, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.58))
         }
         .padding(.vertical, 4)
@@ -549,8 +547,7 @@ struct SteerView: View {
                 Text("ACTIVE")
                 Text(viewModel.activeDescriptor?.label ?? "NONE")
             }
-            .font(.system(.caption2, design: .monospaced, weight: .semibold))
-            .tracking(1)
+            .playMono(11, weight: .semibold)
             .foregroundStyle(BrandingColors.glyphGreen.opacity(0.92))
             .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
             .padding(.horizontal, 8)
@@ -567,9 +564,8 @@ struct SteerView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("STEER")
-                    .font(.system(.title, design: .monospaced, weight: .bold))
-                    .tracking(1.2)
+                Text("Steer")
+                    .playSans(28, weight: .bold)
                     .foregroundStyle(.white)
                     .chromaticAberration()
                     .accessibilityIdentifier("steer.header.title")
@@ -582,9 +578,8 @@ struct SteerView: View {
                 )
             }
 
-            Text("VECTOR THE SYSTEM / HOLD TO BIAS / CHOOSE WITH INTENT")
-                .font(.system(.caption2, design: .monospaced, weight: .semibold))
-                .tracking(1.15)
+            Text("Vector the System / Hold to Bias / Choose With Intent")
+                .playSans(11, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.6))
 
             HStack(spacing: 10) {
@@ -614,13 +609,13 @@ struct SteerView: View {
                     Spacer()
                     Text("THOUGHT \(visual.thought.uppercased())")
                 }
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .playMono(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.68))
             }
 
             if let ack = harnessClient.lastAudienceAck, !ack.isEmpty {
                 Text(ack.uppercased())
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .playMono(10, weight: .semibold)
                     .foregroundStyle(BrandingColors.glyphGreen.opacity(0.9))
                     .lineLimit(2)
             }
@@ -667,9 +662,8 @@ struct SteerView: View {
                     let isActive = descriptor.id == viewModel.padState.activeDescriptorId
 
                     Text(descriptor.label)
-                        .font(.system(size: isActive ? 12 : 11, weight: .bold, design: .monospaced))
+                        .playMono(isActive ? 12 : 11, weight: .bold)
                         .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(0.72))
-                        .tracking(1)
                         .position(x: x, y: y)
                 }
 
@@ -716,8 +710,7 @@ struct SteerView: View {
         VStack(spacing: 18) {
             if let pair = currentComparePair {
                 Text("COMPARE \(viewModel.compareIndex + 1)/\(max(1, viewModel.comparePairs.count))")
-                    .font(.system(.caption, design: .monospaced, weight: .semibold))
-                    .tracking(1.1)
+                    .playMono(12, weight: .semibold)
                     .foregroundStyle(Color.white.opacity(0.65))
 
                 HStack(spacing: 12) {
@@ -733,13 +726,12 @@ struct SteerView: View {
                     )
                 }
 
-                Text("SWIPE LEFT/RIGHT OR TAP TO ADVANCE")
-                    .font(.system(.caption2, design: .monospaced, weight: .semibold))
+                Text("Swipe Left/Right or Tap to Advance")
+                    .playSans(11, weight: .semibold)
                     .foregroundStyle(Color.white.opacity(0.56))
-                    .tracking(1.15)
             } else {
-                Text("NO COMPARE PAIRS AVAILABLE")
-                    .font(.system(.headline, design: .monospaced, weight: .bold))
+                Text("No Compare Pairs Available")
+                    .playSans(17, weight: .bold)
                     .foregroundStyle(.white)
             }
         }
@@ -783,8 +775,7 @@ struct SteerView: View {
                 Text("ACTIVE")
                 Text(viewModel.activeDescriptor?.label ?? "NONE")
             }
-            .font(.system(.caption2, design: .monospaced, weight: .semibold))
-            .tracking(1)
+            .playMono(11, weight: .semibold)
             .foregroundStyle(BrandingColors.glyphGreen.opacity(0.92))
             .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
             .padding(.horizontal, 10)
@@ -807,9 +798,8 @@ struct SteerView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("STEER // OPERATOR BRIEF")
-                        .font(.system(size: 14, weight: .bold, design: .monospaced))
-                        .tracking(1.1)
+                    Text("Steer // Operator Brief")
+                        .playSans(14, weight: .bold)
                         .foregroundStyle(.white)
                     Spacer()
                     Button {
@@ -834,14 +824,13 @@ struct SteerView: View {
                     .fill(Color.white.opacity(0.2))
                     .frame(height: 1)
 
-                Text("1. DRAG THE DOT TO BIAS LIVE MODEL PARAMETER WEIGHTS.")
-                Text("2. HOLD TO REINFORCE, RELEASE TO COMMIT.")
-                Text("3. USE LESS / MORE FOR QUICK INTENSITY NUDGES.")
-                Text("4. USER NOTE: PASSWORD – THETUB")
+                Text("1. Drag the dot to bias live model parameter weights.")
+                Text("2. Hold to reinforce, release to commit.")
+                Text("3. Use Less / More for quick intensity nudges.")
+                Text("4. User note: password – thetub")
                     .foregroundStyle(BrandingColors.glyphGreen)
             }
-            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-            .tracking(1.0)
+            .playSans(11, weight: .semibold)
             .foregroundStyle(Color.white.opacity(0.88))
             .padding(.horizontal, 14)
             .padding(.vertical, 14)
@@ -892,8 +881,7 @@ struct SteerView: View {
             viewModel.chooseCompare(side)
         } label: {
             Text(label)
-                .font(.system(size: 18, weight: .bold, design: .monospaced))
-                .tracking(1.1)
+                .playMono(18, weight: .bold)
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity, minHeight: 88)
                 .overlay {
@@ -910,8 +898,7 @@ struct SteerView: View {
     private func commandButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(.caption, design: .monospaced, weight: .bold))
-                .tracking(1.1)
+                .playSans(12, weight: .bold)
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity, minHeight: isPhoneLandscapeCompact ? 40 : 46)
                 .overlay {
@@ -931,9 +918,8 @@ struct SteerView: View {
                 Image(systemName: "arrow.up.right")
                     .font(.system(size: isPhoneLandscapeCompact ? 10 : 12, weight: .bold))
                     .foregroundStyle(BrandingColors.glyphGreen.opacity(0.85))
-                Text("OPS LOG")
-                    .font(.system(.caption, design: .monospaced, weight: .bold))
-                    .tracking(1.1)
+                Text("Ops Log")
+                    .playSans(12, weight: .bold)
                     .foregroundStyle(.white)
             }
             .frame(maxWidth: .infinity, minHeight: isPhoneLandscapeCompact ? 40 : 46)
@@ -952,8 +938,7 @@ struct SteerView: View {
             Text(value)
                 .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(0.76))
         }
-        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-        .tracking(1)
+        .playMono(10, weight: .semibold)
         .padding(.horizontal, isPhoneLandscapeCompact ? 6 : 8)
         .frame(minHeight: isPhoneLandscapeCompact ? 24 : 28)
         .overlay {
@@ -1373,21 +1358,18 @@ struct SteerAccessOverlay: View {
 
     private var accessLockedBody: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("ACCESS REQUIRED")
-                .font(.system(size: 30, weight: .black, design: .monospaced))
-                .tracking(2.0)
+            Text("Access Required")
+                .playSans(30, weight: .bold)
                 .foregroundStyle(.white)
                 .chromaticAberration()
                 .accessibilityIdentifier("steer.access.required.title")
 
-            Text("STEER BUS IS SEALED.")
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .tracking(1.2)
+            Text("Steer bus is sealed.")
+                .playSans(12, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.72))
 
-            Text("PRESS ENTER TO AUTHENTICATE ACCESS.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+            Text("Press Enter to authenticate access.")
+                .playSans(10, weight: .semibold)
                 .foregroundStyle(BrandingColors.glyphGreen.opacity(0.88))
 
             CommandRailButton(
@@ -1409,21 +1391,18 @@ struct SteerAccessOverlay: View {
 
     private var accessChallengeBody: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("TRACE ACTIVE")
-                .font(.system(size: 28, weight: .black, design: .monospaced))
-                .tracking(2.0)
+            Text("Trace Active")
+                .playSans(28, weight: .bold)
                 .foregroundStyle(.white)
                 .chromaticAberration()
                 .accessibilityIdentifier("steer.access.challenge.title")
 
-            Text("ALIGN TARGET TOKEN TO COMPLETE BREACH.")
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .tracking(1.2)
+            Text("Align target token to complete breach.")
+                .playSans(12, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.72))
 
-            Text("LATE-HIT GRACE ENABLED TO COMPENSATE DISPLAY AND TOUCH LATENCY.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+            Text("Late-hit grace enabled to compensate display and touch latency.")
+                .playSans(10, weight: .semibold)
                 .foregroundStyle(BrandingColors.glyphGreen.opacity(0.88))
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -1518,21 +1497,18 @@ struct SteerAccessOverlay: View {
     private var failurePanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("TRACE COLLAPSED")
-                .font(.system(size: 18, weight: .black, design: .monospaced))
-                .tracking(1.6)
+                .playMono(18, weight: .bold)
                 .foregroundStyle(BrandingColors.warningYellow)
                 .offset(x: failureGlitchPhase ? -4 : 3)
                 .opacity(failureGlitchPhase ? 0.88 : 1.0)
                 .chromaticAberration()
 
             Text("SIGNAL DESYNC. MEMORY WIPE IN PROGRESS.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+                .playMono(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.7))
 
-            Text("RETRY WHEN LOCKOUT CLEARS.")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(1.0)
+            Text("Retry when lockout clears.")
+                .playSans(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.56))
         }
         .padding(.vertical, 4)
@@ -1593,8 +1569,7 @@ struct SteerAccessOverlay: View {
             viewModel.matchTapped()
         } label: {
             Text(token)
-                .font(.system(size: isActive ? 16 : 13, weight: .bold, design: .monospaced))
-                .tracking(1.1)
+                .playMono(isActive ? 16 : 13, weight: .bold)
                 .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(0.5))
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .background(Color.black.opacity(0.001))
@@ -1620,8 +1595,7 @@ struct SteerAccessOverlay: View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(Array(viewModel.commandLog.enumerated()), id: \.offset) { _, line in
                 Text(line)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .tracking(0.9)
+                    .playMono(10, weight: .medium)
                     .foregroundStyle(Color.white.opacity(0.56))
                     .lineLimit(1)
             }
@@ -1634,11 +1608,10 @@ struct SteerAccessOverlay: View {
     private func accessChip(label: String, value: String, isActive: Bool) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label)
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .tracking(1.2)
+                .playMono(9, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.56))
             Text(value.uppercased())
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .playMono(10, weight: .bold)
                 .lineLimit(1)
                 .minimumScaleFactor(0.68)
                 .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(0.76))
@@ -1659,12 +1632,10 @@ struct SteerAccessOverlay: View {
     private func metricToken(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .tracking(1.2)
+                .playMono(9, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.56))
             Text(value)
-                .font(.system(size: 14, weight: .bold, design: .monospaced))
-                .tracking(1.1)
+                .playMono(14, weight: .bold)
                 .foregroundStyle(.white)
         }
         .padding(.horizontal, 10)
@@ -1706,9 +1677,8 @@ private struct SteerAccessGrantedView: View {
                     Image(systemName: unlockProgress > 0.45 ? "lock.open.fill" : "lock.fill")
                         .font(.system(size: 18, weight: .bold))
                         .foregroundStyle(BrandingColors.aberrationCyan)
-                    Text("STEER SECURITY ENVELOPE")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .tracking(1.3)
+                    Text("Steer Security Envelope")
+                        .playSans(12, weight: .semibold)
                         .foregroundStyle(Color.white.opacity(0.74))
                     Spacer()
                 }
@@ -1718,16 +1688,14 @@ private struct SteerAccessGrantedView: View {
                     Text("ACCESS GRANTED")
                     Text("MAINFRAME BREACH CONFIRMED")
                 }
-                .font(.system(size: 28, weight: .black, design: .monospaced))
-                .tracking(2.4)
+                .playMono(28, weight: .bold)
                 .foregroundStyle(.white)
                 .chromaticAberration()
                 .scaleEffect(reduceMotion ? 1.0 : (pulseOn ? 1.015 : 0.975))
                 .opacity(0.78 + (unlockProgress * 0.22))
 
-                Text("UH OH! HOW'D YOU FIND THIS SCREEN? ...")
-                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                    .tracking(1.5)
+                Text("Uh Oh! How'd You Find This Screen? ...")
+                    .playSans(12, weight: .bold)
                     .foregroundStyle(Color(red: 0.95, green: 0.22, blue: 0.22).opacity(0.92))
                     .opacity(0.35 + unlockProgress * 0.65)
 
@@ -1739,8 +1707,7 @@ private struct SteerAccessGrantedView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(grantedLogLines.enumerated()), id: \.offset) { index, line in
                         Text(line)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .tracking(1.0)
+                            .playMono(10, weight: .semibold)
                             .foregroundStyle(Color.white.opacity(index < logRevealCount ? 0.76 : 0.22))
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }

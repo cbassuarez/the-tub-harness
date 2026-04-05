@@ -25,19 +25,19 @@ struct SynthKeyboardView: View {
         VStack(spacing: 12) {
             // Instrument selector
             HStack(spacing: 8) {
-                Text("INSTRUMENT")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                Text("Instrument")
+                    .playMono(10, weight: .bold)
                     .foregroundColor(.gray)
                 
                 Picker("Instrument", selection: $selectedInstrument) {
                     ForEach(instruments, id: \.self) { inst in
-                        Text(inst.uppercased())
-                            .font(.system(size: 11, design: .monospaced))
+                        Text(inst)
+                            .playMono(11)
                             .tag(inst)
                     }
                 }
                 .pickerStyle(.segmented)
-                .font(.system(size: 10, design: .monospaced))
+                .playMono(10)
             }
             .padding(8)
             .background(Color.white.opacity(0.05))
@@ -46,11 +46,11 @@ struct SynthKeyboardView: View {
             // Octave display
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("OCTAVE")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    Text("Octave")
+                        .playMono(10, weight: .bold)
                         .foregroundColor(.gray)
                     Text("C\(currentOctave) – B\(currentOctave)")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .playMono(12, weight: .semibold)
                         .foregroundColor(.white)
                 }
                 
@@ -136,7 +136,7 @@ struct SynthKeyboardView: View {
             
             // Help text
             Text("Tap keys to play notes. Long-press for sustain.")
-                .font(.system(size: 9, design: .monospaced))
+                .playSans(9)
                 .foregroundColor(.gray.opacity(0.8))
                 .lineLimit(2)
         }
@@ -189,7 +189,7 @@ struct KeyButton: View {
     var body: some View {
         VStack {
             Text(note)
-                .font(.system(size: isBlack ? 9 : 11, weight: .semibold, design: .monospaced))
+                .playMono(isBlack ? 9 : 11, weight: .semibold)
                 .foregroundColor(isBlack ? .white : .black)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

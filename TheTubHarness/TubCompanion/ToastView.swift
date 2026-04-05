@@ -53,7 +53,7 @@ struct ToastView: View {
                 icon
                 
                 Text(toast.message)
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .playSans(11, weight: .semibold)
                     .foregroundColor(foregroundColor)
                     .lineLimit(2)
                 

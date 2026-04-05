@@ -141,8 +141,7 @@ struct OperatorActivityLogModal: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text(title)
-                    .font(.system(size: 14, weight: .bold, design: .monospaced))
-                    .tracking(1.1)
+                    .playSans(14, weight: .bold)
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
@@ -182,9 +181,8 @@ struct OperatorActivityLogModal: View {
                 Button {
                     includeSelf.toggle()
                 } label: {
-                    Text(effectiveIncludeSelf ? "ALL" : "OTHERS")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .tracking(1.0)
+                    Text(effectiveIncludeSelf ? "All" : "Others")
+                        .playSans(10, weight: .semibold)
                         .foregroundStyle(
                             effectiveIncludeSelf
                             ? BrandingColors.glyphGreen
@@ -209,8 +207,7 @@ struct OperatorActivityLogModal: View {
 
             if !isRelayConnected {
                 Text("RELAY OFFLINE. LOCAL-ONLY ACTIVITY.")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(1.0)
+                    .playMono(10, weight: .semibold)
                     .foregroundStyle(BrandingColors.warningYellow.opacity(0.94))
             }
         }
@@ -218,30 +215,28 @@ struct OperatorActivityLogModal: View {
 
     private var activeNowSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("ACTIVE NOW")
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .tracking(1.0)
+            Text("Active Now")
+                .playSans(11, weight: .bold)
                 .foregroundStyle(BrandingColors.glyphGreen.opacity(0.92))
 
             if activeSections.isEmpty {
                 Text("NO ACTIVE OPERATORS IN WINDOW.")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(0.9)
+                    .playMono(10, weight: .semibold)
                     .foregroundStyle(Color.white.opacity(0.58))
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(activeSections.enumerated()), id: \.offset) { _, section in
                         HStack(spacing: 8) {
                             Text(section.operatorName)
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .playMono(10, weight: .bold)
                                 .foregroundStyle(BrandingColors.glyphGreen.opacity(0.96))
                             Text(actionLine(for: section.latestEvent))
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .playMono(10, weight: .semibold)
                                 .foregroundStyle(Color.white.opacity(0.8))
                                 .lineLimit(1)
                             Spacer(minLength: 6)
                             Text("\(section.eventCount)x")
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .playMono(10, weight: .bold)
                                 .foregroundStyle(Color.white.opacity(0.56))
                         }
                     }
@@ -252,15 +247,13 @@ struct OperatorActivityLogModal: View {
 
     private var recentEventsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("RECENT EVENTS")
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .tracking(1.0)
+            Text("Recent Events")
+                .playSans(11, weight: .bold)
                 .foregroundStyle(BrandingColors.glyphGreen.opacity(0.92))
 
             if recentEvents.isEmpty {
                 Text("NO EVENTS YET.")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(0.9)
+                    .playMono(10, weight: .semibold)
                     .foregroundStyle(Color.white.opacity(0.58))
             } else {
                 ScrollView {
@@ -268,14 +261,14 @@ struct OperatorActivityLogModal: View {
                         ForEach(Array(recentEvents.enumerated()), id: \.offset) { _, event in
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Text(relativeTimeLabel(for: event.timestamp))
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .playMono(10, weight: .bold)
                                     .foregroundStyle(Color.white.opacity(0.54))
                                     .frame(width: 36, alignment: .leading)
                                 Text(appState.operatorDisplayName(for: event.sessionId))
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .playMono(10, weight: .bold)
                                     .foregroundStyle(BrandingColors.glyphGreen.opacity(0.95))
                                 Text(actionLine(for: event))
-                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                    .playMono(10, weight: .semibold)
                                     .foregroundStyle(Color.white.opacity(0.8))
                                     .lineLimit(2)
                                 Spacer(minLength: 0)
@@ -352,15 +345,15 @@ private struct OperatorActivityStatusChip: View {
     var body: some View {
         HStack(spacing: 5) {
             Text(title)
+                .playSans(9, weight: .semibold)
             Text(value)
+                .playMono(9, weight: .semibold)
                 .foregroundStyle(
                     isActive
                     ? BrandingColors.glyphGreen.opacity(0.96)
                     : BrandingColors.warningYellow.opacity(0.92)
                 )
         }
-        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-        .tracking(0.9)
         .padding(.horizontal, 6)
         .frame(minHeight: 26)
         .overlay {

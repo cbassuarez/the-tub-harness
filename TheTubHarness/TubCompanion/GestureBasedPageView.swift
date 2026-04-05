@@ -24,11 +24,11 @@ struct GestureBasedPageView<Content: View>: View {
                 // Section title (minimal, fades in/out)
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("LEARN")
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        Text("Learn")
+                            .playSans(12, weight: .bold)
                             .foregroundColor(.gray)
-                        Text(pages[currentIndex].replacingOccurrences(of: "-", with: " ").uppercased())
-                            .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                        Text(pages[currentIndex].replacingOccurrences(of: "-", with: " ").capitalized)
+                            .playSans(14, weight: .semibold)
                             .foregroundColor(.white)
                     }
                     Spacer()
@@ -103,7 +103,7 @@ struct GestureBasedPageView<Content: View>: View {
             VStack {
                 Spacer()
                 Text("Section \(idx)")
-                    .font(.system(size: 24, weight: .bold, design: .monospaced))
+                    .playSans(24, weight: .bold)
                     .foregroundColor(.white)
                 Spacer()
             }

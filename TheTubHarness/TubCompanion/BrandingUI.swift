@@ -36,29 +36,84 @@ enum BrandingTypography {
         static let labelSmall: CGFloat = 10
         static let labelTiny: CGFloat = 9
     }
-    
-    enum Weight {
-        static let display: Font.Weight = .bold
-        static let heading: Font.Weight = .semibold
-        static let body: Font.Weight = .regular
-        static let label: Font.Weight = .medium
+
+    // Public Sans — UI voice (titles, buttons, labels, instructions)
+    static func displayFont(size: CGFloat = Size.displayMedium) -> Font {
+        PublicSansFont.font(.bold, size: size)
     }
-    
-    // Convenience helpers
-    static func displayFont(size: CGFloat = Size.displayMedium, weight: Font.Weight = .bold) -> Font {
+    static func headingFont(size: CGFloat = Size.headingMedium) -> Font {
+        PublicSansFont.font(.bold, size: size)
+    }
+    static func subheadingFont(size: CGFloat = Size.bodyLarge) -> Font {
+        PublicSansFont.font(.semibold, size: size)
+    }
+    static func buttonFont(size: CGFloat = Size.bodySmall) -> Font {
+        PublicSansFont.font(.semibold, size: size)
+    }
+    static func captionFont(size: CGFloat = Size.labelSmall) -> Font {
+        PublicSansFont.font(.medium, size: size)
+    }
+    static func bodyFont(size: CGFloat = Size.bodySmall) -> Font {
+        PublicSansFont.font(.regular, size: size)
+    }
+
+    // IBM Plex Mono — Data voice (values, statuses, timers, events)
+    static func readoutLargeFont(size: CGFloat = Size.headingLarge) -> Font {
         IBMPlexMonoFont.font(.bold, size: size)
     }
-    
-    static func headingFont(size: CGFloat = Size.headingMedium, weight: Font.Weight = .semibold) -> Font {
+    static func readoutFont(size: CGFloat = Size.bodySmall) -> Font {
         IBMPlexMonoFont.font(.semibold, size: size)
     }
-    
-    static func bodyFont(size: CGFloat = Size.bodyLarge, weight: Font.Weight = .regular) -> Font {
+    static func dataFont(size: CGFloat = Size.labelSmall) -> Font {
+        IBMPlexMonoFont.font(.medium, size: size)
+    }
+    static func consoleFont(size: CGFloat = Size.labelSmall) -> Font {
         IBMPlexMonoFont.font(.regular, size: size)
     }
-    
-    static func labelFont(size: CGFloat = Size.labelSmall, weight: Font.Weight = .medium) -> Font {
-        IBMPlexMonoFont.font(.medium, size: size)
+}
+
+// MARK: - Shared Font View Extensions
+
+extension View {
+    /// IBM Plex Mono — data voice. UPPERCASE, wide tracking.
+    func playMono(_ size: CGFloat, weight: Font.Weight = .regular) -> some View {
+        self.font(IBMPlexMonoFont.font(weight.toPlexVariant, size: size))
+            .textCase(.uppercase)
+            .tracking(1.1)
+    }
+
+    /// Public Sans — UI voice. Mixed case, tighter tracking.
+    func playSans(_ size: CGFloat, weight: Font.Weight = .regular) -> some View {
+        let variant: PublicSansFont.Variant = {
+            switch weight {
+            case .bold, .black, .heavy: return .bold
+            case .semibold:             return .semibold
+            case .medium:               return .medium
+            default:                    return .regular
+            }
+        }()
+        let tracking: CGFloat = {
+            switch weight {
+            case .bold, .black, .heavy: return size >= 18 ? 0.8 : 0.9
+            case .semibold:             return 0.7
+            case .medium:               return 0.5
+            default:                    return 0.3
+            }
+        }()
+        return self.font(PublicSansFont.font(variant, size: size))
+            .tracking(tracking)
+    }
+}
+
+extension Font.Weight {
+    var toPlexVariant: IBMPlexMonoFont.Variant {
+        switch self {
+        case .bold, .black, .heavy: return .bold
+        case .semibold:             return .semibold
+        case .medium:               return .medium
+        case .light, .thin, .ultraLight: return .light
+        default:                    return .regular
+        }
     }
 }
 
@@ -114,23 +169,23 @@ struct HeaderView: View {
     let title: String
     let subtitle: String?
     let trailing: String?
-    
+
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .playSans(12, weight: .bold)
                     .foregroundColor(.gray)
                 if let subtitle = subtitle {
                     Text(subtitle)
-                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                        .playSans(14, weight: .semibold)
                         .foregroundColor(.white)
                 }
             }
             Spacer()
             if let trailing = trailing {
                 Text(trailing)
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .playMono(10, weight: .bold)
                     .foregroundColor(BrandingColors.glyphGreen)
             }
         }
@@ -158,11 +213,11 @@ struct PrimaryButton: View {
     let label: String
     let action: () -> Void
     let isDisabled: Bool
-    
+
     var body: some View {
         Button(action: action) {
             Text(label)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .playSans(12, weight: .semibold)
                 .foregroundColor(.black)
                 .frame(maxWidth: .infinity)
                 .padding(BrandingSpacing.sm)
@@ -177,11 +232,11 @@ struct PrimaryButton: View {
 struct SecondaryButton: View {
     let label: String
     let action: () -> Void
-    
+
     var body: some View {
         Button(action: action) {
             Text(label)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .playSans(12, weight: .semibold)
                 .foregroundColor(.gray)
                 .frame(maxWidth: .infinity)
                 .padding(BrandingSpacing.sm)
@@ -194,16 +249,34 @@ struct SecondaryButton: View {
 struct StatusIndicator: View {
     let isActive: Bool
     let label: String
-    
+
     var body: some View {
         HStack(spacing: BrandingSpacing.sm) {
             Circle()
                 .fill(isActive ? BrandingColors.glyphGreen : Color.gray.opacity(0.5))
                 .frame(width: 8, height: 8)
-            
+
             Text(label)
-                .font(.system(size: 11, design: .monospaced))
+                .playMono(11)
                 .foregroundColor(isActive ? BrandingColors.glyphGreen : .gray)
+        }
+    }
+}
+
+// MARK: - TubCorp Wordmark
+
+struct TubCorpWordmark: View {
+    var height: CGFloat = 36
+
+    var body: some View {
+        if let url = Bundle.main.url(forResource: "tubcorp-wordmark", withExtension: "png"),
+           let data = try? Data(contentsOf: url),
+           let uiImage = UIImage(data: data) {
+            Image(uiImage: uiImage)
+                .renderingMode(.original)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(height: height)
         }
     }
 }
@@ -275,14 +348,12 @@ struct CommandStatusChip: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title.uppercased())
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .tracking(1.2)
+            Text(title)
+                .playSans(9, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.54))
 
-            Text(value.uppercased())
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .tracking(1.0)
+            Text(value)
+                .playMono(11, weight: .bold)
                 .foregroundStyle(isActive ? accent : Color.white.opacity(0.76))
         }
         .padding(.horizontal, 10)
@@ -311,9 +382,8 @@ struct CommandRailButton: View {
 
     var body: some View {
         Button(action: action) {
-            Text(title.uppercased())
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .tracking(1)
+            Text(title)
+                .playSans(12, weight: .bold)
                 .foregroundStyle(
                     !isEnabled
                     ? Color.white.opacity(0.32)

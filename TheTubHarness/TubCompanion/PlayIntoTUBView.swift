@@ -24,6 +24,7 @@ struct PlayIntoTUBView: View {
     @State private var showOperatorLogModal = false
     @State private var fadeBlinkOpacity: Double = 1.0
     @State private var fadeDimOpacity: Double = 1.0
+    @State private var showLoopRateModal = false
 
     var body: some View {
         ZStack {
@@ -91,6 +92,19 @@ struct PlayIntoTUBView: View {
                 )
             }
         }
+        .overlay {
+            if showLoopRateModal {
+                GridLoopRateModal(
+                    currentMs: viewModel.gridLoopIntervalMs,
+                    onChangeMs: { ms in
+                        viewModel.setGridLoopInterval(ms: ms)
+                    },
+                    onClose: {
+                        showLoopRateModal = false
+                    }
+                )
+            }
+        }
     }
 
     private var isPhoneLandscapeCompact: Bool {
@@ -138,11 +152,11 @@ struct PlayIntoTUBView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("PLAY")
-                .playMono(isPhoneLandscapeCompact ? 10 : 12, weight: .semibold)
+            Text("Play")
+                .playSans(isPhoneLandscapeCompact ? 10 : 12, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.7))
-            Text("LIVE SAMPLE GRID")
-                .playMono(isPhoneLandscapeCompact ? 16 : 28, weight: .bold)
+            Text("Live Sample Grid")
+                .playSans(isPhoneLandscapeCompact ? 16 : 28, weight: .bold)
                 .foregroundStyle(BrandingColors.glyphGreen)
                 .chromaticAberration()
                 .lineLimit(1)
@@ -177,8 +191,8 @@ struct PlayIntoTUBView: View {
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: isPhoneLandscapeCompact ? 9 : 10, weight: .bold))
                         .foregroundStyle(BrandingColors.glyphGreen.opacity(0.85))
-                    Text("OPS LOG")
-                        .playMono(isPhoneLandscapeCompact ? 9 : 10, weight: .bold)
+                    Text("Ops Log")
+                        .playSans(isPhoneLandscapeCompact ? 9 : 10, weight: .semibold)
                         .foregroundStyle(Color.white.opacity(0.88))
                         .lineLimit(1)
                         .minimumScaleFactor(0.68)
@@ -458,8 +472,8 @@ struct PlayIntoTUBView: View {
     private var longStripSurface: some View {
         VStack(alignment: .leading, spacing: isPhoneLandscapeCompact ? 6 : 8) {
             HStack(spacing: 8) {
-                Text("LONG SOUNDS GRADIENT STRIP")
-                    .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
+                Text("Long Sounds Gradient Strip")
+                    .playSans(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
                     .foregroundStyle(Color.white.opacity(0.8))
                 Spacer()
                 Text("BANK \(viewModel.longBankStatus)")
@@ -470,8 +484,8 @@ struct PlayIntoTUBView: View {
                     .accessibilityIdentifier("play.long.bank.status")
             }
             if !isPhoneLandscapeCompact {
-                Text("TOUCH OR DRAG ACROSS THE STRIP TO BLEND THE BANK'S LEFT/RIGHT LONG SOUNDS. NO NEED TO HOLD.")
-                    .playMono(10, weight: .regular)
+                Text("Touch or drag across the strip to blend the bank's left/right long sounds. No need to hold.")
+                    .playSans(10, weight: .regular)
                     .foregroundStyle(Color.white.opacity(0.62))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -490,9 +504,8 @@ struct PlayIntoTUBView: View {
                     ZStack(alignment: .topLeading) {
                         LinearGradient(
                             colors: [
-                                BrandingColors.glyphGreen.opacity(0.1),
-                                BrandingColors.warningYellow.opacity(0.08),
-                                BrandingColors.glyphGreen.opacity(0.1)
+                                BrandingColors.glyphGreen.opacity(0.13),
+                                BrandingColors.warningYellow.opacity(0.13)
                             ],
                             startPoint: .leading,
                             endPoint: .trailing
@@ -642,8 +655,8 @@ struct PlayIntoTUBView: View {
 
             HStack(spacing: 8) {
                 Button(action: viewModel.previousLongBank) {
-                    Text("LONG -")
-                        .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
+                    Text("Long −")
+                        .playSans(isPhoneLandscapeCompact ? 10 : 11, weight: .semibold)
                         .foregroundStyle(Color.white.opacity(viewModel.hasMultipleLongBanks ? 0.86 : 0.35))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
@@ -664,8 +677,8 @@ struct PlayIntoTUBView: View {
                             systemName: viewModel.isLongPaused ? "play.fill" : "pause.fill",
                             animate: viewModel.hasActiveLongSample && !viewModel.isLongFadingOut
                         )
-                        Text(viewModel.isLongPaused ? "PLAY" : "PAUSE")
-                            .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
+                        Text(viewModel.isLongPaused ? "Play" : "Pause")
+                            .playSans(isPhoneLandscapeCompact ? 10 : 11, weight: .semibold)
                     }
                     .foregroundStyle(
                         viewModel.hasActiveLongSample
@@ -700,8 +713,8 @@ struct PlayIntoTUBView: View {
                             systemName: "arrow.down.to.line.compact",
                             animate: viewModel.isLongFadingOut
                         )
-                        Text(viewModel.isLongFadingOut ? "FADING…" : "FADE 8S")
-                            .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
+                        Text(viewModel.isLongFadingOut ? "Fading…" : "Fade 8s")
+                            .playSans(isPhoneLandscapeCompact ? 10 : 11, weight: .semibold)
                     }
                     .foregroundStyle(
                         viewModel.hasActiveLongSample
@@ -727,32 +740,12 @@ struct PlayIntoTUBView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!viewModel.hasActiveLongSample || viewModel.isLongFadingOut)
-                .opacity(viewModel.isLongFadingOut ? fadeDimOpacity * fadeBlinkOpacity : 1.0)
-                .onChange(of: viewModel.isLongFadingOut) { _, isFading in
-                    if isFading {
-                        fadeDimOpacity = 1.0
-                        fadeBlinkOpacity = 1.0
-                        withAnimation(.easeIn(duration: 8)) {
-                            fadeDimOpacity = 0.12
-                        }
-                        withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
-                            fadeBlinkOpacity = 0.3
-                        }
-                    } else {
-                        var t = Transaction()
-                        t.disablesAnimations = true
-                        withTransaction(t) {
-                            fadeDimOpacity = 1.0
-                            fadeBlinkOpacity = 1.0
-                        }
-                    }
-                }
                 .accessibilityIdentifier("play.long.fade")
                 .accessibilityLabel("Fade Out Long Sample Over Eight Seconds")
 
                 Button(action: viewModel.nextLongBank) {
-                    Text("LONG +")
-                        .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
+                    Text("Long +")
+                        .playSans(isPhoneLandscapeCompact ? 10 : 11, weight: .semibold)
                         .foregroundStyle(Color.white.opacity(viewModel.hasMultipleLongBanks ? 0.86 : 0.35))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
@@ -782,6 +775,36 @@ struct PlayIntoTUBView: View {
                     Text("FADE")
                         .playMono(isPhoneLandscapeCompact ? 9 : 10, weight: .bold)
                         .foregroundStyle(BrandingColors.warningYellow.opacity(0.9))
+                        .opacity(fadeDimOpacity * fadeBlinkOpacity)
+                        .onChange(of: viewModel.isLongFadingOut) { _, isFading in
+                            if isFading {
+                                fadeDimOpacity = 1.0
+                                fadeBlinkOpacity = 1.0
+                                withAnimation(.easeIn(duration: 8)) {
+                                    fadeDimOpacity = 0.12
+                                }
+                                withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
+                                    fadeBlinkOpacity = 0.3
+                                }
+                            } else {
+                                var t = Transaction()
+                                t.disablesAnimations = true
+                                withTransaction(t) {
+                                    fadeDimOpacity = 1.0
+                                    fadeBlinkOpacity = 1.0
+                                }
+                            }
+                        }
+                        .onAppear {
+                            fadeDimOpacity = 1.0
+                            fadeBlinkOpacity = 1.0
+                            withAnimation(.easeIn(duration: 8)) {
+                                fadeDimOpacity = 0.12
+                            }
+                            withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
+                                fadeBlinkOpacity = 0.3
+                            }
+                        }
                 } else if viewModel.isLongPaused {
                     Text("PAUSED")
                         .playMono(isPhoneLandscapeCompact ? 9 : 10, weight: .bold)
@@ -806,8 +829,8 @@ struct PlayIntoTUBView: View {
         VStack(alignment: .leading, spacing: isPhoneLandscapeCompact ? 4 : 6) {
             HStack(spacing: 8) {
                 Button(action: viewModel.previousBank) {
-                    Text("BANK -")
-                        .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
+                    Text("Bank −")
+                        .playSans(isPhoneLandscapeCompact ? 10 : 11, weight: .semibold)
                         .foregroundStyle(Color.white.opacity(viewModel.hasMultipleBanks ? 0.86 : 0.35))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
@@ -822,6 +845,39 @@ struct PlayIntoTUBView: View {
                 .accessibilityIdentifier("play.grid.bank.previous")
                 .accessibilityLabel("Previous Sample Bank")
 
+                Image(systemName: "repeat")
+                    .font(.system(size: isPhoneLandscapeCompact ? 11 : 12, weight: .bold))
+                    .foregroundStyle(
+                        viewModel.isGridLoopEnabled
+                        ? BrandingColors.glyphGreen
+                        : Color.white.opacity(0.35)
+                    )
+                    .frame(width: isPhoneLandscapeCompact ? 32 : 36)
+                    .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
+                    .background(
+                        viewModel.isGridLoopEnabled
+                        ? BrandingColors.glyphGreen.opacity(0.12)
+                        : Color.black
+                    )
+                    .overlay {
+                        Rectangle()
+                            .stroke(
+                                viewModel.isGridLoopEnabled
+                                ? BrandingColors.glyphGreen.opacity(0.5)
+                                : Color.white.opacity(0.2),
+                                lineWidth: 1
+                            )
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        viewModel.isGridLoopEnabled.toggle()
+                    }
+                    .onLongPressGesture(minimumDuration: 0.4) {
+                        showLoopRateModal = true
+                    }
+                    .accessibilityIdentifier("play.grid.loop.toggle")
+                    .accessibilityLabel(viewModel.isGridLoopEnabled ? "Disable Grid Loop" : "Enable Grid Loop")
+
                 Text("BANK \(viewModel.bankStatus)")
                     .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
                     .foregroundStyle(BrandingColors.glyphGreen)
@@ -831,8 +887,8 @@ struct PlayIntoTUBView: View {
                     .accessibilityIdentifier("play.grid.bank.status")
 
                 Button(action: viewModel.nextBank) {
-                    Text("BANK +")
-                        .playMono(isPhoneLandscapeCompact ? 10 : 11, weight: .bold)
+                    Text("Bank +")
+                        .playSans(isPhoneLandscapeCompact ? 10 : 11, weight: .semibold)
                         .foregroundStyle(Color.white.opacity(viewModel.hasMultipleBanks ? 0.86 : 0.35))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, isPhoneLandscapeCompact ? 6 : 8)
@@ -916,6 +972,11 @@ private final class PlayGridViewModel: ObservableObject {
     @Published private(set) var longBankHasCenterSample = false
     @Published private(set) var outputMeterLevel: Double = 0
     @Published private(set) var longOutputMeterLevel: Double = 0
+    @Published var isGridLoopEnabled = false {
+        didSet {
+            if !isGridLoopEnabled { cancelAllRetriggers() }
+        }
+    }
     @Published private(set) var lastEventLabel = "—"
     @Published private(set) var activeLongLabel = "—"
     @Published private(set) var longElapsedLabel = "00:00.0"
@@ -939,9 +1000,9 @@ private final class PlayGridViewModel: ObservableObject {
     private var activeBankIndex = 0
     private var activeLongBankIndex = 0
     private var activeCellIDs: Set<PlayGridCell.ID> = []
-    private var activeTouchCellIDByTouch: [Int: PlayGridCell.ID] = [:]
+    private var activeGridTouches: [Int: (row: Int, column: Int, force: CGFloat)] = [:]
     private var lastTriggerCellIDByTouch: [Int: PlayGridCell.ID] = [:]
-    private var lastTriggerAtByTouch: [Int: Date] = [:]
+    private var retriggerTimers: [Int: DispatchSourceTimer] = [:]
     private var lastLongBlendX: Double?
     private var activeLongURL: URL?
     private var longStartedAt: Date?
@@ -957,6 +1018,10 @@ private final class PlayGridViewModel: ObservableObject {
 
     init() {
         self.cells = Self.makeCells(gridDimension: gridDimension, bankIndex: 0)
+        let storedMs = UserDefaults.standard.integer(forKey: Self.gridLoopIntervalKey)
+        if storedMs > 0 {
+            self.gridLoopInterval = TimeInterval(max(20, min(500, storedMs))) / 1000.0
+        }
     }
 
     func start(using appState: TubCompanionAppState, harnessClient: HarnessClient) {
@@ -1001,7 +1066,7 @@ private final class PlayGridViewModel: ObservableObject {
     }
 
     func handleTouch(_ point: CGPoint, in size: CGSize) {
-        handleTouches([PlayTouchPoint(id: 0, location: point)], in: size)
+        handleTouches([PlayTouchPoint(id: 0, location: point, force: 0.5)], in: size)
     }
 
     func handleTouches(_ touches: [PlayTouchPoint], in size: CGSize) {
@@ -1012,40 +1077,42 @@ private final class PlayGridViewModel: ObservableObject {
         }
 
         let activeTouchIDs = Set(touches.map(\.id))
-        activeTouchCellIDByTouch = activeTouchCellIDByTouch.filter { activeTouchIDs.contains($0.key) }
+        for staleID in Set(activeGridTouches.keys).subtracting(activeTouchIDs) {
+            cancelRetrigger(for: staleID)
+        }
+        activeGridTouches = activeGridTouches.filter { activeTouchIDs.contains($0.key) }
         lastTriggerCellIDByTouch = lastTriggerCellIDByTouch.filter { activeTouchIDs.contains($0.key) }
-        lastTriggerAtByTouch = lastTriggerAtByTouch.filter { activeTouchIDs.contains($0.key) }
 
         for touch in touches {
             let col = max(0, min(gridDimension - 1, Int((touch.location.x / size.width) * CGFloat(gridDimension))))
             let row = max(0, min(gridDimension - 1, Int((touch.location.y / size.height) * CGFloat(gridDimension))))
             let id = PlayGridCell.makeID(row: row, column: col)
-            activeTouchCellIDByTouch[touch.id] = id
 
-            let now = Date()
+            activeGridTouches[touch.id] = (row: row, column: col, force: touch.force)
+
             let lastID = lastTriggerCellIDByTouch[touch.id]
-            let lastAt = lastTriggerAtByTouch[touch.id] ?? .distantPast
-            let shouldRetriggerSameCell = id == lastID && now.timeIntervalSince(lastAt) >= 0.18
-            let shouldTriggerNewCell = id != lastID
-            guard shouldTriggerNewCell || shouldRetriggerSameCell else { continue }
-
-            trigger(row: row, column: col)
-            lastTriggerCellIDByTouch[touch.id] = id
-            lastTriggerAtByTouch[touch.id] = now
+            if id != lastID {
+                cancelRetrigger(for: touch.id)
+                trigger(row: row, column: col)
+                lastTriggerCellIDByTouch[touch.id] = id
+                if isGridLoopEnabled {
+                    scheduleRetrigger(for: touch.id)
+                }
+            }
         }
 
-        activeCellIDs = Set(activeTouchCellIDByTouch.values)
+        activeCellIDs = Set(activeGridTouches.values.map { PlayGridCell.makeID(row: $0.row, column: $0.column) })
     }
 
     func endTouch() {
         activeCellIDs.removeAll()
-        activeTouchCellIDByTouch.removeAll()
+        activeGridTouches.removeAll()
         lastTriggerCellIDByTouch.removeAll()
-        lastTriggerAtByTouch.removeAll()
+        cancelAllRetriggers()
     }
 
     func handleLongTouch(_ point: CGPoint, in size: CGSize) {
-        handleLongTouches([PlayTouchPoint(id: 0, location: point)], in: size)
+        handleLongTouches([PlayTouchPoint(id: 0, location: point, force: 0)], in: size)
     }
 
     func handleLongTouches(_ touches: [PlayTouchPoint], in size: CGSize) {
@@ -1687,6 +1754,43 @@ private final class PlayGridViewModel: ObservableObject {
         return result
     }
 
+    private static let gridLoopIntervalKey = "PlayGridLoopIntervalMs"
+    private(set) var gridLoopInterval: TimeInterval = 0.14
+
+    var gridLoopIntervalMs: Int {
+        max(20, min(500, Int((gridLoopInterval * 1000).rounded())))
+    }
+
+    func setGridLoopInterval(ms: Int) {
+        let clamped = max(20, min(500, ms))
+        gridLoopInterval = TimeInterval(clamped) / 1000.0
+        UserDefaults.standard.set(clamped, forKey: Self.gridLoopIntervalKey)
+    }
+
+    private func scheduleRetrigger(for touchID: Int) {
+        cancelRetrigger(for: touchID)
+        let interval = gridLoopInterval
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self] in
+            guard let self, self.isGridLoopEnabled,
+                  let gridTouch = self.activeGridTouches[touchID] else { return }
+            self.trigger(row: gridTouch.row, column: gridTouch.column)
+        }
+        timer.resume()
+        retriggerTimers[touchID] = timer
+    }
+
+    private func cancelRetrigger(for touchID: Int) {
+        retriggerTimers[touchID]?.cancel()
+        retriggerTimers.removeValue(forKey: touchID)
+    }
+
+    private func cancelAllRetriggers() {
+        for timer in retriggerTimers.values { timer.cancel() }
+        retriggerTimers.removeAll()
+    }
+
     private static func longBlendPlan(for bank: PlayLongBank, position: Double) -> PlayLongBlendPlan {
         let clamped = max(0, min(1, position))
 
@@ -1813,6 +1917,7 @@ private extension Array {
 private struct PlayTouchPoint {
     let id: Int
     let location: CGPoint
+    let force: CGFloat
 }
 
 private struct PlayMultiTouchCaptureView: UIViewRepresentable {
@@ -1891,7 +1996,13 @@ private final class PlayTouchCaptureUIView: UIView {
         }
 
         let points = activeTouches.map { key, touch in
-            PlayTouchPoint(id: key.hashValue, location: touch.location(in: self))
+            let normalizedForce: CGFloat
+            if touch.maximumPossibleForce > 0 {
+                normalizedForce = min(1, max(0, touch.force / touch.maximumPossibleForce))
+            } else {
+                normalizedForce = min(1, max(0, (touch.majorRadius - 10) / 30))
+            }
+            return PlayTouchPoint(id: key.hashValue, location: touch.location(in: self), force: normalizedForce)
         }
         onTouchesChanged?(points)
     }
@@ -1935,7 +2046,7 @@ private struct PlayStatusChip: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .playMono(compact ? 7 : 8, weight: .semibold)
+                .playSans(compact ? 7 : 8, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.56))
             Text(value)
                 .playMono(compact ? 10 : 11, weight: .bold)
@@ -1972,10 +2083,4 @@ private struct PlayGridScanlines: View {
     }
 }
 
-private extension View {
-    func playMono(_ size: CGFloat, weight: Font.Weight = .regular) -> some View {
-        self.font(.system(size: size, weight: weight, design: .monospaced))
-            .textCase(.uppercase)
-            .tracking(1.1)
-    }
-}
+// playMono / playSans are now shared via BrandingUI.swift

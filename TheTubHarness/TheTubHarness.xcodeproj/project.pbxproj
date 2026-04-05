@@ -767,7 +767,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "THE TUB";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
-				INFOPLIST_KEY_NSBonjourServices = "_tubharness._tcp";
+				INFOPLIST_KEY_NSBonjourServices = _tubharness._tcp;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "THE TUB requests access to your local network to allow you to share audio directly with THE TUB. Audio is kept in-buffer for the duration of the event.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -817,7 +817,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "THE TUB";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
-				INFOPLIST_KEY_NSBonjourServices = "_tubharness._tcp";
+				INFOPLIST_KEY_NSBonjourServices = _tubharness._tcp;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "THE TUB requests access to your local network to allow you to share audio directly with THE TUB. Audio is kept in-buffer for the duration of the event.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;

@@ -16,7 +16,7 @@ struct DragGestureAnimation: View {
     var body: some View {
         VStack(spacing: 24) {
             Text("Drag to Steer")
-                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                .playSans(18, weight: .semibold)
                 .foregroundColor(.white)
             
             ZStack {
@@ -27,7 +27,7 @@ struct DragGestureAnimation: View {
                 
                 VStack(spacing: 16) {
                     Text("← Drag toward any word →")
-                        .font(.system(size: 11, design: .monospaced))
+                        .playSans(11)
                         .foregroundColor(.gray)
                     
                     // Animated arrow
@@ -37,7 +37,7 @@ struct DragGestureAnimation: View {
                         HStack(spacing: 4) {
                             ForEach(0..<3, id: \.self) { idx in
                                 Text("→")
-                                    .font(.system(size: 16, weight: .bold, design: .monospaced))
+                                    .playSans(16, weight: .bold)
                                     .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
                                     .offset(x: isAnimating ? CGFloat(idx) * 4 : 0)
                                     .animation(
@@ -52,7 +52,7 @@ struct DragGestureAnimation: View {
                     }
                     
                     Text("Guides the system toward your preferred direction")
-                        .font(.system(size: 10, design: .monospaced))
+                        .playSans(10)
                         .foregroundColor(.gray)
                         .multilineTextAlignment(.center)
                 }
@@ -75,7 +75,7 @@ struct HoldGestureAnimation: View {
     var body: some View {
         VStack(spacing: 24) {
             Text("Hold to Reinforce")
-                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                .playSans(18, weight: .semibold)
                 .foregroundColor(.white)
             
             ZStack {
@@ -86,7 +86,7 @@ struct HoldGestureAnimation: View {
                 
                 VStack(spacing: 16) {
                     Text("Press & Hold")
-                        .font(.system(size: 11, design: .monospaced))
+                        .playSans(11)
                         .foregroundColor(.gray)
                     
                     // Pulsing circle
@@ -116,7 +116,7 @@ struct HoldGestureAnimation: View {
                     }
                     
                     Text("Reinforces current state with intensity")
-                        .font(.system(size: 10, design: .monospaced))
+                        .playSans(10)
                         .foregroundColor(.gray)
                         .multilineTextAlignment(.center)
                 }
@@ -137,7 +137,7 @@ struct TapGestureAnimation: View {
     var body: some View {
         VStack(spacing: 24) {
             Text("More & Less")
-                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                .playSans(18, weight: .semibold)
                 .foregroundColor(.white)
             
             ZStack {
@@ -153,13 +153,13 @@ struct TapGestureAnimation: View {
                             .border(Color(UIColor(named: "GlyphGreen") ?? .green), width: 1)
                             .overlay(
                                 Text("−")
-                                    .font(.system(size: 20, weight: .bold, design: .monospaced))
+                                    .playSans(20, weight: .bold)
                                     .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
                             )
                             .frame(height: 50)
-                        
+
                         Text("Less")
-                            .font(.system(size: 9, design: .monospaced))
+                            .playSans(9)
                             .foregroundColor(.gray)
                     }
                     
@@ -172,13 +172,13 @@ struct TapGestureAnimation: View {
                             .border(Color(UIColor(named: "GlyphGreen") ?? .green), width: 1)
                             .overlay(
                                 Text("+")
-                                    .font(.system(size: 20, weight: .bold, design: .monospaced))
+                                    .playSans(20, weight: .bold)
                                     .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
                             )
                             .frame(height: 50)
-                        
+
                         Text("More")
-                            .font(.system(size: 9, design: .monospaced))
+                            .playSans(9)
                             .foregroundColor(.gray)
                     }
                 }
@@ -187,7 +187,7 @@ struct TapGestureAnimation: View {
             .frame(height: 110)
             
             Text("Quick intensity adjustments without dragging")
-                .font(.system(size: 10, design: .monospaced))
+                .playSans(10)
                 .foregroundColor(.gray)
                 .multilineTextAlignment(.center)
             

@@ -19,8 +19,8 @@ struct ModularPadView: View {
     
     var body: some View {
         VStack(spacing: 12) {
-            Text("MODULAR PADS")
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
+            Text("Modular Pads")
+                .playMono(10, weight: .bold)
                 .foregroundColor(.gray)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 4)
@@ -86,11 +86,11 @@ struct PadControlView: View {
             // Header: Mode + Status
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("PAD \(padIndex + 1)")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    Text("Pad \(padIndex + 1)")
+                        .playMono(9, weight: .bold)
                         .foregroundColor(.gray)
                     Text(pad.mode.displayName)
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .playMono(11, weight: .semibold)
                         .foregroundColor(.white)
                         .lineLimit(1)
                 }
@@ -121,7 +121,7 @@ struct PadControlView: View {
                     .cornerRadius(3)
                     
                     Text("\(Int(pad.duration))s")
-                        .font(.system(size: 8, design: .monospaced))
+                        .playMono(8)
                         .foregroundColor(.gray)
                 }
             } else {
@@ -134,7 +134,7 @@ struct PadControlView: View {
                             .font(.system(size: 12))
                             .foregroundColor(.gray.opacity(0.5))
                         Text("Empty")
-                            .font(.system(size: 8, design: .monospaced))
+                            .playSans(8)
                             .foregroundColor(.gray.opacity(0.5))
                     }
                 }
@@ -152,16 +152,16 @@ struct PadControlView: View {
                         get: { Double(pad.volume) },
                         set: { looperEngine.setPadVolume(pad.id, volume: Float($0)) }
                     ), in: 0...1)
-                    .font(.system(size: 11, design: .monospaced))
+                    .playMono(11)
                     
                     Text("\(Int(pad.volume * 100))%")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .playMono(9, weight: .semibold)
                         .foregroundColor(.gray)
                         .frame(width: 28)
                 }
                 
-                Text("VOL")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                Text("Vol")
+                    .playMono(8, weight: .bold)
                     .foregroundColor(.gray)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }

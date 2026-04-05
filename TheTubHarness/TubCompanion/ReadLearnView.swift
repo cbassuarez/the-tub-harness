@@ -487,27 +487,22 @@ struct ReadLearnView: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("TUBCORP ENTERPRISE SCLI")
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .tracking(1.3)
+                        .playMono(12, weight: .bold)
                         .foregroundStyle(Color.white.opacity(0.68))
-                    Text("OPERATOR ORIENTATION MANUAL")
-                        .font(.system(.title2, design: .monospaced, weight: .bold))
-                        .tracking(1.2)
+                    Text("Operator Orientation Manual")
+                        .playSans(22, weight: .bold)
                         .foregroundStyle(.white)
                         .chromaticAberration()
                 }
             }
 
             Text("WELCOME TO TUBCORP // READ BEFORE OPERATION")
-                .font(.system(.caption2, design: .monospaced, weight: .semibold))
+                .playMono(11, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.56))
-                .tracking(1.3)
 
             Text("LINK \(appState.harnessConnectionState == .connected ? "CONNECTED" : "OFFLINE") // STAGE FEED \(viewModel.stageFeedState.chipLabel)")
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .playMono(11, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.72))
-                .tracking(1.0)
-                .textCase(.uppercase)
                 .accessibilityIdentifier("learn.status.line")
         }
         .padding(.vertical, 8)
@@ -584,57 +579,46 @@ struct ReadLearnView: View {
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
             Text("ONE-PAGE ORIENTATION")
-                .font(.system(.caption, design: .monospaced, weight: .bold))
+                .playMono(12, weight: .bold)
                 .foregroundStyle(BrandingColors.glyphGreen.opacity(0.9))
-                .tracking(1.3)
                 Spacer()
                 Text("SECTION \(activeIndex)/\(LearnChapter.allCases.count)")
-                    .font(.system(.caption2, design: .monospaced, weight: .semibold))
+                    .playMono(11, weight: .semibold)
                     .foregroundStyle(Color.white.opacity(0.56))
-                    .tracking(1.2)
                     .accessibilityIdentifier("learn.ritual.chapter.meta")
             }
 
-            Text("THE TUB // OPERATOR PRIMER")
-                .font(.system(.title2, design: .monospaced, weight: .bold))
+            Text("The Tub // Operator Primer")
+                .playSans(22, weight: .bold)
                 .foregroundStyle(.white)
-                .tracking(1.2)
                 .chromaticAberration()
                 .accessibilityIdentifier("learn.ritual.chapter.title")
 
             Text("READ TOP TO BOTTOM: WHAT THE TUB IS, HOW PEOPLE PARTICIPATE, WHAT THIS APP CONTROLS.")
-                .font(.system(.caption, design: .monospaced, weight: .medium))
+                .playMono(12, weight: .medium)
                 .foregroundStyle(Color.white.opacity(0.74))
-                .tracking(1.0)
-                .textCase(.uppercase)
                 .accessibilityIdentifier("learn.ritual.chapter.copy")
 
             Text("ACTIVE SECTION // \(activeIndex): \(activeSpec.title)")
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .playMono(11, weight: .semibold)
                 .foregroundStyle(BrandingColors.aberrationCyan.opacity(0.9))
-                .tracking(1.0)
-                .textCase(.uppercase)
         }
     }
 
     private var learnSignalMap: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("SIGNAL MAP")
-                .font(.system(.caption, design: .monospaced, weight: .bold))
+                .playMono(12, weight: .bold)
                 .foregroundStyle(Color.white.opacity(0.6))
-                .tracking(1.3)
-                .textCase(.uppercase)
 
             Text("BUTTONS + TOUCH + ALWAYS-ON MIC + KINECT BODY TRACKING -> ML FUSION -> LIVE AUDIO/VISUAL OUTPUT.")
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .playMono(12, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.86))
-                .tracking(0.9)
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("APP ROLE: STEER DIRECTION, PLAY MATERIAL, LEARN DOCTRINE, SETTINGS DIAGNOSTICS.")
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .playMono(11, weight: .medium)
                 .foregroundStyle(Color.white.opacity(0.74))
-                .tracking(0.95)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -642,9 +626,8 @@ struct ReadLearnView: View {
     private func ritualTableOfContents(proxy: ScrollViewProxy) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("TABLE OF CONTENTS")
-                .font(.system(.caption2, design: .monospaced, weight: .bold))
+                .playMono(11, weight: .bold)
                 .foregroundStyle(Color.white.opacity(0.62))
-                .tracking(1.4)
 
             ForEach(LearnChapter.allCases, id: \.self) { chapter in
                 let spec = viewModel.spec(for: chapter)
@@ -656,10 +639,10 @@ struct ReadLearnView: View {
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text("\(chapterIndex).")
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .playMono(12, weight: .bold)
                             .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(0.66))
                         Text(spec.title)
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .playMono(12, weight: .bold)
                             .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(0.84))
                             .lineLimit(1)
                         Spacer()
@@ -716,9 +699,8 @@ struct ReadLearnView: View {
                         scrollAtlasToCurrentAnchor(proxy: proxy)
                     } label: {
                         Text(section.title)
-                            .font(.system(.caption2, design: .monospaced, weight: .bold))
+                            .playMono(11, weight: .bold)
                             .foregroundStyle(isSelected ? BrandingColors.aberrationCyan : Color.white.opacity(0.72))
-                            .tracking(1.0)
                             .padding(.horizontal, 10)
                             .frame(minHeight: 44)
                             .overlay {
@@ -863,16 +845,14 @@ private struct OperatorBlock: View {
                     .fill(accent.opacity(0.9))
                     .frame(width: 3, height: 12)
                 Text(title)
-                    .font(.system(.caption, design: .monospaced, weight: .bold))
+                    .playMono(12, weight: .bold)
                     .foregroundStyle(accent.opacity(0.9))
-                    .tracking(1.4)
             }
 
             ForEach(lines, id: \.self) { line in
                 Text(line)
-                    .font(.system(size: emphasizeMonospace ? 12 : 13, weight: emphasizeMonospace ? .semibold : .medium, design: .monospaced))
+                    .playMono(emphasizeMonospace ? 12 : 13, weight: emphasizeMonospace ? .semibold : .medium)
                     .foregroundStyle(Color.white.opacity(0.84))
-                    .textCase(.uppercase)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -895,23 +875,19 @@ private struct LearnDocumentSection: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(String(format: "%02d", sectionNumber))
-                    .font(.system(size: 14, weight: .bold, design: .monospaced))
+                    .playMono(14, weight: .bold)
                     .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white.opacity(0.64))
-                    .tracking(1.1)
 
                 Text(spec.title)
-                    .font(.system(.title3, design: .monospaced, weight: .bold))
+                    .playSans(20, weight: .bold)
                     .foregroundStyle(isActive ? BrandingColors.glyphGreen : Color.white)
-                    .tracking(1.0)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             Text(spec.subtitle)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .playMono(11, weight: .semibold)
                 .foregroundStyle(BrandingColors.aberrationCyan.opacity(0.88))
-                .tracking(1.3)
-                .textCase(.uppercase)
 
             group(title: "BRIEF", lines: spec.briefLines, accent: BrandingColors.glyphGreen)
             group(title: "OPERATIONS", lines: spec.operationsLines, accent: BrandingColors.warningYellow)
@@ -926,13 +902,11 @@ private struct LearnDocumentSection: View {
                 .frame(width: 2)
             VStack(alignment: .leading, spacing: 5) {
                 Text(title)
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .playMono(10, weight: .bold)
                     .foregroundStyle(accent.opacity(0.9))
-                    .tracking(1.2)
-                    .textCase(.uppercase)
                 ForEach(lines, id: \.self) { line in
                     Text(line)
-                        .font(.system(size: title == "CONSOLE" ? 11 : 12, weight: .medium, design: .monospaced))
+                        .playMono(title == "CONSOLE" ? 11 : 12, weight: .medium)
                         .foregroundStyle(Color.white.opacity(title == "CONSOLE" ? 0.72 : 0.86))
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -951,15 +925,13 @@ private struct AtlasSectionView: View {
             CommandSignalRule(opacity: 0.16)
 
             Text(section.title)
-                .font(.system(.title3, design: .monospaced, weight: .bold))
+                .playSans(20, weight: .bold)
                 .foregroundStyle(.white)
-                .tracking(1.0)
 
             ForEach(section.body, id: \.self) { line in
                 Text(line)
-                    .font(.system(.body, design: .monospaced, weight: .medium))
+                    .playMono(17, weight: .medium)
                     .foregroundStyle(Color.white.opacity(0.82))
-                    .textCase(.uppercase)
             }
 
             OperatorBlock(
@@ -979,27 +951,24 @@ private struct AtlasInlineSectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(section.title)
-                .font(.system(.headline, design: .monospaced, weight: .bold))
+                .playSans(17, weight: .bold)
                 .foregroundStyle(BrandingColors.aberrationCyan.opacity(0.92))
-                .tracking(1.1)
 
             ForEach(section.body, id: \.self) { line in
                 Text("- \(line)")
-                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .playMono(13, weight: .medium)
                     .foregroundStyle(Color.white.opacity(0.82))
-                    .textCase(.uppercase)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             Text("COMMANDS")
-                .font(.system(.caption2, design: .monospaced, weight: .bold))
+                .playMono(11, weight: .bold)
                 .foregroundStyle(Color.white.opacity(0.56))
-                .tracking(1.2)
                 .padding(.top, 2)
 
             ForEach(section.commands, id: \.self) { command in
                 Text(command)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .playMono(12, weight: .semibold)
                     .foregroundStyle(Color.white.opacity(0.84))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1052,8 +1021,7 @@ private struct LearnStageMirrorBackground: View {
                         Spacer()
                         Text("SCENE \(surface.sceneId.uppercased())")
                     }
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(1.1)
+                    .playMono(10, weight: .semibold)
                     .foregroundStyle(Color.white.opacity(0.44))
                     .padding(.horizontal, 12)
                     .padding(.top, 8)
@@ -1062,16 +1030,14 @@ private struct LearnStageMirrorBackground: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(surface.thought.uppercased())
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .playMono(11, weight: .bold)
                             .foregroundStyle(BrandingColors.glyphGreen.opacity(0.72))
-                            .tracking(1.1)
                             .chromaticAberration()
 
                         ForEach(Array(surface.thoughtLog.prefix(4)), id: \.self) { line in
                             Text(line.uppercased())
-                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .playMono(9, weight: .medium)
                                 .foregroundStyle(Color.white.opacity(0.42))
-                                .tracking(1.0)
                                 .lineLimit(1)
                         }
                     }

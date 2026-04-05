@@ -90,124 +90,18 @@ struct TubLaunchScreenView: View {
                     .blendMode(.screen)
                     .opacity(reduceMotion ? 0 : 1)
 
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack {
-                        Text("TUBCORP ENTERPRISE SCLI // THE TUB")
-                            .launchMono(11, weight: .semibold)
-                            .foregroundStyle(Color.white.opacity(0.92))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                        Spacer()
-                        Text("BOOT \(spinner) 00:\(String(format: "%02d", systemSeconds)):\(String(format: "%03d", systemMillis))")
-                            .launchMono(10, weight: .bold)
-                            .monospacedDigit()
-                            .foregroundStyle(Color.white.opacity(0.64 + statusPulse * 0.3))
-                            .frame(width: 190, alignment: .trailing)
-                    }
-
-                    Rectangle()
-                        .fill(Color.white.opacity(0.28))
-                        .frame(height: 1)
-                        .padding(.top, 10)
-
-                    Spacer(minLength: 24)
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("THE TUB")
-                            .launchMono(54, weight: .black)
-                            .tracking(2.6)
-                            .foregroundStyle(.white)
-                            .minimumScaleFactor(0.72)
-                            .lineLimit(1)
-                            .scaleEffect(reduceMotion ? 1 : (0.995 + 0.005 * statusPulse), anchor: .leading)
-
-                        Text("LIVE CONTROL SHELL // READYING STAGE")
-                            .launchMono(12, weight: .semibold)
-                            .foregroundStyle(Color.white.opacity(0.74))
-
-                        HStack(spacing: 10) {
-                            Text("SESSION \(sessionToken)")
-                                .launchMono(10, weight: .semibold)
-                                .foregroundStyle(Color.white.opacity(0.64))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.7)
-                            Text("NODE IOS")
-                                .launchMono(10, weight: .semibold)
-                                .foregroundStyle(Color.white.opacity(0.64))
-                                .frame(width: 86, alignment: .trailing)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 15)
-                    .overlay {
-                        Rectangle()
-                            .stroke(Color.white.opacity(0.42), lineWidth: 1)
-                    }
-
-                    Spacer(minLength: 20)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(transcriptLines.enumerated()), id: \.offset) { index, line in
-                            let isRevealed = index < revealCount
-                            let isActive = isRevealed && index == activeLineIndex
-                            HStack(spacing: 8) {
-                                Text(">")
-                                    .launchMono(10, weight: .bold)
-                                    .foregroundStyle(isActive ? Color.white : Color.white.opacity(0.7))
-                                Text(isRevealed ? line : "")
-                                    .launchMono(10, weight: .medium)
-                                    .foregroundStyle(isActive ? Color.white : Color.white.opacity(0.74))
-                                Spacer(minLength: 0)
-                            }
-                            .frame(height: transcriptRowHeight, alignment: .leading)
-                            .opacity(isRevealed ? (isActive ? 1 : 0.72) : 0.16)
-                            .animation(.easeInOut(duration: 0.08), value: activeLineIndex)
-                        }
-                    }
-                    .frame(height: (transcriptRowHeight * CGFloat(transcriptLines.count)) + 2, alignment: .top)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 11)
-                    .overlay {
-                        Rectangle()
-                            .stroke(Color.white.opacity(0.26), lineWidth: 1)
-                    }
-
-                    Spacer(minLength: 12)
-
-                    HStack(spacing: 3) {
-                        ForEach(0..<bootSegments, id: \.self) { index in
-                            Rectangle()
-                                .fill(index < litSegments ? Color.white.opacity(0.95) : Color.white.opacity(0.16))
-                                .scaleEffect(y: (!reduceMotion && index == max(0, litSegments - 1)) ? 1.16 : 1.0, anchor: .center)
-                                .frame(height: 6)
-                        }
-                    }
-                    .animation(.linear(duration: 0.08), value: litSegments)
-
-                    HStack(spacing: 12) {
-                        Text(progress >= 1 ? "READY" : "INITIALIZING")
-                            .launchMono(10, weight: .bold)
-                            .foregroundStyle(Color.white.opacity(0.92))
-                        Text(cursorOn ? "_" : " ")
-                            .launchMono(10, weight: .bold)
-                            .foregroundStyle(Color.white.opacity(0.82))
-                        Spacer()
-                        Text("SYNC \(Int((progress * 100).rounded(.down)))%")
-                            .launchMono(10, weight: .semibold)
-                            .foregroundStyle(Color.white.opacity(0.7))
-                    }
-                    .padding(.top, 8)
-
-                    Text("OPERATING PROFILE // PARTICIPANT CONTROL TERMINAL")
-                        .launchMono(9, weight: .regular)
-                        .foregroundStyle(Color.white.opacity(0.44))
-                        .padding(.top, 4)
-                }
-                .padding(.horizontal, 22)
-                .padding(.top, 22)
-                .padding(.bottom, 24)
-                .opacity(reduceMotion ? 1 : (0.9 + 0.1 * pulse))
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                bootContent(
+                    spinner: spinner,
+                    systemSeconds: systemSeconds,
+                    systemMillis: systemMillis,
+                    statusPulse: statusPulse,
+                    revealCount: revealCount,
+                    activeLineIndex: activeLineIndex,
+                    litSegments: litSegments,
+                    progress: progress,
+                    cursorOn: cursorOn,
+                    pulse: pulse
+                )
             }
         }
         .onAppear {
@@ -231,6 +125,134 @@ struct TubLaunchScreenView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("THE TUB is initializing")
         .accessibilityIdentifier("launch.screen")
+    }
+
+    @ViewBuilder
+    private func bootContent(
+        spinner: String,
+        systemSeconds: Int,
+        systemMillis: Int,
+        statusPulse: Double,
+        revealCount: Int,
+        activeLineIndex: Int,
+        litSegments: Int,
+        progress: Double,
+        cursorOn: Bool,
+        pulse: Double
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("TUBCORP ENTERPRISE SCLI // THE TUB")
+                    .playMono(11, weight: .semibold)
+                    .foregroundStyle(Color.white.opacity(0.92))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Spacer()
+                Text("BOOT \(spinner) 00:\(String(format: "%02d", systemSeconds)):\(String(format: "%03d", systemMillis))")
+                    .playMono(10, weight: .bold)
+                    .monospacedDigit()
+                    .foregroundStyle(Color.white.opacity(0.64 + statusPulse * 0.3))
+                    .frame(width: 190, alignment: .trailing)
+            }
+
+            Rectangle()
+                .fill(Color.white.opacity(0.28))
+                .frame(height: 1)
+                .padding(.top, 10)
+
+            Spacer(minLength: 24)
+
+            VStack(alignment: .leading, spacing: 10) {
+                TubCorpWordmark(height: 48)
+                    .scaleEffect(reduceMotion ? 1 : (0.995 + 0.005 * statusPulse), anchor: .leading)
+
+                Text("LIVE CONTROL SHELL // READYING STAGE")
+                    .playMono(12, weight: .semibold)
+                    .foregroundStyle(Color.white.opacity(0.74))
+
+                HStack(spacing: 10) {
+                    Text("SESSION \(sessionToken)")
+                        .playMono(10, weight: .semibold)
+                        .foregroundStyle(Color.white.opacity(0.64))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    Text("NODE IOS")
+                        .playMono(10, weight: .semibold)
+                        .foregroundStyle(Color.white.opacity(0.64))
+                        .frame(width: 86, alignment: .trailing)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 15)
+            .overlay {
+                Rectangle()
+                    .stroke(Color.white.opacity(0.42), lineWidth: 1)
+            }
+
+            Spacer(minLength: 20)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(transcriptLines.enumerated()), id: \.offset) { index, line in
+                    let isRevealed = index < revealCount
+                    let isActive = isRevealed && index == activeLineIndex
+                    HStack(spacing: 8) {
+                        Text(">")
+                            .playMono(10, weight: .bold)
+                            .foregroundStyle(isActive ? Color.white : Color.white.opacity(0.7))
+                        Text(isRevealed ? line : "")
+                            .playMono(10, weight: .medium)
+                            .foregroundStyle(isActive ? Color.white : Color.white.opacity(0.74))
+                        Spacer(minLength: 0)
+                    }
+                    .frame(height: transcriptRowHeight, alignment: .leading)
+                    .opacity(isRevealed ? (isActive ? 1 : 0.72) : 0.16)
+                    .animation(.easeInOut(duration: 0.08), value: activeLineIndex)
+                }
+            }
+            .frame(height: (transcriptRowHeight * CGFloat(transcriptLines.count)) + 2, alignment: .top)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 11)
+            .overlay {
+                Rectangle()
+                    .stroke(Color.white.opacity(0.26), lineWidth: 1)
+            }
+
+            Spacer(minLength: 12)
+
+            HStack(spacing: 3) {
+                ForEach(0..<bootSegments, id: \.self) { index in
+                    Rectangle()
+                        .fill(index < litSegments ? Color.white.opacity(0.95) : Color.white.opacity(0.16))
+                        .scaleEffect(y: (!reduceMotion && index == max(0, litSegments - 1)) ? 1.16 : 1.0, anchor: .center)
+                        .frame(height: 6)
+                }
+            }
+            .animation(.linear(duration: 0.08), value: litSegments)
+
+            HStack(spacing: 12) {
+                Text(progress >= 1 ? "READY" : "INITIALIZING")
+                    .playMono(10, weight: .bold)
+                    .foregroundStyle(Color.white.opacity(0.92))
+                Text(cursorOn ? "_" : " ")
+                    .playMono(10, weight: .bold)
+                    .foregroundStyle(Color.white.opacity(0.82))
+                Spacer()
+                Text("SYNC \(Int((progress * 100).rounded(.down)))%")
+                    .playMono(10, weight: .semibold)
+                    .foregroundStyle(Color.white.opacity(0.7))
+            }
+            .padding(.top, 8)
+
+            Text("OPERATING PROFILE // PARTICIPANT CONTROL TERMINAL")
+                .playMono(9, weight: .regular)
+                .foregroundStyle(Color.white.opacity(0.44))
+                .padding(.top, 4)
+        }
+        .padding(.horizontal, 22)
+        .padding(.bottom, 24)
+        .opacity(reduceMotion ? 1 : (0.9 + 0.1 * pulse))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .safeAreaPadding(.top)
     }
 
     private func resolvedProgress(baseProgress: Double, now: Date) -> Double {
@@ -303,30 +325,7 @@ private struct TubLaunchShellGrid: View {
     }
 }
 
-private extension View {
-    func launchMono(_ size: CGFloat, weight: Font.Weight = .regular) -> some View {
-        self.font(IBMPlexMonoFont.font(weight.toPlexVariant, size: size))
-            .textCase(.uppercase)
-            .tracking(1.2)
-    }
-}
-
-private extension Font.Weight {
-    var toPlexVariant: IBMPlexMonoFont.Variant {
-        switch self {
-        case .bold, .black, .heavy:
-            return .bold
-        case .semibold:
-            return .semibold
-        case .medium:
-            return .medium
-        case .light, .thin, .ultraLight:
-            return .light
-        default:
-            return .regular
-        }
-    }
-}
+// playMono / playSans are now shared via BrandingUI.swift
 
 struct ConnectionGateView: View {
     @ObservedObject var appState: TubCompanionAppState
@@ -362,15 +361,7 @@ struct ConnectionGateView: View {
             VStack(spacing: 0) {
                 Spacer(minLength: presentation == .fullScreen ? 36 : 12)
 
-                VStack(spacing: 10) {
-                    Text("THE TUB")
-                        .font(.system(size: 24, weight: .bold, design: .monospaced))
-                        .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
-
-                    Text("Entry Ritual")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.gray)
-                }
+                TubCorpWordmark(height: 32)
 
                 Spacer(minLength: 28)
 
@@ -465,11 +456,11 @@ struct ConnectionGateView: View {
     private var chooseIntentContent: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("How do you want to enter?")
-                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                .playSans(18, weight: .semibold)
                 .foregroundColor(.white)
 
             Text("Choose one path. You can change it later.")
-                .font(.system(size: 11, design: .monospaced))
+                .playSans(11)
                 .foregroundColor(.gray)
 
             Button(action: {
@@ -477,7 +468,7 @@ struct ConnectionGateView: View {
             }) {
                 gateCommandWithIcon(
                     icon: "waveform.circle",
-                    title: "PLAY INTO THE TUB",
+                    title: "Play Into the Tub",
                     subtitle: "Use the cable. Immediate live path."
                 )
             }
@@ -494,7 +485,7 @@ struct ConnectionGateView: View {
             }) {
                 gateCommandWithIcon(
                     icon: "arrow.up.doc",
-                    title: "STEER THE TUB ML",
+                    title: "Steer the Tub ML",
                     subtitle: "Use the harness link. Session contribution path."
                 )
             }
@@ -516,7 +507,7 @@ struct ConnectionGateView: View {
                     }
                 }) {
                     Text(last == .playLive ? "Resume live cable session" : "Reconnect to harness link")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .playSans(11, weight: .semibold)
                         .foregroundColor(.gray)
                         .padding(.top, 6)
                 }
@@ -548,8 +539,8 @@ struct ConnectionGateView: View {
             || appState.isCableRouteSimulated
 
         return VStack(alignment: .leading, spacing: 18) {
-            Text("CABLE REQUIRED")
-                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+            Text("Cable Required")
+                .playSans(18, weight: .semibold)
                 .foregroundColor(.white)
 
             HStack(spacing: 14) {
@@ -574,8 +565,8 @@ struct ConnectionGateView: View {
                     .stroke(Color.white.opacity(0.2), lineWidth: 1)
             }
 
-            Text("NO SOUND WILL BE OUTPUT UNLESS YOU ARE CONNECTED TO THE TUB USB-C.")
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            Text("No sound will be output unless you are connected to THE TUB USB-C.")
+                .playSans(11, weight: .semibold)
                 .foregroundColor(.gray)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -588,7 +579,7 @@ struct ConnectionGateView: View {
                         .accessibilityHidden(true)
                     Text("Check again")
                 }
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .playSans(11, weight: .semibold)
                 .foregroundColor(.gray)
             }
             .accessibilityLabel(Text("Check cable connection"))
@@ -602,8 +593,8 @@ struct ConnectionGateView: View {
                 appState.forcePresentEntryGate = false
                 appState.requestTabNavigation(.play)
             }) {
-                Text(routeActive ? "CABLE READY" : "I'M CONNECTED")
-                    .font(.system(size: 20, weight: .heavy, design: .monospaced))
+                Text(routeActive ? "Cable Ready" : "I'm Connected")
+                    .playSans(20, weight: .heavy)
                     .foregroundColor(.black)
                     .frame(maxWidth: .infinity, minHeight: 52)
                     .background(Color(UIColor(named: "GlyphGreen") ?? .green))
@@ -621,7 +612,7 @@ struct ConnectionGateView: View {
                         .accessibilityHidden(true)
                     Text(showCableHelp ? "Hide cable help" : "Need help finding the cable?")
                 }
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .playSans(11, weight: .semibold)
                 .foregroundColor(.gray)
             }
             .accessibilityLabel(Text(showCableHelp ? "Hide cable help" : "Show cable help"))
@@ -645,7 +636,7 @@ struct ConnectionGateView: View {
                         Text("Press 'Check again' when ready")
                     }
                 }
-                .font(.system(size: 10, design: .monospaced))
+                .playSans(10)
                 .foregroundColor(.gray)
                 .padding(12)
                 .background(Color.white.opacity(0.04))
@@ -661,25 +652,25 @@ struct ConnectionGateView: View {
 
     private var feedBankContent: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("STEER THE ML")
-                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+            Text("Steer the ML")
+                .playSans(18, weight: .semibold)
                 .foregroundColor(.white)
 
             Text("Link to THE TUB harness to submit material into the exhibition queue.")
-                .font(.system(size: 11, design: .monospaced))
+                .playSans(11)
                 .foregroundColor(.gray)
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("HARNESS LINK")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                Text("Harness Link")
+                    .playSans(10, weight: .bold)
                     .foregroundColor(.gray)
 
                 Text("AUTO DISCOVERY ENABLED")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .playMono(11, weight: .semibold)
                     .foregroundColor(.white)
 
                 Text("NO ADDRESS OR PORT ENTRY REQUIRED")
-                    .font(.system(size: 10, design: .monospaced))
+                    .playMono(10)
                     .foregroundColor(.gray)
             }
 
@@ -688,7 +679,7 @@ struct ConnectionGateView: View {
             }) {
                 ZStack {
                     gateCommand(
-                        title: isAttemptingLocalConnect ? "CONNECTING…" : "RETRY HARNESS LINK",
+                        title: isAttemptingLocalConnect ? "Connecting…" : "Retry Harness Link",
                         subtitle: "Resolve harness automatically."
                     )
                     
@@ -712,7 +703,7 @@ struct ConnectionGateView: View {
 
             if let handshakeStatus {
                 Text(handshakeStatus)
-                    .font(.system(size: 10, design: .monospaced))
+                    .playMono(10)
                     .foregroundColor(.gray)
             }
 
@@ -804,19 +795,19 @@ struct ConnectionGateView: View {
             switch appState.harnessConnectionState {
             case .connected:
                 Text("Live link established.")
-                    .font(.system(size: 10, design: .monospaced))
+                    .playMono(10)
                     .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
             case .connecting:
                 Text("Attempting harness link…")
-                    .font(.system(size: 10, design: .monospaced))
+                    .playMono(10)
                     .foregroundColor(.gray)
             case .error(let message):
                 Text(message)
-                    .font(.system(size: 10, design: .monospaced))
+                    .playMono(10)
                     .foregroundColor(.red)
             case .disconnected:
                 Text("Harness link not established yet.")
-                    .font(.system(size: 10, design: .monospaced))
+                    .playMono(10)
                     .foregroundColor(.gray)
             }
         }
@@ -863,7 +854,7 @@ struct ConnectionGateView: View {
                         .accessibilityHidden(true)
                     Text("Choose another way to enter")
                 }
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .playSans(10, weight: .semibold)
                 .foregroundColor(.gray)
             }
             .accessibilityLabel(Text("Go back"))
@@ -877,11 +868,11 @@ struct ConnectionGateView: View {
     private func gateCommand(title: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
-                .font(.system(size: 14, weight: .bold, design: .monospaced))
+                .playSans(14, weight: .bold)
                 .foregroundColor(.black)
 
             Text(subtitle)
-                .font(.system(size: 10, design: .monospaced))
+                .playSans(10)
                 .foregroundColor(.black.opacity(0.75))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -905,7 +896,7 @@ struct ConnectionGateView: View {
                 .accessibilityHidden(true)
 
             Text(label)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .playMono(10, weight: .semibold)
                 .foregroundColor(active ? Color(UIColor(named: "GlyphGreen") ?? .green) : .gray)
         }
         .padding(.vertical, 8)
@@ -927,11 +918,11 @@ struct ConnectionGateView: View {
             
             VStack(alignment: .leading, spacing: 8) {
                 Text(title)
-                    .font(.system(size: 14, weight: .bold, design: .monospaced))
+                    .playSans(14, weight: .bold)
                     .foregroundColor(.black)
 
                 Text(subtitle)
-                    .font(.system(size: 10, design: .monospaced))
+                    .playSans(10)
                     .foregroundColor(.black.opacity(0.75))
             }
             Spacer()
@@ -961,14 +952,14 @@ struct ConnectionRequiredOverlay: View {
 
             if shouldRenderGateContent {
                 VStack(alignment: .leading, spacing: 14) {
-                    Text(preferredIntent == .feedBank ? "HARNESS LINK REQUIRED" : "CABLE ROUTE REQUIRED")
-                        .font(.system(size: 18, weight: .bold, design: .monospaced))
+                    Text(preferredIntent == .feedBank ? "Harness Link Required" : "Cable Route Required")
+                        .playSans(18, weight: .bold)
                         .foregroundColor(.white)
 
                     Text(preferredIntent == .feedBank
                          ? "STEER needs a live harness link before controls can be used."
                          : "PLAY needs an external audio route before controls can be used.")
-                        .font(.system(size: 11, design: .monospaced))
+                        .playSans(11)
                         .foregroundColor(.gray)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -979,23 +970,23 @@ struct ConnectionRequiredOverlay: View {
                                 .tint(Color(UIColor(named: "GlyphGreen") ?? .green))
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("RECONNECTING HARNESS…")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .playMono(11, weight: .semibold)
                                     .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
                                 Text("HOLDING GATE WHILE LINK RECOVERS.")
-                                    .font(.system(size: 10, design: .monospaced))
+                                    .playMono(10)
                                     .foregroundColor(.gray)
                             }
                         }
                         .padding(.vertical, 4)
                     } else {
                         Text(statusText)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .playMono(10, weight: .semibold)
                             .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
                     }
 
                     Button(action: primaryAction) {
                         Text(primaryActionLabel)
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .playSans(12, weight: .bold)
                             .foregroundColor(.black)
                             .frame(maxWidth: .infinity, minHeight: 46)
                             .background(Color(UIColor(named: "GlyphGreen") ?? .green))
@@ -1006,8 +997,8 @@ struct ConnectionRequiredOverlay: View {
                     Button(action: {
                         appState.resetEntryFlow()
                     }) {
-                        Text("RETURN TO ENTRY RITUAL")
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        Text("Return to Entry Ritual")
+                            .playSans(11, weight: .semibold)
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity, minHeight: 44)
                             .overlay {
@@ -1031,10 +1022,10 @@ struct ConnectionRequiredOverlay: View {
                         .progressViewStyle(.circular)
                         .tint(Color(UIColor(named: "GlyphGreen") ?? .green))
                     Text("RECONNECTING HARNESS…")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .playMono(12, weight: .semibold)
                         .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
                     Text("HOLDING GATE WHILE LINK RECOVERS.")
-                        .font(.system(size: 10, design: .monospaced))
+                        .playMono(10)
                         .foregroundColor(.gray)
                 }
                 .padding(16)
@@ -1076,7 +1067,7 @@ struct ConnectionRequiredOverlay: View {
     }
 
     private var primaryActionLabel: String {
-        preferredIntent == .feedBank ? "RECONNECT HARNESS" : "CHECK AUDIO ROUTE"
+        preferredIntent == .feedBank ? "Reconnect Harness" : "Check Audio Route"
     }
 
     private var statusText: String {

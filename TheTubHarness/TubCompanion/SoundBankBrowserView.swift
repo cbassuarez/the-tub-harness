@@ -22,17 +22,17 @@ struct SoundBankBrowserView: View {
                             HStack {
                                 VStack(alignment: .leading) {
                                     Text(c.sessionId)
-                                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                        .playMono(13, weight: .semibold)
                                         .foregroundColor(.white)
                                     if let dur = c.durationMs {
                                         Text("\(dur / 1000)s")
-                                            .font(.system(size: 11, design: .monospaced))
+                                            .playMono(11)
                                             .foregroundColor(.gray)
                                     }
                                 }
                                 Spacer()
                                 Text(c.state.displayName)
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .playMono(11)
                                     .foregroundColor(.gray)
                             }
                             .padding(8)
