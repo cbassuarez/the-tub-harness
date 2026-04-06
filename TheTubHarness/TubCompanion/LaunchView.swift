@@ -22,6 +22,7 @@ struct TubLaunchScreenView: View {
     @State private var sessionToken = TubLaunchScreenView.makeSessionToken()
     @State private var pulseSeed: Double = 0
     @State private var organicStalls: [Double] = TubLaunchScreenView.generateStalls()
+    @State private var stallCeiling: Double = Double.random(in: 0.82...0.93)
 
     private let transcriptLines: [String] = [
         "MOUNTING AUDIENCE COMMAND SHELL",
@@ -37,38 +38,23 @@ struct TubLaunchScreenView: View {
 
     private let spinnerFrames = ["-", "\\", "|", "/"]
     private let bootSegments = 10
-    private let bootDuration: TimeInterval = 3.3
-    private let quickFinishDuration: TimeInterval = 0.8
-    private static let transcriptStepDurations: [TimeInterval] = [
-        0.16, 0.31, 0.49, 0.11, 0.1, 0.09, 0.09, 0.27, 0.38
-    ]
-    private static let transcriptStepTimeline: [TimeInterval] = {
-        var timeline: [TimeInterval] = []
-        timeline.reserveCapacity(transcriptStepDurations.count)
-        var sum: TimeInterval = 0
-        for step in transcriptStepDurations {
-            sum += max(0.04, step)
-            timeline.append(sum)
-        }
-        return timeline
-    }()
-    private static let transcriptTotalDuration: TimeInterval = transcriptStepTimeline.last ?? 1
+    /// How long the initial fast ramp takes to cover ~70% of stallCeiling.
+    private let rampDuration: TimeInterval = 4.8
+    /// Once Play surface is ready, how long the sprint from current → 100% takes.
+    private let sprintDuration: TimeInterval = 0.9
     private let transcriptRowHeight: CGFloat = 15
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
             let elapsed = max(0, timeline.date.timeIntervalSince(startedAt))
-            let rawProgress = TubLaunchScreenView.physicalLoadingCurve(min(1, elapsed / bootDuration))
-            let baseProgress = TubLaunchScreenView.applyOrganicStalls(rawProgress, stalls: organicStalls)
-            let progress = resolvedProgress(baseProgress: baseProgress, now: timeline.date)
+            let progress = resolvedProgress(elapsed: elapsed, now: timeline.date)
             let revealCount = revealCount(for: progress)
             let cursorOn = (Int((elapsed * 2).rounded(.down)) % 2) == 0
             let spinner = spinnerFrames[Int((elapsed * 12).rounded(.down)) % spinnerFrames.count]
             let litSegments = min(bootSegments, max(1, Int((progress * Double(bootSegments)).rounded(.down))))
-            // Ping-pong scanner: bounces within the lit range
-            let scannerPeriod = 0.6
-            let scanPhase = elapsed.truncatingRemainder(dividingBy: scannerPeriod * 2) / scannerPeriod
-            let scannerNorm = scanPhase <= 1.0 ? scanPhase : 2.0 - scanPhase
+            // Scanner ping-pongs within lit range, synced to progress
+            let scannerCycle = progress * 6.0  // ~6 bounces across full progress
+            let scannerNorm = abs(scannerCycle.truncatingRemainder(dividingBy: 2.0) - 1.0)
             let scannerIndex = litSegments > 1 ? Int(scannerNorm * Double(litSegments - 1)) : 0
             let pulse = 0.65 + 0.35 * sin((elapsed + pulseSeed) * 4.2)
             let activeLineIndex = min(max(0, revealCount - 1), transcriptLines.count - 1)
@@ -102,6 +88,8 @@ struct TubLaunchScreenView: View {
             playReadyAt = isPlaySurfaceReady ? Date() : nil
             sessionToken = TubLaunchScreenView.makeSessionToken()
             pulseSeed = Double.random(in: 0.2...1.1)
+            organicStalls = TubLaunchScreenView.generateStalls()
+            stallCeiling = Double.random(in: 0.82...0.93)
         }
         .onChange(of: isPlaySurfaceReady) { _, isReady in
             if isReady, playReadyAt == nil {
@@ -248,38 +236,63 @@ struct TubLaunchScreenView: View {
         .padding(.top, 62)
     }
 
-    private func resolvedProgress(baseProgress: Double, now: Date) -> Double {
-        guard let playReadyAt else { return baseProgress }
-        let readyElapsed = max(0, now.timeIntervalSince(playReadyAt))
-        let quick = min(1, readyElapsed / quickFinishDuration)
-        let quickCurve = TubLaunchScreenView.quickFinishCurve(quick)
-        let blended = baseProgress + ((1 - baseProgress) * quickCurve)
-        return max(baseProgress, min(1, blended))
+    /// Progress ramps quickly at first, then decelerates asymptotically toward
+    /// `stallCeiling`.  Past the ramp phase it continues creeping very slowly so
+    /// the bar never fully freezes — it just gets imperceptibly slow, like real
+    /// I/O-bound loading.  Once the Play surface is ready, sprints to 100%.
+    private func resolvedProgress(elapsed: TimeInterval, now: Date) -> Double {
+        // Phase 1 — fast ramp covers ~70% of stallCeiling
+        let rampT = min(1, elapsed / rampDuration)
+        let rampContribution = stallCeiling * 0.72 * TubLaunchScreenView.rampCurve(rampT)
+
+        // Phase 2 — slow creep that continues indefinitely but asymptotically
+        // approaches stallCeiling.  Uses a logarithmic curve so it never stops
+        // entirely but gets vanishingly slow.
+        let creepHeadroom = stallCeiling - (stallCeiling * 0.72)
+        let creepT = max(0, elapsed - rampDuration * 0.6) // creep starts slightly before ramp finishes
+        let creepRate: Double = 0.35 // lower = slower creep
+        let creepContribution = creepHeadroom * (1 - exp(-creepRate * creepT))
+
+        let rawBase = rampContribution + creepContribution
+        let base = TubLaunchScreenView.applyOrganicStalls(rawBase, stalls: organicStalls)
+
+        // Add micro-drift: tiny sine wobble so the bar visibly breathes
+        let drift = 0.003 * sin(elapsed * 1.7)
+        let waiting = min(stallCeiling, max(0, base + drift))
+
+        guard let playReadyAt else {
+            return waiting
+        }
+
+        // Sprint to 100%
+        let sprintElapsed = max(0, now.timeIntervalSince(playReadyAt))
+        let sprintT = min(1, sprintElapsed / sprintDuration)
+        let sprintCurve = 1 - pow(1 - sprintT, 2.4)
+        return waiting + (1 - waiting) * sprintCurve
     }
 
+    /// Transcript lines reveal in sync with progress milestones.
+    /// Each line appears at an evenly-spaced progress threshold, with the last
+    /// line coinciding with ~95% so it appears just before completion.
     private func revealCount(for progress: Double) -> Int {
-        let clock = max(0, min(1, progress)) * TubLaunchScreenView.transcriptTotalDuration
-        var count = 0
-        for threshold in TubLaunchScreenView.transcriptStepTimeline where clock >= threshold {
-            count += 1
-        }
-        return max(1, min(transcriptLines.count, count))
+        let count = transcriptLines.count
+        // Spread reveals across 0.05 → 0.95 so first appears almost immediately
+        // and last appears just before the sprint finishes
+        let revealed = Int((progress * Double(count) / 0.95).rounded(.down))
+        return max(1, min(count, revealed))
     }
 
-    private static func physicalLoadingCurve(_ t: Double) -> Double {
+    /// Deceleration curve: fast start, long tail. Used for the ramp phase.
+    private static func rampCurve(_ t: Double) -> Double {
         let clamped = max(0, min(1, t))
-        if clamped <= 0.68 {
-            let early = clamped / 0.68
-            return 0.82 * pow(early, 0.58)
-        }
-        let tail = (clamped - 0.68) / 0.32
-        return 0.82 + (0.18 * pow(tail, 1.9))
+        // Combination: quick initial burst (square root feel) that flattens
+        return 1 - pow(1 - clamped, 0.55)
     }
 
-    /// Generates 3–5 random stall points in [0.1, 0.85] where progress briefly plateaus.
+    /// Generates 4–6 random stall points in [0.12, 0.82] where progress briefly plateaus.
     private static func generateStalls() -> [Double] {
-        let count = Int.random(in: 3...5)
-        return (0..<count).map { _ in Double.random(in: 0.1...0.85) }.sorted()
+        let count = Int.random(in: 4...6)
+        return (0..<count).map { _ in Double.random(in: 0.12...0.82) }.sorted()
     }
 
     /// Applies organic micro-stalls: at each stall point, progress hesitates
@@ -287,8 +300,8 @@ struct TubLaunchScreenView: View {
     private static func applyOrganicStalls(_ progress: Double, stalls: [Double]) -> Double {
         var adjusted = progress
         for stallPoint in stalls {
-            let stallWidth = 0.06
-            let stallDepth = 0.012
+            let stallWidth = 0.09
+            let stallDepth = 0.028
             let dist = adjusted - stallPoint
             if dist > 0 && dist < stallWidth {
                 let stallT = dist / stallWidth
@@ -296,14 +309,7 @@ struct TubLaunchScreenView: View {
                 adjusted -= dip
             }
         }
-        // Add subtle jitter (±0.3%) keyed to progress to avoid flicker
-        let jitter = 0.003 * sin(progress * 47.0)
-        return max(0, min(1, adjusted + jitter))
-    }
-
-    private static func quickFinishCurve(_ t: Double) -> Double {
-        let clamped = max(0, min(1, t))
-        return 1 - pow(1 - clamped, 2.2)
+        return max(0, min(1, adjusted))
     }
 
     private static func makeSessionToken() -> String {
@@ -634,7 +640,7 @@ struct ConnectionGateView: View {
                                 Text("Initiate pairing on THE TUB")
                                     .playSans(13, weight: .semibold)
                                     .foregroundColor(.white)
-                                Text("Tap JOLT 3× quickly, then hold on the 4th press")
+                                Text("Tap JOLT 4× quickly, then hold on the 5th press")
                                     .playSans(11, weight: .regular)
                                     .foregroundColor(.gray)
                             }

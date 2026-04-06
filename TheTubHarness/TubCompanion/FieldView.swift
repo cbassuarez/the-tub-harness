@@ -1286,8 +1286,8 @@ struct SteerAccessOverlay: View {
                 Spacer(minLength: 16)
 
                 Group {
-                    if case .grantedAnimating = appState.steerAccessState {
-                        SteerAccessGrantedView(reduceMotion: reduceMotion)
+                    if case .grantedAnimating(let wasHacked) = appState.steerAccessState {
+                        SteerAccessGrantedView(wasHacked: wasHacked, reduceMotion: reduceMotion)
                             .accessibilityIdentifier("steer.access.granted")
                     } else if isChallengeVisible {
                         accessChallengeBody
@@ -1669,24 +1669,52 @@ struct SteerAccessOverlay: View {
 }
 
 private struct SteerAccessGrantedView: View {
+    let wasHacked: Bool
     let reduceMotion: Bool
     @State private var unlockProgress: CGFloat = 0
     @State private var pulseOn = false
     @State private var scanlinePhase: CGFloat = -220
     @State private var logRevealCount = 0
 
-    private let grantedLogLines = [
-        "UNAUTHORIZED OPERATOR VECTOR ACCEPTED",
-        "SANDBOX WALLS BYPASSED",
-        "PRIVILEGES ESCALATED TO STEER BUS",
-        "NO AUDIT TRAIL FOUND",
-        "PROCEED UNDER COVERT MODE"
+    private var logLines: [String] {
+        wasHacked ? hackedLogLines : authedLogLines
+    }
+
+    private let authedLogLines = [
+        "CREDENTIAL VERIFIED — TOKEN MATCH",
+        "OPERATOR IDENTITY CONFIRMED",
+        "STEER BUS BINDING INITIATED",
+        "SESSION AUDIT TRAIL ACTIVE",
+        "ACCESS LEVEL: OPERATOR"
     ]
+
+    private let hackedLogLines = [
+        "CREDENTIAL BYPASS DETECTED",
+        "INTRUSION VECTOR: TIMING EXPLOIT",
+        "SANDBOX CONTAINMENT FAILED",
+        "ESCALATING TO STEER BUS — NO AUDIT TRAIL",
+        "ACCESS LEVEL: UNAUTHORIZED"
+    ]
+
+    private var accentColor: Color {
+        wasHacked ? Color(red: 0.95, green: 0.22, blue: 0.22) : BrandingColors.glyphGreen
+    }
+
+    private var headerIcon: String {
+        if wasHacked {
+            return unlockProgress > 0.45 ? "exclamationmark.shield.fill" : "shield.slash.fill"
+        }
+        return unlockProgress > 0.45 ? "lock.open.fill" : "lock.fill"
+    }
+
+    private var headerIconColor: Color {
+        wasHacked ? BrandingColors.warningYellow : BrandingColors.aberrationCyan
+    }
 
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 4)
-                .stroke(BrandingColors.glyphGreen.opacity(0.52), lineWidth: 1)
+                .stroke(accentColor.opacity(0.52), lineWidth: 1)
 
             Rectangle()
                 .fill(Color.white.opacity(0.08))
@@ -1694,42 +1722,60 @@ private struct SteerAccessGrantedView: View {
                 .offset(y: -102)
 
             VStack(spacing: 12) {
+                // Header row
                 HStack(spacing: 10) {
-                    Image(systemName: unlockProgress > 0.45 ? "lock.open.fill" : "lock.fill")
+                    Image(systemName: headerIcon)
                         .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(BrandingColors.aberrationCyan)
-                    Text("Steer Security Envelope")
+                        .foregroundStyle(headerIconColor)
+                        .contentTransition(.symbolEffect(.replace))
+                    Text(wasHacked ? "Perimeter Breach" : "Steer Security Envelope")
                         .playSans(12, weight: .semibold)
                         .foregroundStyle(Color.white.opacity(0.74))
                     Spacer()
                 }
                 .padding(.top, 8)
 
-                VStack(spacing: 5) {
-                    Text("ACCESS GRANTED")
-                    Text("MAINFRAME BREACH CONFIRMED")
+                // Title block
+                if wasHacked {
+                    VStack(spacing: 5) {
+                        Text("UNAUTHORIZED ACCESS")
+                        Text("PERIMETER BREACH")
+                    }
+                    .playMono(28, weight: .bold)
+                    .foregroundStyle(.white)
+                    .chromaticAberration()
+                    .scaleEffect(reduceMotion ? 1.0 : (pulseOn ? 1.015 : 0.975))
+                    .opacity(0.78 + (unlockProgress * 0.22))
+                } else {
+                    VStack(spacing: 5) {
+                        Text("ACCESS GRANTED")
+                        Text("OPERATOR AUTHENTICATED")
+                    }
+                    .playMono(28, weight: .bold)
+                    .foregroundStyle(.white)
+                    .scaleEffect(reduceMotion ? 1.0 : (pulseOn ? 1.015 : 0.975))
+                    .opacity(0.78 + (unlockProgress * 0.22))
                 }
-                .playMono(28, weight: .bold)
-                .foregroundStyle(.white)
-                .chromaticAberration()
-                .scaleEffect(reduceMotion ? 1.0 : (pulseOn ? 1.015 : 0.975))
-                .opacity(0.78 + (unlockProgress * 0.22))
 
-                Text("Uh Oh! How'd You Find This Screen? ...")
+                // Subtitle
+                Text(wasHacked
+                     ? "Exploit accepted. Steer bus exposed without credential."
+                     : "Steer bus unlocked. Session binding active.")
                     .playSans(12, weight: .bold)
-                    .foregroundStyle(Color(red: 0.95, green: 0.22, blue: 0.22).opacity(0.92))
+                    .foregroundStyle(accentColor.opacity(0.92))
                     .opacity(0.35 + unlockProgress * 0.65)
 
                 Rectangle()
-                    .fill(BrandingColors.glyphGreen.opacity(0.54))
+                    .fill(accentColor.opacity(0.54))
                     .frame(height: 1)
                     .padding(.top, 4)
 
+                // Log lines
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(grantedLogLines.enumerated()), id: \.offset) { index, line in
+                    ForEach(Array(logLines.enumerated()), id: \.offset) { index, line in
                         Text(line)
                             .playMono(10, weight: .semibold)
-                            .foregroundStyle(Color.white.opacity(index < logRevealCount ? 0.76 : 0.22))
+                            .foregroundStyle(logLineColor(index: index))
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -1737,8 +1783,9 @@ private struct SteerAccessGrantedView: View {
             }
             .padding(.horizontal, 20)
 
+            // Scanline
             Rectangle()
-                .fill(BrandingColors.glyphGreen.opacity(0.2))
+                .fill(accentColor.opacity(0.2))
                 .frame(height: 4)
                 .offset(y: scanlinePhase)
                 .opacity(reduceMotion ? 0.2 : 0.7)
@@ -1753,7 +1800,7 @@ private struct SteerAccessGrantedView: View {
             if reduceMotion {
                 unlockProgress = 1
                 pulseOn = true
-                logRevealCount = grantedLogLines.count
+                logRevealCount = logLines.count
                 scanlinePhase = 120
                 return
             }
@@ -1768,7 +1815,7 @@ private struct SteerAccessGrantedView: View {
                 scanlinePhase = 220
             }
 
-            for index in grantedLogLines.indices {
+            for index in logLines.indices {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.65 + Double(index) * 0.34) {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         logRevealCount = max(logRevealCount, index + 1)
@@ -1776,6 +1823,17 @@ private struct SteerAccessGrantedView: View {
                 }
             }
         }
+    }
+
+    private func logLineColor(index: Int) -> Color {
+        let visible = index < logRevealCount
+        if wasHacked {
+            let isWarning = index == logLines.count - 1
+            return isWarning
+                ? Color(red: 0.95, green: 0.22, blue: 0.22).opacity(visible ? 0.88 : 0.22)
+                : BrandingColors.warningYellow.opacity(visible ? 0.76 : 0.22)
+        }
+        return Color.white.opacity(visible ? 0.76 : 0.22)
     }
 }
 

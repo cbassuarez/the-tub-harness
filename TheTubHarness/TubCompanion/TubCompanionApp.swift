@@ -111,7 +111,9 @@ enum SteerAccessState: Equatable {
     case locked
     case inChallenge
     case cooldown(until: Date)
-    case grantedAnimating
+    /// `wasHacked` distinguishes the legit token path (false) from the
+    /// mini-game bypass path (true) so the granted animation can reflect it.
+    case grantedAnimating(wasHacked: Bool)
     case unlocked
 
     var chipLabel: String {
@@ -402,18 +404,21 @@ struct CompanionRootView: View {
             }
 
             Task { @MainActor in
-                let minimumVisibleUntil = Date().addingTimeInterval(3.2)
-                let hardDeadline = Date().addingTimeInterval(6.0)
+                let minimumVisibleUntil = Date().addingTimeInterval(2.8)
+                let hardDeadline = Date().addingTimeInterval(8.0)
 
+                // Wait for minimum visibility period
                 while Date() < minimumVisibleUntil {
                     try? await Task.sleep(nanoseconds: 40_000_000)
                 }
+                // Wait for Play surface to actually be ready (the animation
+                // stalls at ~88% until this fires, so the time is used)
                 while !isPlaySurfaceReady, Date() < hardDeadline {
-                    try? await Task.sleep(nanoseconds: 70_000_000)
+                    try? await Task.sleep(nanoseconds: 70_500_000)
                 }
 
-                // Hold at READY for 350ms before fade-out
-                try? await Task.sleep(nanoseconds: 350_000_000)
+                // Give the sprint animation time to reach 100%
+                try? await Task.sleep(nanoseconds: 900_000_000)
 
                 withAnimation(.easeOut(duration: 0.35)) {
                     showLaunchScreen = false
@@ -1743,7 +1748,7 @@ class TubCompanionAppState: NSObject, ObservableObject {
 
         #if DEBUG
         if debugBypassSteerLock {
-            completeSteerChallenge()
+            completeSteerChallenge(wasHacked: true)
             return
         }
         #endif
@@ -1757,7 +1762,7 @@ class TubCompanionAppState: NSObject, ObservableObject {
         if resolvedMatch {
             nextSession.strikes = 0
             if nextSession.roundIndex + 1 >= max(1, steerHackRoundSpecs.count) {
-                completeSteerChallenge()
+                completeSteerChallenge(wasHacked: true)
                 return
             }
             nextSession.roundIndex += 1
@@ -1779,9 +1784,9 @@ class TubCompanionAppState: NSObject, ObservableObject {
         steerAccessState = .cooldown(until: until)
     }
 
-    func completeSteerChallenge() {
+    func completeSteerChallenge(wasHacked: Bool = false) {
         steerUnlockExpiresAt = Date()
-        steerAccessState = .grantedAnimating
+        steerAccessState = .grantedAnimating(wasHacked: wasHacked)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) { [weak self] in
             guard let self else { return }
             if case .grantedAnimating = self.steerAccessState {
