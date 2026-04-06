@@ -1896,6 +1896,22 @@ struct ContentView: View {
                     softLink.tick(rawChannelLevels: rawLevels, channelCount: channelCount)
                 }
             }
+            softLink.onEvents = { [weak videoStage, weak audienceServer] events in
+                guard let videoStage, let audienceServer else { return }
+                print("[SoftLink-CV] onEvents callback: \(events.count) events")
+                videoStage.ingestSoftLinkEvents(events)
+                for event in events {
+                    let message: String
+                    switch event.action {
+                    case .pairingStarted:  message = "LINK:PAIRING"
+                    case .pairingCancelled: message = "LINK:CANCELLED"
+                    case .pairingTimedOut:  message = "LINK:TIMEOUT"
+                    case .channelLinked:    message = "LINK:CH\(event.channelIndex + 1):LINKED"
+                    case .channelUnlinked:  message = "LINK:CH\(event.channelIndex + 1):UNLINKED"
+                    }
+                    audienceServer.broadcastAck(message: message)
+                }
+            }
             if ProcessInfo.processInfo.environment["TUB_PRELOAD_JOLT_CLIPS"] == "1" {
                 let clipDirectory = URL(fileURLWithPath: "/Users/seb/Desktop/video-for-modes4-7")
                 videoClipPool.loadInBackground(from: clipDirectory)
@@ -1935,12 +1951,6 @@ struct ContentView: View {
         }
         .onReceive(videoStage.$snapshot.removeDuplicates().receive(on: RunLoop.main)) { snapshot in
             audienceServer.publishStageSnapshot(StageSnapshotPayload.fromVideoStageSnapshot(snapshot))
-        }
-        .onReceive(softLink.$pendingEvents.receive(on: RunLoop.main)) { events in
-            guard !events.isEmpty else { return }
-            processSoftLinkEvents(events)
-            // Clear after processing — will re-fire with [] but guard catches it.
-            softLink.clearEvents()
         }
         .onChange(of: isReplayRunning) { _, running in
             if running {
@@ -4048,27 +4058,6 @@ struct ContentView: View {
         }
         joltHoldSources.removeAll()
         client.setJoltHeld(false)
-    }
-
-    private func processSoftLinkEvents(_ events: [SoftLinkEvent]) {
-        print("[SoftLink-CV] processing \(events.count) events → video stage + audience broadcast")
-        videoStage.ingestSoftLinkEvents(events)
-        for event in events {
-            let message: String
-            switch event.action {
-            case .pairingStarted:
-                message = "LINK:PAIRING"
-            case .pairingCancelled:
-                message = "LINK:CANCELLED"
-            case .pairingTimedOut:
-                message = "LINK:TIMEOUT"
-            case .channelLinked:
-                message = "LINK:CH\(event.channelIndex + 1):LINKED"
-            case .channelUnlinked:
-                message = "LINK:CH\(event.channelIndex + 1):UNLINKED"
-            }
-            audienceServer.broadcastAck(message: message)
-        }
     }
 
     @ViewBuilder

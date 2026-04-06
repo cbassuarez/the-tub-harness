@@ -131,7 +131,10 @@ final class SoftLinkCoordinator: ObservableObject {
     @Published private(set) var globalState: SoftLinkGlobalState = .idle
     @Published private(set) var channelStates: [SoftLinkChannelState] = []
     @Published private(set) var linkGainLinear: [Float] = []
-    @Published private(set) var pendingEvents: [SoftLinkEvent] = []
+
+    /// Direct callback — called synchronously when events are emitted.
+    /// Set this in .onAppear to wire events to video stage + audience server.
+    var onEvents: (([SoftLinkEvent]) -> Void)?
 
     private var gesture = JoltLinkGesture()
     private var gestureTriggered = false
@@ -220,18 +223,6 @@ final class SoftLinkCoordinator: ObservableObject {
         checkGestureTrigger(at: now)
         advanceStateMachine(rawChannelLevels: rawChannelLevels, channelCount: channelCount, at: now)
         recomputeGains(channelCount: channelCount, at: now)
-    }
-
-    /// Consume and clear pending events (called by video output / audience server).
-    func drainEvents() -> [SoftLinkEvent] {
-        let events = pendingEvents
-        pendingEvents.removeAll()
-        return events
-    }
-
-    /// Clear pending events after external processing.
-    func clearEvents() {
-        pendingEvents.removeAll()
     }
 
     // MARK: - Internals
@@ -426,8 +417,11 @@ final class SoftLinkCoordinator: ObservableObject {
     }
 
     private func emit(_ event: SoftLinkEvent) {
-        print("[SoftLink] ★ EMIT event: \(event.action), pendingEvents count will be \(pendingEvents.count + 1)")
-        pendingEvents.append(event)
+        print("[SoftLink] ★ EMIT event: \(event.action)")
+        onEvents?([event])
+        if onEvents == nil {
+            print("[SoftLink] ⚠️ onEvents callback is nil — events are being dropped!")
+        }
     }
 
     // MARK: - Ramp Curve
