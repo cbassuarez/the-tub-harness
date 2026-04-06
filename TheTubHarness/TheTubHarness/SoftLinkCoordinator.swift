@@ -144,6 +144,10 @@ final class SoftLinkCoordinator: ObservableObject {
     let rampDownDuration: TimeInterval = 1.5
     let spikeThreshold: Float = 0.08
 
+    init() {
+        print("[SoftLink] ★ SoftLinkCoordinator INIT")
+    }
+
     // MARK: - Gesture Input
 
     /// Called when jolt hold state changes (button press/release, Cmd+J).
@@ -422,6 +426,7 @@ final class SoftLinkCoordinator: ObservableObject {
     }
 
     private func emit(_ event: SoftLinkEvent) {
+        print("[SoftLink] ★ EMIT event: \(event.action), pendingEvents count will be \(pendingEvents.count + 1)")
         pendingEvents.append(event)
     }
 

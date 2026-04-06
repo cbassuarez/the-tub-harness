@@ -1835,8 +1835,11 @@ struct ContentView: View {
             .frame(width: 0, height: 0)
 
             // Direct pairing mode toggle — bypasses tap+hold gesture entirely.
-            Button("") { softLink.activatePairing() }
-                .keyboardShortcut("j", modifiers: [.command, .shift])
+            Button("") {
+                print("[SoftLink-CV] ★ Cmd+Shift+P → activatePairing()")
+                softLink.activatePairing()
+            }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
                 .frame(width: 0, height: 0)
                 .opacity(0)
         }
