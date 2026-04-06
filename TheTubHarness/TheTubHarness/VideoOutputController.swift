@@ -1165,8 +1165,11 @@ final class VideoStageStore: ObservableObject {
     }
 
     func ingestSoftLinkEvents(_ events: [SoftLinkEvent]) {
+        guard !events.isEmpty else { return }
         softLinkEvents.append(contentsOf: events)
+        print("[SoftLink-VS] ingested \(events.count) events, total sprites in snapshot: \(snapshot.sprites.count)")
         rebuildSnapshot()
+        print("[SoftLink-VS] after rebuild: \(snapshot.sprites.count) sprites, isRunning=\(snapshot.isRunning)")
     }
 
     func testingRebuild(

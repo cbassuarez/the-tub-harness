@@ -54,6 +54,10 @@ struct StageOutputView: View {
                             StageWordmarkField(snapshot: snapshot, now: now, canvasSize: proxy.size, flashOpacity: flashOpacity)
                         } else {
                             StageStandbyField(snapshot: snapshot)
+                            // Show SoftLink sprites even when session isn't running.
+                            if !snapshot.sprites.isEmpty {
+                                StageTerminalLogLayer(snapshot: snapshot, now: now, canvasSize: proxy.size)
+                            }
                         }
 
                         if showNormalFlash {
