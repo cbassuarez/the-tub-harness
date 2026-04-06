@@ -1,5 +1,8 @@
 import SwiftUI
 import Combine
+#if canImport(AppKit)
+import AppKit
+#endif
 
 final class ModelServerProcess: ObservableObject {
     @Published private(set) var isRunning: Bool = false

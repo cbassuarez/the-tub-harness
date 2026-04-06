@@ -6,6 +6,9 @@
 //
 
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 import CoreData
 
 private enum HarnessLaunchOptions {

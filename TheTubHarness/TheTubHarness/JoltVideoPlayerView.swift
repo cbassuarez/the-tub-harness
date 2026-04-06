@@ -1,5 +1,8 @@
 import AVFoundation
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 /// Minimal NSViewRepresentable wrapping AVPlayerLayer for jolt video playback.
 struct JoltVideoPlayerView: NSViewRepresentable {
