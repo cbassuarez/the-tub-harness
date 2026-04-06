@@ -149,6 +149,7 @@ final class LooperEngine: NSObject, ObservableObject {
     private var synthExciterGain: Float = 0.2
     private var synthBaseMixGain: Float = 0.8
     private var synthDuckingGain: Float = 1
+    private var externalRouteActive: Bool = false
     private var pendingQuantizedSynthOns: [Int: DispatchWorkItem] = [:]
     private var pendingQuantizedSynthOffs: [Int: DispatchWorkItem] = [:]
     private var pendingRecordSources: [UUID: RecordSource] = [:]
@@ -261,6 +262,7 @@ final class LooperEngine: NSObject, ObservableObject {
             } catch {
                 print("❌ Audio engine start failed: \(error)")
             }
+            self.applyEffectiveMasterVolumeLocked()
         }
     }
 
@@ -703,8 +705,24 @@ final class LooperEngine: NSObject, ObservableObject {
             defer { self.lock.unlock() }
             
             self.masterVolume = max(0, min(1, volume))
-            self.mixerNode?.outputVolume = self.masterVolume
+            self.applyEffectiveMasterVolumeLocked()
         }
+    }
+
+    /// Mute all engine output when no external cable route is active.
+    func setExternalRouteActive(_ active: Bool) {
+        audioQueue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            self.externalRouteActive = active
+            self.applyEffectiveMasterVolumeLocked()
+        }
+    }
+
+    private func applyEffectiveMasterVolumeLocked() {
+        let effective: Float = externalRouteActive ? masterVolume : 0
+        mixerNode?.outputVolume = effective
     }
     
     func setBPM(_ bpm: Int) {

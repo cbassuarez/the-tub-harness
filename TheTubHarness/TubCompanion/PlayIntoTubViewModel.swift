@@ -473,6 +473,7 @@ final class PlayIntoTubViewModel: ObservableObject {
         }
 
         looperEngine.setSynthEnabled(connectionState.isReady || debugAllowsCableBypass)
+        looperEngine.setExternalRouteActive(cableReady)
     }
 
     private func rebuildPadStates(pads: [LooperPad], progress: [UUID: Double], levels: [UUID: Float]) {
