@@ -1165,7 +1165,9 @@ private struct ShellInspectorPane: View {
             inspectorLine("ROUTE", playState.routeDescription)
             inspectorLine("SESSION", playState.sessionId)
             inspectorLine("CONTRIBUTIONS", "\(playState.contributionCount)")
+            #if DEBUG
             inspectorLine("DEBUG OUTPUT", playState.debugOutput, active: playState.debugOutput != "OFF")
+            #endif
             Text("Grid + Long Strip Run in Primary Pane.")
                 .playSans(10, weight: .semibold)
                 .foregroundStyle(Color.white.opacity(0.54))

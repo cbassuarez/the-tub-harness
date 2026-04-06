@@ -225,8 +225,7 @@ struct TubCompanionTests {
             appState: appState,
             harnessClient: harnessClient,
             externalAudioRouteMonitor: routeMonitor,
-            looperEngine: engine,
-            debugAllowCableBypassOverride: false
+            looperEngine: engine
         )
 
         viewModel.startCaptureHold()

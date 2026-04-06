@@ -214,6 +214,7 @@ final class SettingsViewModel: ObservableObject {
     }
 
     var debugLines: [String] {
+        #if DEBUG
         let outputTypes = externalAudioRouteMonitor.lastSeenOutputPortTypes
             .map { $0.rawValue.uppercased() }
             .joined(separator: ", ")
@@ -222,6 +223,9 @@ final class SettingsViewModel: ObservableObject {
             "CABLE ROUTE SIMULATED: \(appState.isCableRouteSimulated ? "YES" : "NO")",
             "OUTPUT PORT TYPES: \(outputTypes.isEmpty ? "NONE" : outputTypes)"
         ]
+        #else
+        return []
+        #endif
     }
 
     var countdownDisplay: String {
@@ -1284,7 +1288,7 @@ struct SettingsView: View {
                             }
 
                             SettingsSection(title: "PLAY") {
-                                actionRow(title: "LOOP RATE: \(gridLoopMs)ms", systemImage: "metronome") {
+                                actionRow(title: "LOOP RATE: \(gridLoopMs)ms", systemImage: "repeat") {
                                     showLoopRateModal = true
                                 }
                             }

@@ -188,7 +188,6 @@ final class PlayIntoTubViewModel: ObservableObject {
     private let harnessClient: HarnessClient
     private let looperEngine: LooperEngine
     private let haptics: PlayDeckHapticsClient
-    private let debugAllowCableBypassOverride: Bool?
     private var cancellables = Set<AnyCancellable>()
     private var captureTimer: Timer?
     private var enginePollTimer: Timer?
@@ -198,33 +197,7 @@ final class PlayIntoTubViewModel: ObservableObject {
 
     private let keyNames = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 
-    #if DEBUG
-    private func debugFlag(_ name: String, defaultValue: Bool) -> Bool {
-        let args = CommandLine.arguments
-        if let index = args.firstIndex(of: name), index + 1 < args.count {
-            let value = args[index + 1].uppercased()
-            if value == "YES" || value == "TRUE" || value == "1" { return true }
-            if value == "NO" || value == "FALSE" || value == "0" { return false }
-        }
-
-        if let raw = ProcessInfo.processInfo.environment[name]?.uppercased() {
-            if raw == "YES" || raw == "TRUE" || raw == "1" { return true }
-            if raw == "NO" || raw == "FALSE" || raw == "0" { return false }
-        }
-        return defaultValue
-    }
-
-    private var debugAllowsCableBypass: Bool {
-        if let debugAllowCableBypassOverride {
-            return debugAllowCableBypassOverride
-        }
-        // Debug default is ON so capture/synth are testable without cable hardware.
-        return debugFlag("-DEBUG_ALLOW_SPEAKER_WITHOUT_CABLE", defaultValue: true)
-            || debugFlag("-DEBUG_SKIP_ENTRY_GATE", defaultValue: true)
-    }
-    #else
     private var debugAllowsCableBypass: Bool { false }
-    #endif
 
     init(
         appState: TubCompanionAppState,
@@ -232,14 +205,12 @@ final class PlayIntoTubViewModel: ObservableObject {
         externalAudioRouteMonitor _: ExternalAudioRouteMonitor,
         looperEngine: LooperEngine,
         haptics: PlayDeckHapticsClient? = nil,
-        debugAllowCableBypassOverride: Bool? = nil,
         captureLimitSeconds: TimeInterval = 60
     ) {
         self.appState = appState
         self.harnessClient = harnessClient
         self.looperEngine = looperEngine
         self.haptics = haptics ?? SystemPlayDeckHapticsClient()
-        self.debugAllowCableBypassOverride = debugAllowCableBypassOverride
         self.captureLimitSeconds = captureLimitSeconds
         self.bpm = looperEngine.bpm
         self.quantizeMode = looperEngine.quantizeMode

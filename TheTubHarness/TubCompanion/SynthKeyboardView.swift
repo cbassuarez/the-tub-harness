@@ -155,14 +155,18 @@ struct SynthKeyboardView: View {
         AudioServicesPlayAlertSound(SystemSoundID(1104)) // Brief click feedback
         
         // Play synth note (would integrate with LooperEngine)
+        #if DEBUG
         print("🎹 Playing: \(noteName) (MIDI: \(midiNote))")
+        #endif
     }
     
     private func releaseNote(_ note: String, octave: Int) {
         let noteName = "\(note)\(octave)"
         pressedNotes.remove(noteName)
         
+        #if DEBUG
         print("🎹 Released: \(noteName)")
+        #endif
     }
     
     private func getMidiNote(_ note: String, octave: Int) -> Int {
