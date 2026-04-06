@@ -517,6 +517,13 @@ class AudienceSessionServer: ObservableObject {
         sendEnvelope(envelope, to: sessionId)
     }
 
+    func broadcastAck(message: String) {
+        let sessions = Array(sessionConnectionKeys.keys)
+        for sessionId in sessions {
+            sendAck(to: sessionId, message: message)
+        }
+    }
+
     func sendDescriptorSnapshot(to sessionId: String) {
         let payload = DescriptorSnapshotPayload(revision: descriptorRevision, descriptors: descriptorFallback)
         let envelope = AudienceEnvelope(kind: .descriptorSnapshot, sessionId: sessionId, descriptorSnapshot: payload)

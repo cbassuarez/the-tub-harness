@@ -723,6 +723,7 @@ private struct StageTerminalLogLayer: View {
         case .deltaEcho: return "DLT"
         case .audioDebris: return "AUD"
         case .memoryGhost: return "MEM"
+        case .linkSignal: return "LNK"
         }
     }
 

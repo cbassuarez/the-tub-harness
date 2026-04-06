@@ -252,7 +252,7 @@ struct TubLaunchScreenView: View {
         .padding(.bottom, 24)
         .opacity(reduceMotion ? 1 : (0.9 + 0.1 * pulse))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .safeAreaPadding(.top)
+        .padding(.top, 62)
     }
 
     private func resolvedProgress(baseProgress: Double, now: Date) -> Double {

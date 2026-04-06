@@ -1762,6 +1762,7 @@ struct ContentView: View {
     @StateObject private var mlMonitor = MLMonitorStore()
     @StateObject private var videoStage = VideoStageStore()
     @StateObject private var videoOutput = VideoOutputController()
+    @StateObject private var softLink = SoftLinkCoordinator()
     private let webcamPool = USGSWebcamPool()
     private let videoClipPool = JoltVideoClipPool()
     @StateObject private var speechTranscriber = SpeechTranscriber()
@@ -1880,6 +1881,12 @@ struct ContentView: View {
                     videoStage.ingestStageAudioSnapshot(snapshot)
                 }
             }
+            analyzer.onSoftLinkTick = { [weak softLink] rawLevels, channelCount in
+                DispatchQueue.main.async {
+                    guard let softLink else { return }
+                    softLink.tick(rawChannelLevels: rawLevels, channelCount: channelCount)
+                }
+            }
             if ProcessInfo.processInfo.environment["TUB_PRELOAD_JOLT_CLIPS"] == "1" {
                 let clipDirectory = URL(fileURLWithPath: "/Users/seb/Desktop/video-for-modes4-7")
                 videoClipPool.loadInBackground(from: clipDirectory)
@@ -1919,6 +1926,10 @@ struct ContentView: View {
         }
         .onReceive(videoStage.$snapshot.removeDuplicates().receive(on: RunLoop.main)) { snapshot in
             audienceServer.publishStageSnapshot(StageSnapshotPayload.fromVideoStageSnapshot(snapshot))
+        }
+        .onReceive(softLink.$pendingEvents.receive(on: RunLoop.main)) { events in
+            guard !events.isEmpty else { return }
+            drainSoftLinkEvents()
         }
         .onChange(of: isReplayRunning) { _, running in
             if running {
@@ -2391,6 +2402,9 @@ struct ContentView: View {
                             Label(client.isJoltHeld ? "Jolt Held" : "Hold Jolt", systemImage: client.isJoltHeld ? "bolt.fill" : "bolt")
                         }
                             .disabled(isReplayRunning)
+                            .overlay(alignment: .topTrailing) {
+                                softLinkBadge
+                            }
 
                         Button("Clear") { client.pulseClear() }
                             .shellActionButton(role: .utilityAction, size: .compact)
@@ -3986,6 +4000,7 @@ struct ContentView: View {
             }
         case "jolt":
             client.pulseJolt()
+            softLink.handleJoltPulse()
         case "clear":
             client.pulseClear()
         case "replay_start":
@@ -4009,7 +4024,10 @@ struct ContentView: View {
         } else {
             joltHoldSources.remove(source)
         }
-        client.setJoltHeld(!joltHoldSources.isEmpty)
+        let isHeld = !joltHoldSources.isEmpty
+        client.setJoltHeld(isHeld)
+        softLink.handleJoltHoldChanged(isHeld: isHeld)
+        print("[SoftLink-CV] setJoltHold source=\(source) active=\(active) isHeld=\(isHeld)")
     }
 
     private func releaseAllJoltHolds() {
@@ -4019,6 +4037,47 @@ struct ContentView: View {
         }
         joltHoldSources.removeAll()
         client.setJoltHeld(false)
+    }
+
+    private func drainSoftLinkEvents() {
+        let drained = softLink.drainEvents()
+        print("[SoftLink-CV] draining \(drained.count) events, broadcasting to audience + video stage")
+        videoStage.ingestSoftLinkEvents(drained)
+        for event in drained {
+            let message: String
+            switch event.action {
+            case .pairingStarted:
+                message = "LINK:PAIRING"
+            case .pairingCancelled:
+                message = "LINK:CANCELLED"
+            case .pairingTimedOut:
+                message = "LINK:TIMEOUT"
+            case .channelLinked:
+                message = "LINK:CH\(event.channelIndex + 1):LINKED"
+            case .channelUnlinked:
+                message = "LINK:CH\(event.channelIndex + 1):UNLINKED"
+            }
+            audienceServer.broadcastAck(message: message)
+        }
+    }
+
+    @ViewBuilder
+    private var softLinkBadge: some View {
+        switch softLink.globalState {
+        case .idle:
+            EmptyView()
+        case .listening:
+            Circle()
+                .fill(Color.green)
+                .frame(width: 8, height: 8)
+                .offset(x: 4, y: -4)
+                .transition(.scale)
+        case .linked:
+            Circle()
+                .fill(Color.cyan)
+                .frame(width: 8, height: 8)
+                .offset(x: 4, y: -4)
+        }
     }
 
     private func isHeaderPanelVisible(_ panel: ShellVisibilityPanel) -> Bool {

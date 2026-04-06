@@ -600,6 +600,7 @@ final class AudioInputAnalyzer: ObservableObject {
             audioIn.onStageAudioSnapshot = onLiveStageAudioSnapshot
         }
     }
+    var onSoftLinkTick: ((_ rawChannelLevels: [Float], _ channelCount: Int) -> Void)?
 
     init() {
         let store = InputRoutingPersistence.loadState()
@@ -872,6 +873,11 @@ final class AudioInputAnalyzer: ObservableObject {
         let mono = audioIn.snapshotLastSamples(count: sampleCount)
         let features = extractor.extract(samples: mono)
         let meters = audioIn.snapshotChannelLevels(channelCountHint: inputRouteState.inputChannels)
+
+        if let onSoftLinkTick {
+            let channelCount = inputRouteState.inputChannels
+            onSoftLinkTick(meters, channelCount)
+        }
 
         publish(
             FeaturePacketSnapshot(

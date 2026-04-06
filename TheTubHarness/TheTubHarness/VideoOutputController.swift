@@ -53,6 +53,7 @@ enum StageModuleArchetype: String, Equatable {
     case deltaEcho = "delta_echo"
     case audioDebris = "audio_debris"
     case memoryGhost = "memory_ghost"
+    case linkSignal = "link_signal"
 }
 
 enum StageIndustrialPalette {
@@ -1074,6 +1075,8 @@ final class VideoStageStore: ObservableObject {
     private var latestSpeechTranscription: String?
     private var latestSpeechTimestamp: Date?
     private var audienceInfluence: AudienceInfluenceTelemetry?
+    private var softLinkEvents: [SoftLinkEvent] = []
+    private var softLinkListeningSprite: StageThoughtSprite?
 
     func bind(client: TubMLClient) {
         let objectID = ObjectIdentifier(client)
@@ -1158,6 +1161,11 @@ final class VideoStageStore: ObservableObject {
     func ingestAudienceInfluenceTelemetry(_ telemetry: AudienceInfluenceTelemetry?) {
         guard audienceInfluence != telemetry else { return }
         audienceInfluence = telemetry
+        rebuildSnapshot()
+    }
+
+    func ingestSoftLinkEvents(_ events: [SoftLinkEvent]) {
+        softLinkEvents.append(contentsOf: events)
         rebuildSnapshot()
     }
 
@@ -1325,7 +1333,121 @@ final class VideoStageStore: ObservableObject {
             )
         }
 
+        // Inject soft-link sprites (pairing mode, channel linked/unlinked).
+        let softLinkSprites = buildSoftLinkSprites(mode: built.mode, now: Date())
+        if !softLinkSprites.isEmpty {
+            built = VideoStageSnapshot(
+                mode: built.mode,
+                isRunning: built.isRunning,
+                isWaiting: built.isWaiting,
+                waitingReason: built.waitingReason,
+                latencyMs: built.latencyMs,
+                updatedAt: built.updatedAt,
+                wordmark: built.wordmark,
+                sceneProfile: built.sceneProfile,
+                visualProfile: built.visualProfile,
+                params: built.params,
+                picks: built.picks,
+                changes: built.changes,
+                sprites: built.sprites + softLinkSprites,
+                hasAdjustments: built.hasAdjustments,
+                joltHeld: built.joltHeld,
+                joltBeganAt: built.joltBeganAt,
+                joltSeed: built.joltSeed,
+                stageAudio: built.stageAudio,
+                visual: built.visual,
+                thoughtChangedAt: built.thoughtChangedAt,
+                thoughtLogComposedAt: built.thoughtLogComposedAt,
+                monitorSnapshot: built.monitorSnapshot
+            )
+        }
+
         snapshot = built
+    }
+
+    private func buildSoftLinkSprites(mode: Int, now: Date) -> [StageThoughtSprite] {
+        var sprites: [StageThoughtSprite] = []
+
+        for event in softLinkEvents {
+            let token: String
+            let accent: StageAccentRole
+            let holdDuration: TimeInterval
+
+            switch event.action {
+            case .pairingStarted:
+                token = "PAIRING MODE"
+                accent = .signal
+                holdDuration = 12.0
+                let sprite = StageThoughtSprite(
+                    id: "soft-link-listening",
+                    mode: mode,
+                    archetype: .linkSignal,
+                    token: token,
+                    detail: "awaiting channel signal",
+                    accentRole: accent,
+                    secondaryRole: .dim,
+                    origin: CGPoint(x: 0.5, y: 0.18),
+                    drift: .zero,
+                    rotationDegrees: 0,
+                    createdAt: now,
+                    delay: 0,
+                    fadeInDuration: 0.2,
+                    holdDuration: holdDuration,
+                    fadeOutDuration: 0.5,
+                    blurRadius: 0,
+                    scale: 1.2
+                )
+                softLinkListeningSprite = sprite
+                sprites.append(sprite)
+                continue
+
+            case .pairingCancelled, .pairingTimedOut:
+                softLinkListeningSprite = nil
+                token = event.action == .pairingCancelled ? "PAIRING CANCELLED" : "PAIRING TIMEOUT"
+                accent = .dim
+                holdDuration = 1.5
+
+            case .channelLinked:
+                token = "CH\(event.channelIndex + 1) LINKED"
+                accent = .active
+                holdDuration = 2.5
+
+            case .channelUnlinked:
+                token = "CH\(event.channelIndex + 1) UNLINKED"
+                accent = .warning
+                holdDuration = 2.0
+            }
+
+            sprites.append(StageThoughtSprite(
+                id: "soft-link-\(event.id)",
+                mode: mode,
+                archetype: .linkSignal,
+                token: token,
+                detail: nil,
+                accentRole: accent,
+                secondaryRole: .dim,
+                origin: CGPoint(x: 0.5, y: 0.24),
+                drift: CGSize(width: 0, height: -0.02),
+                rotationDegrees: 0,
+                createdAt: now,
+                delay: 0,
+                fadeInDuration: 0.15,
+                holdDuration: holdDuration,
+                fadeOutDuration: 0.8,
+                blurRadius: 0,
+                scale: 1.1
+            ))
+        }
+        softLinkEvents.removeAll()
+
+        // Keep the persistent listening sprite alive while in pairing mode.
+        if let listening = softLinkListeningSprite, listening.isAlive(at: now), sprites.isEmpty {
+            sprites.append(listening)
+        } else if let listening = softLinkListeningSprite, !listening.isAlive(at: now) {
+            softLinkListeningSprite = nil
+        }
+
+        return sprites
     }
 }
 struct StageDisplayReference: Codable, Equatable {
