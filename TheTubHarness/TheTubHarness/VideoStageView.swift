@@ -64,6 +64,11 @@ struct StageOutputView: View {
                             StageFlashOverlay(snapshot: snapshot, pattern: flashPattern, opacity: flashOpacity)
                                 .allowsHitTesting(false)
                         }
+
+                        // Prominent SoftLink lower-third overlay
+                        if case .inactive = store.softLinkPhase {} else {
+                            SoftLinkPairingOverlay(phase: store.softLinkPhase, now: now, canvasSize: proxy.size)
+                        }
                     }
                     .modifier(StageJoltDistortion(
                         joltHeld: snapshot.joltHeld,
@@ -1618,5 +1623,144 @@ struct CommandKeyHoldMonitor: NSViewRepresentable {
         private func matchesKey(event: NSEvent) -> Bool {
             event.charactersIgnoringModifiers?.lowercased() == key
         }
+    }
+}
+
+// MARK: - SoftLink Lower-Third Overlay
+
+private struct SoftLinkPairingOverlay: View {
+    let phase: SoftLinkVisualPhase
+    let now: Date
+    let canvasSize: CGSize
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            lowerThird
+                .padding(.horizontal, canvasSize.width * 0.04)
+                .padding(.bottom, canvasSize.height * 0.06)
+        }
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private var lowerThird: some View {
+        switch phase {
+        case .inactive:
+            EmptyView()
+
+        case .listening(let since, let timeoutAt):
+            listeningBanner(since: since, timeoutAt: timeoutAt)
+
+        case .linked(let channel, _):
+            linkedBanner(channel: channel)
+
+        case .failed(let reason, _):
+            failedBanner(reason: reason)
+        }
+    }
+
+    private func listeningBanner(since: Date, timeoutAt: Date) -> some View {
+        let elapsed = now.timeIntervalSince(since)
+        let remaining = max(0, timeoutAt.timeIntervalSince(now))
+        let total = timeoutAt.timeIntervalSince(since)
+        let progress = min(1.0, elapsed / total)
+        let blinkOn = Int(now.timeIntervalSinceReferenceDate * 2.5) % 2 == 0
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(StageIndustrialPalette.active.color)
+                    .frame(width: 8, height: 8)
+                    .opacity(blinkOn ? 1.0 : 0.2)
+
+                Text("SOFTLINK PAIRING")
+                    .font(IBMPlexMonoFont.font(.bold, size: 14))
+                    .foregroundStyle(StageIndustrialPalette.active.color)
+                    .opacity(blinkOn ? 1.0 : 0.6)
+
+                Spacer()
+
+                Text(String(format: "%.0fs", remaining))
+                    .font(IBMPlexMonoFont.font(.medium, size: 12))
+                    .foregroundStyle(remaining < 4 ? StageIndustrialPalette.amber.color : StageIndustrialPalette.signal.color)
+                    .monospacedDigit()
+            }
+
+            Text("awaiting channel signal — plug in now")
+                .font(IBMPlexMonoFont.font(.regular, size: 10))
+                .foregroundStyle(StageIndustrialPalette.dimSignal.color)
+
+            GeometryReader { barProxy in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(StageIndustrialPalette.slate.color)
+                        .frame(height: 3)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(StageIndustrialPalette.active.color.opacity(0.8))
+                        .frame(width: barProxy.size.width * progress, height: 3)
+                }
+            }
+            .frame(height: 3)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(StageIndustrialPalette.graphite.color.opacity(0.85))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(StageIndustrialPalette.active.color.opacity(blinkOn ? 0.5 : 0.15), lineWidth: 1)
+                )
+        )
+        .shadow(color: StageIndustrialPalette.active.color.opacity(0.15), radius: 12)
+    }
+
+    private func linkedBanner(channel: Int) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(StageIndustrialPalette.active.color)
+
+            Text("CH\(channel) LINKED")
+                .font(IBMPlexMonoFont.font(.bold, size: 14))
+                .foregroundStyle(StageIndustrialPalette.active.color)
+
+            Text("— signal confirmed")
+                .font(IBMPlexMonoFont.font(.regular, size: 11))
+                .foregroundStyle(StageIndustrialPalette.dimSignal.color)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(StageIndustrialPalette.graphite.color.opacity(0.85))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(StageIndustrialPalette.active.color.opacity(0.4), lineWidth: 1)
+                )
+        )
+    }
+
+    private func failedBanner(reason: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(StageIndustrialPalette.amber.color)
+
+            Text("SOFTLINK \(reason)")
+                .font(IBMPlexMonoFont.font(.bold, size: 14))
+                .foregroundStyle(StageIndustrialPalette.amber.color)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(StageIndustrialPalette.graphite.color.opacity(0.85))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(StageIndustrialPalette.amber.color.opacity(0.3), lineWidth: 1)
+                )
+        )
     }
 }

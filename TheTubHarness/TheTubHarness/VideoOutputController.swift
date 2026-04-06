@@ -1058,8 +1058,16 @@ enum VideoStageMapper {
 }
 
 @MainActor
+    enum SoftLinkVisualPhase: Equatable {
+        case inactive
+        case listening(since: Date, timeoutAt: Date)
+        case linked(channel: Int, at: Date)
+        case failed(reason: String, at: Date)
+    }
+
 final class VideoStageStore: ObservableObject {
     @Published private(set) var snapshot: VideoStageSnapshot = .standby(for: 0)
+    @Published private(set) var softLinkPhase: SoftLinkVisualPhase = .inactive
 
     private var currentMode: Int = 0
     private var context: ModelMonitorContext?
@@ -1167,9 +1175,34 @@ final class VideoStageStore: ObservableObject {
     func ingestSoftLinkEvents(_ events: [SoftLinkEvent]) {
         guard !events.isEmpty else { return }
         softLinkEvents.append(contentsOf: events)
-        print("[SoftLink-VS] ingested \(events.count) events, total sprites in snapshot: \(snapshot.sprites.count)")
+        for event in events {
+            switch event.action {
+            case .pairingStarted:
+                softLinkPhase = .listening(since: event.timestamp, timeoutAt: event.timestamp.addingTimeInterval(12.0))
+            case .pairingCancelled:
+                softLinkPhase = .failed(reason: "CANCELLED", at: event.timestamp)
+                schedulePhaseClear(after: 2.5)
+            case .pairingTimedOut:
+                softLinkPhase = .failed(reason: "TIMEOUT", at: event.timestamp)
+                schedulePhaseClear(after: 2.5)
+            case .channelLinked:
+                softLinkPhase = .linked(channel: event.channelIndex + 1, at: event.timestamp)
+                schedulePhaseClear(after: 3.0)
+            case .channelUnlinked:
+                break
+            }
+        }
+        print("[SoftLink-VS] ingested \(events.count) events, phase=\(softLinkPhase)")
         rebuildSnapshot()
-        print("[SoftLink-VS] after rebuild: \(snapshot.sprites.count) sprites, isRunning=\(snapshot.isRunning)")
+    }
+
+    private func schedulePhaseClear(after delay: TimeInterval) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(delay * 1000)))
+            guard let self else { return }
+            if case .linked = self.softLinkPhase { self.softLinkPhase = .inactive }
+            if case .failed = self.softLinkPhase { self.softLinkPhase = .inactive }
+        }
     }
 
     func testingRebuild(

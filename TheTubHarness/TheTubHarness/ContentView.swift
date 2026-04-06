@@ -435,6 +435,7 @@ private enum ShellVisibilityPanel: String, Hashable {
 private enum JoltHoldSource: Hashable {
     case mouse
     case keyboard
+    case softLink
 }
 
 private enum TimelineMetricToggle: String, Hashable {
@@ -1924,6 +1925,14 @@ struct ContentView: View {
         .onChange(of: analyzer.inputRouteProfile) { _, _ in
             syncLiveInputCaptureInfo()
             syncSessionInputRouteMetadata()
+        }
+        .onReceive(softLink.$globalState) { newState in
+            switch newState {
+            case .listening:
+                setJoltHold(.softLink, active: true)
+            case .idle, .linked:
+                setJoltHold(.softLink, active: false)
+            }
         }
         .onChange(of: analyzer.inputRouteWarning) { _, _ in
             syncLiveInputCaptureInfo()
