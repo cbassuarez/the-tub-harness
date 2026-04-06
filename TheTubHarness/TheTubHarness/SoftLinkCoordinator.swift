@@ -225,6 +225,11 @@ final class SoftLinkCoordinator: ObservableObject {
         return events
     }
 
+    /// Clear pending events after external processing.
+    func clearEvents() {
+        pendingEvents.removeAll()
+    }
+
     // MARK: - Internals
 
     private func ensureChannelCount(_ channelCount: Int) {
@@ -266,10 +271,13 @@ final class SoftLinkCoordinator: ObservableObject {
 
     private func triggerGesture(at now: Date) {
         gesture.reset()
+        activatePairing(at: now)
+    }
 
+    /// Force-activate pairing mode (for keyboard shortcut / direct trigger).
+    func activatePairing(at now: Date = Date()) {
         switch globalState {
         case .idle:
-            // Enter pairing mode.
             globalState = .listening(since: now)
             noiseFloorBaseline = []
             emit(.init(channelIndex: -1, action: .pairingStarted, timestamp: now))
@@ -277,20 +285,17 @@ final class SoftLinkCoordinator: ObservableObject {
             print("[SoftLink] pairing mode ACTIVE — listening for \(listeningWindowDuration)s")
 
         case .listening:
-            // Cancel pairing.
             globalState = .idle
             emit(.init(channelIndex: -1, action: .pairingCancelled, timestamp: now))
             print("[SoftLink] pairing CANCELLED")
 
         case .linked:
-            // Begin unlinking all linked channels.
             for i in 0..<channelStates.count {
                 if case .linked = channelStates[i], i != InputRoutingProfile.primaryChannelIndex {
                     channelStates[i] = .rampingDown(since: now)
                     emit(.init(channelIndex: i, action: .channelUnlinked, timestamp: now))
                 }
             }
-            // We'll transition to .idle once all ramps complete.
         }
     }
 

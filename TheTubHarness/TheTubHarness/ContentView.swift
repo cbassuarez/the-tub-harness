@@ -1833,6 +1833,12 @@ struct ContentView: View {
                 setJoltHold(.keyboard, active: active && !isReplayRunning)
             }
             .frame(width: 0, height: 0)
+
+            // Direct pairing mode toggle — bypasses tap+hold gesture entirely.
+            Button("") { softLink.activatePairing() }
+                .keyboardShortcut("j", modifiers: [.command, .shift])
+                .frame(width: 0, height: 0)
+                .opacity(0)
         }
         .sheet(isPresented: Binding(
             get: { controlRoom.shell.showCommandPalette },
@@ -1929,7 +1935,9 @@ struct ContentView: View {
         }
         .onReceive(softLink.$pendingEvents.receive(on: RunLoop.main)) { events in
             guard !events.isEmpty else { return }
-            drainSoftLinkEvents()
+            processSoftLinkEvents(events)
+            // Clear after processing — will re-fire with [] but guard catches it.
+            softLink.clearEvents()
         }
         .onChange(of: isReplayRunning) { _, running in
             if running {
@@ -4039,11 +4047,10 @@ struct ContentView: View {
         client.setJoltHeld(false)
     }
 
-    private func drainSoftLinkEvents() {
-        let drained = softLink.drainEvents()
-        print("[SoftLink-CV] draining \(drained.count) events, broadcasting to audience + video stage")
-        videoStage.ingestSoftLinkEvents(drained)
-        for event in drained {
+    private func processSoftLinkEvents(_ events: [SoftLinkEvent]) {
+        print("[SoftLink-CV] processing \(events.count) events → video stage + audience broadcast")
+        videoStage.ingestSoftLinkEvents(events)
+        for event in events {
             let message: String
             switch event.action {
             case .pairingStarted:
