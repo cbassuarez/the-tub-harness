@@ -1,5 +1,7 @@
 import SwiftUI
+#if canImport(AppKit)
 import AppKit
+#endif
 import CoreText
 
 private enum BundledFontRegistrarState {
@@ -73,7 +75,13 @@ enum IBMPlexMonoFont {
         Font.custom(variant.postScriptName, size: size)
     }
 
+    #if canImport(AppKit)
     static func nsFont(_ variant: Variant, size: CGFloat) -> NSFont {
         NSFont(name: variant.postScriptName, size: size) ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
     }
+    #elseif canImport(UIKit)
+    static func uiFont(_ variant: Variant, size: CGFloat) -> UIFont {
+        UIFont(name: variant.postScriptName, size: size) ?? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+    #endif
 }
