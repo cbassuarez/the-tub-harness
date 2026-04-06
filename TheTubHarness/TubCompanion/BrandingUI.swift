@@ -404,27 +404,41 @@ struct CommandStatusChip: View {
 
 struct CommandRailButton: View {
     let title: String
+    var systemImage: String? = nil
     var isEnabled: Bool = true
     var isActive: Bool = false
     var isSolid: Bool = false
     var accent: Color = BrandingColors.glyphGreen
     let action: () -> Void
     @State private var hovering = false
+    @State private var tapTrigger = 0
 
     var body: some View {
-        Button(action: action) {
-            Text(title)
-                .playSans(12, weight: .bold)
-                .foregroundStyle(buttonForeground)
-                .frame(maxWidth: .infinity, minHeight: 46)
-                .modifier(ButtonGlassBackground(
-                    isSolid: isSolid,
-                    isEnabled: isEnabled,
-                    isActive: isActive,
-                    hovering: hovering,
-                    accent: accent
-                ))
-                .contentShape(Rectangle())
+        Button {
+            tapTrigger += 1
+            action()
+        } label: {
+            HStack(spacing: 6) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 13, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                        .contentTransition(.symbolEffect(.replace))
+                        .symbolEffect(.bounce, value: tapTrigger)
+                }
+                Text(title)
+                    .playSans(12, weight: .bold)
+            }
+            .foregroundStyle(buttonForeground)
+            .frame(maxWidth: .infinity, minHeight: 46)
+            .modifier(ButtonGlassBackground(
+                isSolid: isSolid,
+                isEnabled: isEnabled,
+                isActive: isActive,
+                hovering: hovering,
+                accent: accent
+            ))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())

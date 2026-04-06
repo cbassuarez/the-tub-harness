@@ -486,14 +486,13 @@ struct MainShellView: View {
 
     private func compactShell(safeAreaInsets: EdgeInsets) -> some View {
         let navBottom = max(10, safeAreaInsets.bottom)
-        let navReservedHeight: CGFloat = 66 + navBottom
 
-        return ZStack(alignment: .bottom) {
+        return VStack(spacing: 0) {
             currentTabView
                 .environment(\.shellLayoutClass, .compact)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
-                .padding(.bottom, navReservedHeight)
+                .transaction { t in t.animation = nil }
 
             VStack(spacing: 0) {
                 CommandSignalRule()
@@ -514,8 +513,8 @@ struct MainShellView: View {
                 .padding(.bottom, navBottom)
             }
             .background(Color.black.opacity(0.96))
-            .zIndex(1_000)
         }
+        .ignoresSafeArea(.container, edges: .bottom)
     }
 
     private func phoneLandscapeShell(safeAreaInsets: EdgeInsets) -> some View {
@@ -986,19 +985,25 @@ private struct ShellCommandNavigator: View {
             Button {
                 onSelect(tab)
             } label: {
-                Text(tabTitle(tab))
-                    .playMono(layoutClass == .phoneLandscapeCompact ? 11 : 12, weight: .bold)
-                    .foregroundStyle(selected ? BrandingColors.glyphGreen : Color.white.opacity(0.76))
-                    .frame(
-                        maxWidth: .infinity,
-                        minHeight: layoutClass == .compact
-                        ? 46
-                        : (layoutClass == .phoneLandscapeCompact ? 38 : 50)
-                    )
-                    .modifier(TabButtonGlass(
-                        selected: selected,
-                        hovered: hovered
-                    ))
+                HStack(spacing: 5) {
+                    Image(systemName: tabIcon(tab, selected: selected))
+                        .font(.system(size: layoutClass == .phoneLandscapeCompact ? 11 : 12, weight: .bold))
+                        .symbolRenderingMode(.hierarchical)
+                        .contentTransition(.symbolEffect(.replace))
+                    Text(tabTitle(tab))
+                        .playMono(layoutClass == .phoneLandscapeCompact ? 11 : 12, weight: .bold)
+                }
+                .foregroundStyle(selected ? BrandingColors.glyphGreen : Color.white.opacity(0.76))
+                .frame(
+                    maxWidth: .infinity,
+                    minHeight: layoutClass == .compact
+                    ? 46
+                    : (layoutClass == .phoneLandscapeCompact ? 38 : 50)
+                )
+                .modifier(TabButtonGlass(
+                    selected: selected,
+                    hovered: hovered
+                ))
             }
             .buttonStyle(.plain)
             .keyboardShortcut(shortcutKey(for: tab), modifiers: [.command])
@@ -1025,13 +1030,19 @@ private struct ShellCommandNavigator: View {
         Button {
             action()
         } label: {
-            Text(title)
-                .playMono(11, weight: .bold)
-                .foregroundStyle(
-                    isEnabled
-                    ? (isActive ? accent : Color.white.opacity(0.72))
-                    : Color.white.opacity(0.34)
-                )
+            HStack(spacing: 5) {
+                Image(systemName: isActive ? "sidebar.right" : "sidebar.left")
+                    .font(.system(size: 11, weight: .bold))
+                    .symbolRenderingMode(.hierarchical)
+                    .contentTransition(.symbolEffect(.replace))
+                Text(title)
+                    .playMono(11, weight: .bold)
+            }
+            .foregroundStyle(
+                isEnabled
+                ? (isActive ? accent : Color.white.opacity(0.72))
+                : Color.white.opacity(0.34)
+            )
                 .frame(maxWidth: .infinity, minHeight: layoutClass == .phoneLandscapeCompact ? 38 : 44)
                 .modifier(InspectorButtonGlass(
                     isActive: isActive,
@@ -1050,6 +1061,15 @@ private struct ShellCommandNavigator: View {
         case .play: return "PLAY"
         case .learn: return "LEARN"
         case .settings: return "SETTINGS"
+        }
+    }
+
+    private func tabIcon(_ tab: AppTab, selected: Bool) -> String {
+        switch tab {
+        case .steer: return "slider.horizontal.3"
+        case .play: return selected ? "play.fill" : "play"
+        case .learn: return selected ? "book.fill" : "book"
+        case .settings: return selected ? "gearshape.fill" : "gearshape"
         }
     }
 
@@ -1116,6 +1136,7 @@ private struct ShellInspectorPane: View {
             HStack(spacing: 8) {
                 CommandRailButton(
                     title: "LESS",
+                    systemImage: "minus",
                     isEnabled: steerState.linkStatus == "CONNECTED",
                     isActive: false,
                     accent: BrandingColors.glyphGreen,
@@ -1123,6 +1144,7 @@ private struct ShellInspectorPane: View {
                 )
                 CommandRailButton(
                     title: "MORE",
+                    systemImage: "plus",
                     isEnabled: steerState.linkStatus == "CONNECTED",
                     isActive: false,
                     accent: BrandingColors.glyphGreen,
@@ -1164,6 +1186,7 @@ private struct ShellInspectorPane: View {
             HStack(spacing: 8) {
                 CommandRailButton(
                     title: "JUMP STEER",
+                    systemImage: "slider.horizontal.3",
                     isEnabled: true,
                     isActive: false,
                     accent: BrandingColors.glyphGreen,
@@ -1171,6 +1194,7 @@ private struct ShellInspectorPane: View {
                 )
                 CommandRailButton(
                     title: "JUMP PLAY",
+                    systemImage: "play.fill",
                     isEnabled: true,
                     isActive: false,
                     accent: BrandingColors.glyphGreen,

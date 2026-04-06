@@ -1237,6 +1237,7 @@ struct SettingsView: View {
                                 HStack(spacing: 8) {
                                     CommandRailButton(
                                         title: "RECONNECT",
+                                        systemImage: "arrow.triangle.2.circlepath",
                                         isEnabled: true,
                                         isActive: true,
                                         isSolid: true,
@@ -1247,6 +1248,7 @@ struct SettingsView: View {
 
                                     CommandRailButton(
                                         title: "RE-PROBE",
+                                        systemImage: "antenna.radiowaves.left.and.right",
                                         isEnabled: true,
                                         isActive: false,
                                         accent: BrandingColors.aberrationCyan
@@ -1267,12 +1269,14 @@ struct SettingsView: View {
                                 statusLine("STEER ACCESS", appState.steerAccessState.chipLabel, active: isSteerAccessUnlocked)
                                 actionRow(
                                     title: "RELOCK STEER",
+                                    systemImage: "lock",
                                     role: .destructive
                                 ) {
                                     viewModel.requestGuardedAction(.relockSteer)
                                 }
                                 actionRow(
                                     title: "RESET ENTRY FLOW",
+                                    systemImage: "arrow.counterclockwise",
                                     role: .destructive
                                 ) {
                                     viewModel.requestGuardedAction(.resetEntryFlow)
@@ -1280,7 +1284,7 @@ struct SettingsView: View {
                             }
 
                             SettingsSection(title: "PLAY") {
-                                actionRow(title: "LOOP RATE: \(gridLoopMs)ms") {
+                                actionRow(title: "LOOP RATE: \(gridLoopMs)ms", systemImage: "metronome") {
                                     showLoopRateModal = true
                                 }
                             }
@@ -1379,6 +1383,7 @@ struct SettingsView: View {
                             SettingsSection(title: "ADVANCED") {
                                 CommandRailButton(
                                     title: showAdvancedTools ? "HIDE ADVANCED TOOLS" : "SHOW ADVANCED TOOLS",
+                                    systemImage: showAdvancedTools ? "wrench.and.screwdriver.fill" : "wrench.and.screwdriver",
                                     isEnabled: true,
                                     isActive: showAdvancedTools,
                                     accent: BrandingColors.warningYellow
@@ -1391,27 +1396,31 @@ struct SettingsView: View {
                                 if showAdvancedTools {
                                     actionRow(
                                         title: "DISCONNECT",
+                                        systemImage: "bolt.slash",
                                         role: .destructive
                                     ) {
                                         viewModel.requestGuardedAction(.disconnectHarness)
                                     }
-                                    actionRow(title: "ROTATE SESSION") {
+                                    actionRow(title: "ROTATE SESSION", systemImage: "arrow.clockwise") {
                                         viewModel.requestGuardedAction(.rotateSession)
                                     }
                                     actionRow(
                                         title: "CLEAR TEMP OVERLAYS",
+                                        systemImage: "xmark.square",
                                         role: .destructive
                                     ) {
                                         viewModel.requestGuardedAction(.clearTemporaryOverlays)
                                     }
                                     actionRow(
                                         title: "CLEAR LEARN CONTEXT",
+                                        systemImage: "eraser",
                                         role: .destructive
                                     ) {
                                         viewModel.requestGuardedAction(.clearLearnContext)
                                     }
                                     actionRow(
                                         title: "CLEAR PRESET",
+                                        systemImage: "slider.horizontal.below.rectangle",
                                         role: .destructive
                                     ) {
                                         viewModel.requestGuardedAction(.clearPreset)
@@ -1559,11 +1568,13 @@ struct SettingsView: View {
 
     private func actionRow(
         title: String,
+        systemImage: String? = nil,
         role: ButtonRole? = nil,
         action: @escaping () -> Void
     ) -> some View {
         CommandRailButton(
             title: title,
+            systemImage: systemImage,
             isEnabled: true,
             isActive: false,
             accent: role == .destructive ? BrandingColors.warningYellow : BrandingColors.glyphGreen,
@@ -1580,6 +1591,7 @@ struct SettingsView: View {
     ) -> some View {
         CommandRailButton(
             title: title,
+            systemImage: "arrow.up.right",
             isEnabled: true,
             isActive: !isSolid,
             isSolid: isSolid,
@@ -1605,6 +1617,7 @@ struct SettingsView: View {
 
             CommandRailButton(
                 title: "SPECIAL PRIVILEGES",
+                systemImage: "key",
                 isEnabled: true,
                 isActive: false,
                 accent: BrandingColors.warningYellow
@@ -1705,12 +1718,14 @@ struct SettingsView: View {
 
                 actionRow(
                     title: "RESET TO NEUTRAL",
+                    systemImage: "arrow.uturn.backward",
                     role: .destructive
                 ) {
                     viewModel.resetVectorsToNeutral(sendToHarness: true)
                 }
                 actionRow(
                     title: "LOCK POWER LAYER",
+                    systemImage: "lock.fill",
                     role: .destructive
                 ) {
                     viewModel.relockPowerLayer()
@@ -2009,6 +2024,7 @@ private struct SettingsPowerUnlockOverlay: View {
 
             CommandRailButton(
                 title: "ENTER",
+                systemImage: "arrow.right",
                 isEnabled: true,
                 isActive: true,
                 isSolid: true,
@@ -2153,6 +2169,7 @@ private struct SettingsPowerUnlockOverlay: View {
     private var primaryActionButton: some View {
         CommandRailButton(
             title: primaryActionLabel,
+            systemImage: primaryActionIcon,
             isEnabled: primaryActionEnabled,
             isActive: true,
             isSolid: true,
@@ -2193,6 +2210,18 @@ private struct SettingsPowerUnlockOverlay: View {
             return "GRANTING..."
         case .unlocked:
             return "UNLOCKED"
+        }
+    }
+
+    private var primaryActionIcon: String {
+        switch viewModel.state {
+        case .inChallenge:
+            if viewModel.transitionActive { return "arrow.triangle.2.circlepath" }
+            return viewModel.interruptionActive ? "bolt.trianglebadge.exclamationmark" : "checkmark.circle"
+        case .cooldown: return "lock.fill"
+        case .locked: return "arrow.counterclockwise"
+        case .grantedAnimating: return "checkmark.seal.fill"
+        case .unlocked: return "lock.open.fill"
         }
     }
 

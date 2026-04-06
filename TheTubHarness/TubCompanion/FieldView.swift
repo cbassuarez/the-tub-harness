@@ -531,14 +531,14 @@ struct SteerView: View {
             CommandSignalRule(opacity: 0.14)
 
             HStack(spacing: 6) {
-                commandButton("LESS", id: "steer.button.less") {
+                commandButton("LESS", systemImage: "minus", id: "steer.button.less") {
                     viewModel.nudgeLess()
                 }
-                commandButton("MORE", id: "steer.button.more") {
+                commandButton("MORE", systemImage: "plus", id: "steer.button.more") {
                     viewModel.nudgeMore()
                 }
             }
-            commandButton("MORE INFO", id: "steer.button.info") {
+            commandButton("MORE INFO", systemImage: "info.circle", id: "steer.button.info") {
                 showSteerInfoModal = true
             }
             opsLogButton(id: "steer.button.ops")
@@ -753,18 +753,18 @@ struct SteerView: View {
     private var controlRail: some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
-                commandButton("LESS", id: "steer.button.less") {
+                commandButton("LESS", systemImage: "minus", id: "steer.button.less") {
                     viewModel.nudgeLess()
                 }
                 .keyboardShortcut("[", modifiers: [])
-                commandButton("MORE", id: "steer.button.more") {
+                commandButton("MORE", systemImage: "plus", id: "steer.button.more") {
                     viewModel.nudgeMore()
                 }
                 .keyboardShortcut("]", modifiers: [])
             }
 
             HStack(spacing: 10) {
-                commandButton("MORE INFO", id: "steer.button.info") {
+                commandButton("MORE INFO", systemImage: "info.circle", id: "steer.button.info") {
                     showSteerInfoModal = true
                 }
 
@@ -895,16 +895,24 @@ struct SteerView: View {
         .accessibilityHint("Choose this comparison option")
     }
 
-    private func commandButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
+    private func commandButton(_ title: String, systemImage: String? = nil, id: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title)
-                .playSans(12, weight: .bold)
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity, minHeight: isPhoneLandscapeCompact ? 40 : 46)
-                .overlay {
-                    Rectangle()
-                        .stroke(BrandingColors.glyphGreen.opacity(0.66), lineWidth: 1)
+            HStack(spacing: 6) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: isPhoneLandscapeCompact ? 11 : 13, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
                 }
+                Text(title)
+                    .playSans(12, weight: .bold)
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, minHeight: isPhoneLandscapeCompact ? 40 : 46)
+            .contentShape(Rectangle())
+            .overlay {
+                Rectangle()
+                    .stroke(BrandingColors.glyphGreen.opacity(0.66), lineWidth: 1)
+            }
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(id)
@@ -923,6 +931,7 @@ struct SteerView: View {
                     .foregroundStyle(.white)
             }
             .frame(maxWidth: .infinity, minHeight: isPhoneLandscapeCompact ? 40 : 46)
+            .contentShape(Rectangle())
             .overlay {
                 Rectangle()
                     .stroke(BrandingColors.glyphGreen.opacity(0.66), lineWidth: 1)
@@ -1374,6 +1383,7 @@ struct SteerAccessOverlay: View {
 
             CommandRailButton(
                 title: "ENTER",
+                systemImage: "arrow.right",
                 isEnabled: true,
                 isActive: true,
                 isSolid: true,
@@ -1453,6 +1463,16 @@ struct SteerAccessOverlay: View {
         }
     }
 
+    private var challengeActionIcon: String {
+        switch appState.steerAccessState {
+        case .inChallenge: return "checkmark.circle"
+        case .cooldown: return "lock.fill"
+        case .locked: return "arrow.counterclockwise"
+        case .grantedAnimating: return "checkmark.seal.fill"
+        case .unlocked: return "lock.open.fill"
+        }
+    }
+
     private var challengeActionEnabled: Bool {
         switch appState.steerAccessState {
         case .inChallenge:
@@ -1476,6 +1496,7 @@ struct SteerAccessOverlay: View {
     private var challengeActionButton: some View {
         CommandRailButton(
             title: challengeActionLabel,
+            systemImage: challengeActionIcon,
             isEnabled: challengeActionEnabled,
             isActive: true,
             isSolid: true,
