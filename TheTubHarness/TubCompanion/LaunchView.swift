@@ -19,7 +19,6 @@ struct TubLaunchScreenView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var startedAt = Date()
     @State private var playReadyAt: Date?
-    @State private var tracerX: CGFloat = -280
     @State private var sessionToken = TubLaunchScreenView.makeSessionToken()
     @State private var pulseSeed: Double = 0
     @State private var organicStalls: [Double] = TubLaunchScreenView.generateStalls()
@@ -83,20 +82,6 @@ struct TubLaunchScreenView: View {
                     .ignoresSafeArea()
                     .opacity(0.16)
 
-                Rectangle()
-                    .fill(
-                        LinearGradient(
-                            colors: [.clear, Color.white.opacity(0.1), .clear],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .frame(width: 136)
-                    .offset(x: tracerX)
-                    .blur(radius: 1.2)
-                    .blendMode(.screen)
-                    .opacity(reduceMotion ? 0 : 1)
-
                 bootContent(
                     spinner: spinner,
                     systemSeconds: systemSeconds,
@@ -117,11 +102,6 @@ struct TubLaunchScreenView: View {
             playReadyAt = isPlaySurfaceReady ? Date() : nil
             sessionToken = TubLaunchScreenView.makeSessionToken()
             pulseSeed = Double.random(in: 0.2...1.1)
-            tracerX = -280
-            guard !reduceMotion else { return }
-            withAnimation(.linear(duration: 2.2).repeatForever(autoreverses: false)) {
-                tracerX = 280
-            }
         }
         .onChange(of: isPlaySurfaceReady) { _, isReady in
             if isReady, playReadyAt == nil {
@@ -218,9 +198,9 @@ struct TubLaunchScreenView: View {
                     .animation(.easeInOut(duration: 0.08), value: activeLineIndex)
                 }
             }
-            .frame(height: (transcriptRowHeight * CGFloat(transcriptLines.count)) + 2, alignment: .top)
             .padding(.horizontal, 12)
             .padding(.vertical, 11)
+            .clipped()
             .overlay {
                 Rectangle()
                     .stroke(Color.white.opacity(0.26), lineWidth: 1)
@@ -250,7 +230,9 @@ struct TubLaunchScreenView: View {
                 Spacer()
                 Text("SYNC \(Int((progress * 100).rounded(.down)))%")
                     .playMono(10, weight: .semibold)
+                    .monospacedDigit()
                     .foregroundStyle(Color.white.opacity(0.7))
+                    .frame(width: 100, alignment: .trailing)
             }
             .padding(.top, 8)
 
