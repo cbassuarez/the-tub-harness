@@ -1,6 +1,8 @@
 import SwiftUI
 import Combine
+#if canImport(AppKit)
 import AppKit
+#endif
 
 struct StageColor: Equatable {
     let red: Double
