@@ -1176,15 +1176,9 @@ struct ConnectionGateView: View {
         .modifier(GateButtonGlass())
     }
 
-    private var gateIconForeground: Color {
-        if #available(iOS 26, *) { return .white }
-        return .black
-    }
+    private var gateIconForeground: Color { .black }
 
-    private var gateLabelForeground: Color {
-        if #available(iOS 26, *) { return .white }
-        return .black
-    }
+    private var gateLabelForeground: Color { .black }
 }
 
 /// Glass-backed gate entry button — prominent tinted glass on iOS 26+,
