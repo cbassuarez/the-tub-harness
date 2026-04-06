@@ -15,6 +15,10 @@ struct TubCompanionApp: App {
     @StateObject private var externalAudioRouteMonitor = ExternalAudioRouteMonitor()
     @StateObject private var appState = TubCompanionAppState()
     @StateObject private var harnessClient = HarnessClient()
+
+    init() {
+        FontRegistry.registerAllFonts()
+    }
     
     var body: some Scene {
         WindowGroup {

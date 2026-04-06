@@ -22,6 +22,7 @@ struct TubLaunchScreenView: View {
     @State private var tracerX: CGFloat = -280
     @State private var sessionToken = TubLaunchScreenView.makeSessionToken()
     @State private var pulseSeed: Double = 0
+    @State private var organicStalls: [Double] = TubLaunchScreenView.generateStalls()
 
     private let transcriptLines: [String] = [
         "MOUNTING AUDIENCE COMMAND SHELL",
@@ -58,7 +59,8 @@ struct TubLaunchScreenView: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
             let elapsed = max(0, timeline.date.timeIntervalSince(startedAt))
-            let baseProgress = TubLaunchScreenView.physicalLoadingCurve(min(1, elapsed / bootDuration))
+            let rawProgress = TubLaunchScreenView.physicalLoadingCurve(min(1, elapsed / bootDuration))
+            let baseProgress = TubLaunchScreenView.applyOrganicStalls(rawProgress, stalls: organicStalls)
             let progress = resolvedProgress(baseProgress: baseProgress, now: timeline.date)
             let revealCount = revealCount(for: progress)
             let cursorOn = (Int((elapsed * 2).rounded(.down)) % 2) == 0
@@ -283,6 +285,31 @@ struct TubLaunchScreenView: View {
         return 0.82 + (0.18 * pow(tail, 1.9))
     }
 
+    /// Generates 3–5 random stall points in [0.1, 0.85] where progress briefly plateaus.
+    private static func generateStalls() -> [Double] {
+        let count = Int.random(in: 3...5)
+        return (0..<count).map { _ in Double.random(in: 0.1...0.85) }.sorted()
+    }
+
+    /// Applies organic micro-stalls: at each stall point, progress hesitates
+    /// creating the look of real subsystem loading.
+    private static func applyOrganicStalls(_ progress: Double, stalls: [Double]) -> Double {
+        var adjusted = progress
+        for stallPoint in stalls {
+            let stallWidth = 0.06
+            let stallDepth = 0.012
+            let dist = adjusted - stallPoint
+            if dist > 0 && dist < stallWidth {
+                let stallT = dist / stallWidth
+                let dip = stallDepth * sin(stallT * .pi)
+                adjusted -= dip
+            }
+        }
+        // Add subtle jitter (±0.3%) keyed to progress to avoid flicker
+        let jitter = 0.003 * sin(progress * 47.0)
+        return max(0, min(1, adjusted + jitter))
+    }
+
     private static func quickFinishCurve(_ t: Double) -> Double {
         let clamped = max(0, min(1, t))
         return 1 - pow(1 - clamped, 2.2)
@@ -346,6 +373,15 @@ struct ConnectionGateView: View {
     @State private var handshakeStatus: String?
     @State private var hasAttemptedAutoHarnessConnect = false
     @State private var didPrimeRuntimePermissions = false
+    @State private var pairingPhase: PairingPhase = .idle
+
+    enum PairingPhase: Equatable {
+        case idle
+        case pairingActive
+        case channelLinked(Int)
+        case pairingCancelled
+        case pairingTimeout
+    }
 
     enum GateStep {
         case chooseIntent
@@ -442,6 +478,43 @@ struct ConnectionGateView: View {
             // Show toast when cable is detected
             if isActive {
                 addToast("🎙️ Cable detected!", style: .success)
+            }
+        }
+        .onReceive(harnessClient.$lastAudienceAck) { ack in
+            guard let ack else { return }
+            let newPhase: PairingPhase
+            if ack.hasPrefix("LINK:PAIRING") {
+                newPhase = .pairingActive
+            } else if ack.hasPrefix("LINK:CH") {
+                let ch = Int(ack.replacingOccurrences(of: "LINK:CH", with: "").prefix(2)) ?? 1
+                newPhase = .channelLinked(ch)
+            } else if ack.contains("TIMEOUT") {
+                newPhase = .pairingTimeout
+            } else if ack.contains("CANCEL") {
+                newPhase = .pairingCancelled
+            } else {
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.3)) {
+                pairingPhase = newPhase
+            }
+            // Auto-dismiss on link success when cable is active
+            if case .channelLinked = newPhase,
+               externalAudioRouteMonitor.isExternalAudioRouteActive || appState.isCablePathSatisfied {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(1500))
+                    appState.forcePresentEntryGate = false
+                    appState.requestTabNavigation(.play)
+                }
+            }
+            // Reset terminal phases after a delay
+            if newPhase == .pairingTimeout || newPhase == .pairingCancelled {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(3000))
+                    if pairingPhase == newPhase {
+                        withAnimation { pairingPhase = .idle }
+                    }
+                }
             }
         }
     }
@@ -643,11 +716,93 @@ struct ConnectionGateView: View {
                 .cornerRadius(4)
             }
 
+            // SoftLink pairing status from harness
+            pairingStatusBanner
+
             secondaryNavRow(backAction: {
                 appState.resetEntryFlow()
                 step = .chooseIntent
             })
         }
+    }
+
+    @ViewBuilder
+    private var pairingStatusBanner: some View {
+        switch pairingPhase {
+        case .idle:
+            EmptyView()
+        case .pairingActive:
+            HStack(spacing: 10) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    .scaleEffect(0.8)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("SOFTLINK PAIRING")
+                        .playSans(12, weight: .bold)
+                        .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    Text("Clip the cable in now — harness is listening")
+                        .playSans(10, weight: .regular)
+                        .foregroundColor(.gray)
+                }
+                Spacer()
+            }
+            .padding(12)
+            .background(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.08))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.3), lineWidth: 1)
+            )
+            .cornerRadius(6)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+        case .channelLinked(let ch):
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("CH\(ch) LINKED")
+                        .playSans(12, weight: .bold)
+                        .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    Text("Signal confirmed — you're connected")
+                        .playSans(10, weight: .regular)
+                        .foregroundColor(.gray)
+                }
+                Spacer()
+            }
+            .padding(12)
+            .background(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.4), lineWidth: 1)
+            )
+            .cornerRadius(6)
+            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+        case .pairingTimeout:
+            pairingErrorBanner(message: "Pairing timed out — try again from the harness")
+        case .pairingCancelled:
+            pairingErrorBanner(message: "Pairing cancelled")
+        }
+    }
+
+    private func pairingErrorBanner(message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundColor(.orange)
+            Text(message)
+                .playSans(11, weight: .semibold)
+                .foregroundColor(.orange)
+            Spacer()
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.08))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+        )
+        .cornerRadius(6)
+        .transition(.opacity)
     }
 
     private var feedBankContent: some View {
