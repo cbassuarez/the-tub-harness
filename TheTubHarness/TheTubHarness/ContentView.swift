@@ -1763,6 +1763,7 @@ struct ContentView: View {
     @StateObject private var videoStage = VideoStageStore()
     @StateObject private var videoOutput = VideoOutputController()
     @StateObject private var softLink = SoftLinkCoordinator()
+    @State private var softLinkKeyMonitor: Any?
     private let webcamPool = USGSWebcamPool()
     private let videoClipPool = JoltVideoClipPool()
     @StateObject private var speechTranscriber = SpeechTranscriber()
@@ -1834,14 +1835,6 @@ struct ContentView: View {
             }
             .frame(width: 0, height: 0)
 
-            // Direct pairing mode toggle — bypasses tap+hold gesture entirely.
-            Button("") {
-                print("[SoftLink-CV] ★ Cmd+Shift+P → activatePairing()")
-                softLink.activatePairing()
-            }
-                .keyboardShortcut("p", modifiers: [.command, .shift])
-                .frame(width: 0, height: 0)
-                .opacity(0)
         }
         .sheet(isPresented: Binding(
             get: { controlRoom.shell.showCommandPalette },
@@ -1896,22 +1889,9 @@ struct ContentView: View {
                     softLink.tick(rawChannelLevels: rawLevels, channelCount: channelCount)
                 }
             }
-            softLink.onEvents = { [weak videoStage, weak audienceServer] events in
-                guard let videoStage, let audienceServer else { return }
-                print("[SoftLink-CV] onEvents callback: \(events.count) events")
-                videoStage.ingestSoftLinkEvents(events)
-                for event in events {
-                    let message: String
-                    switch event.action {
-                    case .pairingStarted:  message = "LINK:PAIRING"
-                    case .pairingCancelled: message = "LINK:CANCELLED"
-                    case .pairingTimedOut:  message = "LINK:TIMEOUT"
-                    case .channelLinked:    message = "LINK:CH\(event.channelIndex + 1):LINKED"
-                    case .channelUnlinked:  message = "LINK:CH\(event.channelIndex + 1):UNLINKED"
-                    }
-                    audienceServer.broadcastAck(message: message)
-                }
-            }
+            softLink.videoStore = videoStage
+            softLink.audienceServer = audienceServer
+            print("[SoftLink-CV] ★ direct refs SET on softLink")
             if ProcessInfo.processInfo.environment["TUB_PRELOAD_JOLT_CLIPS"] == "1" {
                 let clipDirectory = URL(fileURLWithPath: "/Users/seb/Desktop/video-for-modes4-7")
                 videoClipPool.loadInBackground(from: clipDirectory)
@@ -1926,6 +1906,19 @@ struct ContentView: View {
 
             audio.onInputRecordingAlignment = { alignment in
                 client.noteSessionAudioAlignment(hostTime: alignment.hostTime, sampleIndex: alignment.sampleIndex)
+            }
+
+            // Cmd+Shift+P → toggle SoftLink pairing mode (NSEvent monitor
+            // bypasses SwiftUI shortcut issues).
+            softLinkKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak softLink] event in
+                guard let softLink else { return event }
+                if event.modifierFlags.contains([.command, .shift]),
+                   event.charactersIgnoringModifiers == "p" {
+                    print("[SoftLink-CV] ★ Cmd+Shift+P → activatePairing()")
+                    softLink.activatePairing()
+                    return nil  // consume
+                }
+                return event
             }
         }
         .onChange(of: analyzer.inputRouteProfile) { _, _ in
@@ -3417,6 +3410,7 @@ struct ContentView: View {
         [
             CommandPaletteAction(id: "start_stop", title: client.isRunning ? "Stop Run" : "Start Run", subtitle: "Toggle live transport", keywords: ["transport", "run", "start", "stop"]),
             CommandPaletteAction(id: "jolt", title: "Pulse Jolt", subtitle: "Send momentary jolt control", keywords: ["jolt", "button"]),
+            CommandPaletteAction(id: "softlink", title: "Toggle SoftLink Pairing", subtitle: "Activate/cancel pairing mode (Cmd+Shift+P)", keywords: ["softlink", "pair", "link", "channel"]),
             CommandPaletteAction(id: "clear", title: "Pulse Clear", subtitle: "Send momentary clear control", keywords: ["clear", "button"]),
             CommandPaletteAction(id: "replay_start", title: "Start Replay", subtitle: "Start replay for current session_id", keywords: ["replay", "start"]),
             CommandPaletteAction(id: "replay_stop", title: "Stop Replay", subtitle: "Cancel active replay", keywords: ["replay", "stop"]),
@@ -4022,6 +4016,9 @@ struct ContentView: View {
         case "jolt":
             client.pulseJolt()
             softLink.handleJoltPulse()
+        case "softlink":
+            print("[SoftLink-CV] ★ palette → activatePairing()")
+            softLink.activatePairing()
         case "clear":
             client.pulseClear()
         case "replay_start":

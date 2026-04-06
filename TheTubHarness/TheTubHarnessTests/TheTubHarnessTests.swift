@@ -2815,4 +2815,44 @@ struct TheTubHarnessTests {
             keyConf: 0
         )
     }
+
+    // MARK: - SoftLink
+
+    @Test("SoftLink activatePairing emits pairingStarted and injects sprites into VideoStageStore")
+    @MainActor
+    func softLinkActivatePairingEmitsAndInjectsSprites() {
+        let coordinator = SoftLinkCoordinator()
+        let store = VideoStageStore()
+
+        coordinator.videoStore = store
+
+        #expect(coordinator.globalState == .idle)
+        coordinator.activatePairing()
+        #expect({
+            if case .listening = coordinator.globalState { return true }
+            return false
+        }())
+        #expect(store.snapshot.sprites.contains(where: { $0.token == "PAIRING MODE" }))
+    }
+
+    @Test("SoftLink gesture detects 3 taps then hold")
+    func softLinkGestureDetectsPattern() {
+        var gesture = JoltLinkGesture()
+        let start = Date()
+
+        // 3 quick taps
+        for i in 0..<3 {
+            let t = start.addingTimeInterval(Double(i) * 0.3)
+            gesture.holdBegan(at: t)
+            gesture.holdEnded(at: t.addingTimeInterval(0.1))
+        }
+
+        #expect(gesture.recentTapCount(at: start.addingTimeInterval(1.0)) == 3)
+
+        // 4th press + hold for 0.6s
+        let holdStart = start.addingTimeInterval(1.0)
+        gesture.holdBegan(at: holdStart)
+        let checkTime = holdStart.addingTimeInterval(0.6)
+        #expect(gesture.shouldTrigger(at: checkTime))
+    }
 }

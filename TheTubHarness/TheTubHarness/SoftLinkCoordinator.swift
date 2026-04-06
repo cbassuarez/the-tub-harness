@@ -126,15 +126,14 @@ struct SoftLinkEvent: Identifiable, Equatable {
 
 // MARK: - Coordinator
 
-@MainActor
 final class SoftLinkCoordinator: ObservableObject {
     @Published private(set) var globalState: SoftLinkGlobalState = .idle
     @Published private(set) var channelStates: [SoftLinkChannelState] = []
     @Published private(set) var linkGainLinear: [Float] = []
 
-    /// Direct callback — called synchronously when events are emitted.
-    /// Set this in .onAppear to wire events to video stage + audience server.
-    var onEvents: (([SoftLinkEvent]) -> Void)?
+    /// Direct references — set once in .onAppear, eliminates callback indirection.
+    weak var videoStore: VideoStageStore?
+    weak var audienceServer: AudienceSessionServer?
 
     private var gesture = JoltLinkGesture()
     private var gestureTriggered = false
@@ -417,10 +416,26 @@ final class SoftLinkCoordinator: ObservableObject {
     }
 
     private func emit(_ event: SoftLinkEvent) {
-        print("[SoftLink] ★ EMIT event: \(event.action)")
-        onEvents?([event])
-        if onEvents == nil {
-            print("[SoftLink] ⚠️ onEvents callback is nil — events are being dropped!")
+        print("[SoftLink] ★ EMIT \(event.action)")
+
+        // Direct injection — no Combine, no callbacks, no indirection.
+        if let vs = videoStore {
+            vs.ingestSoftLinkEvents([event])
+            print("[SoftLink] → video store ingested")
+        } else {
+            print("[SoftLink] ⚠️ videoStore is nil!")
+        }
+
+        if let as_ = audienceServer {
+            let message: String
+            switch event.action {
+            case .pairingStarted:  message = "LINK:PAIRING"
+            case .pairingCancelled: message = "LINK:CANCELLED"
+            case .pairingTimedOut:  message = "LINK:TIMEOUT"
+            case .channelLinked:    message = "LINK:CH\(event.channelIndex + 1):LINKED"
+            case .channelUnlinked:  message = "LINK:CH\(event.channelIndex + 1):UNLINKED"
+            }
+            as_.broadcastAck(message: message)
         }
     }
 
