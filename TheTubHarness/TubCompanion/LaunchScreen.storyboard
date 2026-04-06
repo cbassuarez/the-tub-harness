@@ -1,11 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="24098" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="24128" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
     <device id="retina6_12" orientation="portrait" appearance="light"/>
     <dependencies>
-        <deployment identifier="iOS"/>
-        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="24096"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="24063"/>
         <capability name="Safe area layout guides" minToolsVersion="9.0"/>
-        <capability name="System colors in document resources" minToolsVersion="11.0"/>
         <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
     </dependencies>
     <scenes>
@@ -17,20 +15,27 @@
                         <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                         <subviews>
-                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="THE TUB" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" minimumFontSize="18" translatesAutoresizingMaskIntoConstraints="NO" id="w1w-4X-47F">
-                                <rect key="frame" x="107.33333333333333" y="364.66666666666669" width="178.66666666666666" height="50.333333333333314"/>
-                                <fontDescription key="fontDescription" type="monospacedSystem" weight="bold" pointSize="42"/>
-                                <color key="textColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
+                            <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFit" image="LaunchWordmark" translatesAutoresizingMaskIntoConstraints="NO" id="w1w-4X-47F">
+                                <rect key="frame" x="96.666666666666671" y="390" width="200" height="44"/>
+                                <constraints>
+                                    <constraint firstAttribute="height" constant="44" id="h44-wm-img"/>
+                                    <constraint firstAttribute="width" constant="200" id="w200-wm-img"/>
+                                </constraints>
+                            </imageView>
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="A DIVISION OF MERIDIAN COMPLIANCE GROUP" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" minimumFontSize="8" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="qIe-MB-fNj">
+                                <rect key="frame" x="97" y="448" width="199" height="11"/>
+                                <fontDescription key="fontDescription" weight="medium" pointSize="8"/>
+                                <color key="textColor" white="1" alpha="0.44" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
                                 <nil key="highlightedColor"/>
                             </label>
                             <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="AUDIENCE CONTROL SURFACE" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" minimumFontSize="10" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="2RJ-OX-1W8">
-                                <rect key="frame" x="68.666666666666686" y="430.33333333333331" width="256" height="16"/>
-                                <fontDescription key="fontDescription" type="monospacedSystem" weight="semibold" pointSize="13"/>
+                                <rect key="frame" x="97" y="467" width="199" height="15"/>
+                                <fontDescription key="fontDescription" weight="semibold" pointSize="13"/>
                                 <color key="textColor" white="1" alpha="0.78000000000000003" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
                                 <nil key="highlightedColor"/>
                             </label>
                             <view contentMode="scaleToFill" translatesAutoresizingMaskIntoConstraints="NO" id="QzM-Wx-JfL">
-                                <rect key="frame" x="81.666666666666686" y="421.33333333333331" width="230" height="1"/>
+                                <rect key="frame" x="80.666666666666671" y="440" width="231.66666666666663" height="0.66666666666668561"/>
                                 <color key="backgroundColor" white="1" alpha="0.25" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
                             </view>
                         </subviews>
@@ -40,7 +45,9 @@
                             <constraint firstItem="QzM-Wx-JfL" firstAttribute="top" secondItem="w1w-4X-47F" secondAttribute="bottom" constant="6" id="5aD-bn-sMk"/>
                             <constraint firstItem="QzM-Wx-JfL" firstAttribute="centerX" secondItem="w1w-4X-47F" secondAttribute="centerX" id="J4J-20-KkE"/>
                             <constraint firstItem="w1w-4X-47F" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" constant="-36" id="S3B-nM-7e8"/>
-                            <constraint firstItem="2RJ-OX-1W8" firstAttribute="top" secondItem="QzM-Wx-JfL" secondAttribute="bottom" constant="8" id="X2o-yN-jbu"/>
+                            <constraint firstItem="qIe-MB-fNj" firstAttribute="top" secondItem="QzM-Wx-JfL" secondAttribute="bottom" constant="6" id="sub-top-div"/>
+                            <constraint firstItem="qIe-MB-fNj" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="sub-cx-ctr"/>
+                            <constraint firstItem="2RJ-OX-1W8" firstAttribute="top" secondItem="qIe-MB-fNj" secondAttribute="bottom" constant="8" id="X2o-yN-jbu"/>
                             <constraint firstItem="w1w-4X-47F" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="dui-3L-woc"/>
                             <constraint firstItem="QzM-Wx-JfL" firstAttribute="height" secondItem="Bcu-3y-fUS" secondAttribute="height" multiplier="1:700" id="eCb-dg-zXJ"/>
                             <constraint firstItem="2RJ-OX-1W8" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="gXP-zT-yrf"/>
@@ -50,7 +57,10 @@
                 </viewController>
                 <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
             </objects>
-            <point key="canvasLocation" x="53.435114503816788" y="29.577464788732396"/>
+            <point key="canvasLocation" x="53.435114503816791" y="29.577464788732396"/>
         </scene>
     </scenes>
+    <resources>
+        <image name="LaunchWordmark" width="900" height="200"/>
+    </resources>
 </document>

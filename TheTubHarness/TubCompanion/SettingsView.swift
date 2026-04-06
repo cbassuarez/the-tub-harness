@@ -312,8 +312,12 @@ final class SettingsViewModel: ObservableObject {
     func reconnectHarness() {
         let address = normalizedAddress()
         appState.updateHarnessAddress(host: address.host, port: address.port)
-        harnessActionStatus = "ATTEMPTING HARNESS LINK..."
-        harnessClient.connectToHarness(host: address.host, port: address.port)
+        harnessActionStatus = "PROBING HARNESS..."
+        // Handshake first to resolve the correct address, then connect.
+        // Running connectToHarness concurrently with the HTTP handshake
+        // can saturate the server's connection handler and cause the
+        // handshake to time out even though the link succeeds.
+        harnessClient.disconnect(manual: false)
         runHandshake(host: address.host, port: address.port, reconnectOnResolve: true)
     }
 
@@ -476,9 +480,10 @@ final class SettingsViewModel: ObservableObject {
                 let resolvedPort = payload.audiencePort.flatMap { UInt16(exactly: $0) } ?? port
                 self.appState.updateHarnessAddress(host: resolvedHost, port: resolvedPort)
 
-                if reconnectOnResolve &&
-                    (resolvedHost != host || resolvedPort != port || !self.isHarnessLinked) {
-                    self.harnessClient.disconnect()
+                if reconnectOnResolve {
+                    if resolvedHost != host || resolvedPort != port {
+                        self.harnessClient.disconnect(manual: false)
+                    }
                     self.harnessClient.connectToHarness(host: resolvedHost, port: resolvedPort)
                 }
 
@@ -1166,6 +1171,14 @@ struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @StateObject private var viewModel: SettingsViewModel
     @State private var showAdvancedTools = false
+    @State private var showLoopRateModal = false
+
+    private static let gridLoopIntervalKey = "PlayGridLoopIntervalMs"
+
+    private var gridLoopMs: Int {
+        let stored = UserDefaults.standard.integer(forKey: Self.gridLoopIntervalKey)
+        return stored > 0 ? max(20, min(500, stored)) : 140
+    }
 
     init(
         appState: TubCompanionAppState,
@@ -1263,6 +1276,12 @@ struct SettingsView: View {
                                     role: .destructive
                                 ) {
                                     viewModel.requestGuardedAction(.resetEntryFlow)
+                                }
+                            }
+
+                            SettingsSection(title: "PLAY") {
+                                actionRow(title: "LOOP RATE: \(gridLoopMs)ms") {
+                                    showLoopRateModal = true
                                 }
                             }
 
@@ -1433,6 +1452,21 @@ struct SettingsView: View {
                     powerLayerModal
                         .transition(.opacity)
                         .zIndex(25)
+                }
+
+                if showLoopRateModal {
+                    GridLoopRateModal(
+                        currentMs: gridLoopMs,
+                        onChangeMs: { ms in
+                            let clamped = max(20, min(500, ms))
+                            UserDefaults.standard.set(clamped, forKey: Self.gridLoopIntervalKey)
+                        },
+                        onClose: {
+                            showLoopRateModal = false
+                        }
+                    )
+                    .transition(.opacity)
+                    .zIndex(30)
                 }
             }
         }

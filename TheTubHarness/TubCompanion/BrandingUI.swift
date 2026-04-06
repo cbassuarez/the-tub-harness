@@ -127,23 +127,7 @@ enum BrandingSpacing {
     static let xl: CGFloat = 32
 }
 
-// MARK: - Safe Area & Layout Helpers
-
-struct SafeAreaPadding: ViewModifier {
-    let edges: Edge.Set
-    let length: CGFloat?
-    
-    func body(content: Content) -> some View {
-        content
-            .padding(edges, length ?? BrandingSpacing.md)
-    }
-}
-
-extension View {
-    func safeAreaPadding(_ edges: Edge.Set = .all, _ length: CGFloat? = nil) -> some View {
-        modifier(SafeAreaPadding(edges: edges, length: length))
-    }
-}
+// MARK: - Layout Helpers
 
 struct ResponsivePadding: ViewModifier {
     @Environment(\.verticalSizeClass) var verticalSize
@@ -218,14 +202,18 @@ struct PrimaryButton: View {
         Button(action: action) {
             Text(label)
                 .playSans(12, weight: .semibold)
-                .foregroundColor(.black)
+                .foregroundColor(primaryForeground)
                 .frame(maxWidth: .infinity)
                 .padding(BrandingSpacing.sm)
-                .background(BrandingColors.glyphGreen)
-                .cornerRadius(4)
+                .tubGlassProminent(tint: BrandingColors.glyphGreen)
         }
         .disabled(isDisabled)
         .opacity(isDisabled ? 0.5 : 1.0)
+    }
+
+    private var primaryForeground: Color {
+        if #available(iOS 26, *) { return .white }
+        return .black
     }
 }
 
@@ -328,6 +316,49 @@ extension View {
     }
 }
 
+// MARK: - Glass Effect Helpers
+
+extension View {
+    /// Applies `.glassEffect` on iOS 26+ with the given tint and shape,
+    /// falling back to a translucent fill + border on earlier versions.
+    @ViewBuilder
+    func tubGlass(
+        tint: Color,
+        opacity fallbackOpacity: Double = 0.18,
+        interactive: Bool = true,
+        border: Color? = nil
+    ) -> some View {
+        if #available(iOS 26, *) {
+            self
+                .glassEffect(.regular.tint(tint).interactive(interactive), in: .rect(cornerRadius: 4))
+        } else {
+            self
+                .background(tint.opacity(fallbackOpacity))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(border ?? tint.opacity(0.5), lineWidth: 1)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+    }
+
+    /// Prominent glass variant — higher tint density for primary actions.
+    @ViewBuilder
+    func tubGlassProminent(
+        tint: Color,
+        interactive: Bool = true
+    ) -> some View {
+        if #available(iOS 26, *) {
+            self
+                .glassEffect(.regular.tint(tint).interactive(interactive), in: .rect(cornerRadius: 4))
+        } else {
+            self
+                .background(tint.opacity(0.85))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+    }
+}
+
 // MARK: - Command Shell Primitives
 
 struct CommandSignalRule: View {
@@ -384,32 +415,15 @@ struct CommandRailButton: View {
         Button(action: action) {
             Text(title)
                 .playSans(12, weight: .bold)
-                .foregroundStyle(
-                    !isEnabled
-                    ? Color.white.opacity(0.32)
-                    : (isSolid ? Color.black.opacity(0.92) : (isActive ? accent : Color.white.opacity(0.88)))
-                )
+                .foregroundStyle(buttonForeground)
                 .frame(maxWidth: .infinity, minHeight: 46)
-                .background(
-                    Group {
-                        if isSolid {
-                            Rectangle()
-                                .fill(isEnabled ? accent.opacity(0.9) : Color.white.opacity(0.1))
-                        } else if hovering {
-                            Rectangle()
-                                .fill(accent.opacity(0.08))
-                        }
-                    }
-                )
-                .overlay {
-                    Rectangle()
-                        .stroke(
-                            !isEnabled
-                            ? Color.white.opacity(0.16)
-                            : (isSolid ? accent.opacity(0.95) : (isActive ? accent.opacity(0.72) : Color.white.opacity(hovering ? 0.34 : 0.2))),
-                            lineWidth: 1
-                        )
-                }
+                .modifier(ButtonGlassBackground(
+                    isSolid: isSolid,
+                    isEnabled: isEnabled,
+                    isActive: isActive,
+                    hovering: hovering,
+                    accent: accent
+                ))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -418,5 +432,69 @@ struct CommandRailButton: View {
         .onHover { isHovering in
             hovering = isHovering
         }
+    }
+
+    private var buttonForeground: Color {
+        if !isEnabled {
+            return Color.white.opacity(0.32)
+        }
+        if isSolid {
+            if #available(iOS 26, *) {
+                return Color.white.opacity(0.95)
+            }
+            return Color.black.opacity(0.92)
+        }
+        return isActive ? accent : Color.white.opacity(0.88)
+    }
+}
+
+/// Applies glass effect on iOS 26+, falls back to opaque fill + stroke on earlier.
+private struct ButtonGlassBackground: ViewModifier {
+    let isSolid: Bool
+    let isEnabled: Bool
+    let isActive: Bool
+    let hovering: Bool
+    let accent: Color
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *) {
+            content
+                .glassEffect(
+                    .regular.tint(glassTint).interactive(),
+                    in: .rect(cornerRadius: 4)
+                )
+        } else {
+            content
+                .background(legacyBackground)
+                .overlay {
+                    Rectangle()
+                        .stroke(legacyBorder, lineWidth: 1)
+                }
+        }
+    }
+
+    private var glassTint: Color {
+        if !isEnabled { return Color.white.opacity(0.06) }
+        if isSolid { return accent }
+        if isActive { return accent.opacity(0.4) }
+        return hovering ? accent.opacity(0.15) : Color.white.opacity(0.08)
+    }
+
+    @ViewBuilder
+    private var legacyBackground: some View {
+        if isSolid {
+            Rectangle().fill(isEnabled ? accent.opacity(0.9) : Color.white.opacity(0.1))
+        } else if hovering {
+            Rectangle().fill(accent.opacity(0.08))
+        } else {
+            Color.clear
+        }
+    }
+
+    private var legacyBorder: Color {
+        if !isEnabled { return Color.white.opacity(0.16) }
+        if isSolid { return accent.opacity(0.95) }
+        if isActive { return accent.opacity(0.72) }
+        return Color.white.opacity(hovering ? 0.34 : 0.2)
     }
 }

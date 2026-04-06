@@ -360,17 +360,24 @@ struct CompanionRootView: View {
                     }
                 )
             }
-            if appState.shouldPresentConnectionGate {
-                ConnectionGateView(
-                    appState: appState,
-                    harnessClient: harnessClient,
-                    externalAudioRouteMonitor: externalAudioRouteMonitor,
-                    presentation: .fullScreen,
-                    preferredIntent: appState.bypassPreferredEntryIntentOnce ? nil : appState.lastEntryIntent
-                )
-                .transition(.opacity)
-                .zIndex(10)
+            // Gate is wrapped in a persistent Group so .allowsHitTesting tracks
+            // the current state even while the inner view is animating its removal.
+            // Without this, the fading-out ConnectionGateView (zIndex 10) keeps
+            // intercepting touches and freezes the shell underneath.
+            Group {
+                if appState.shouldPresentConnectionGate {
+                    ConnectionGateView(
+                        appState: appState,
+                        harnessClient: harnessClient,
+                        externalAudioRouteMonitor: externalAudioRouteMonitor,
+                        presentation: .fullScreen,
+                        preferredIntent: appState.bypassPreferredEntryIntentOnce ? nil : appState.lastEntryIntent
+                    )
+                    .transition(.opacity)
+                }
             }
+            .allowsHitTesting(appState.shouldPresentConnectionGate)
+            .zIndex(10)
             if showLaunchScreen {
                 TubLaunchScreenView(isPlaySurfaceReady: isPlaySurfaceReady)
                     .allowsHitTesting(false)
@@ -383,9 +390,8 @@ struct CompanionRootView: View {
             didScheduleLaunchDismiss = true
 
             #if DEBUG
-            // Debug default: skip custom launch overlay for reliable first-touch iteration.
-            // Opt back in explicitly with `-DEBUG_ENABLE_CUSTOM_LAUNCH YES`.
-            let shouldSkip = !ProcessInfo.processInfo.arguments.contains("-DEBUG_ENABLE_CUSTOM_LAUNCH")
+            // Debug default: show custom launch screen. Opt out with `-DEBUG_SKIP_CUSTOM_LAUNCH YES`.
+            let shouldSkip = ProcessInfo.processInfo.arguments.contains("-DEBUG_SKIP_CUSTOM_LAUNCH")
             #else
             let shouldSkip = false
             #endif
@@ -396,8 +402,8 @@ struct CompanionRootView: View {
             }
 
             Task { @MainActor in
-                let minimumVisibleUntil = Date().addingTimeInterval(1.25)
-                let hardDeadline = Date().addingTimeInterval(5.0)
+                let minimumVisibleUntil = Date().addingTimeInterval(3.2)
+                let hardDeadline = Date().addingTimeInterval(6.0)
 
                 while Date() < minimumVisibleUntil {
                     try? await Task.sleep(nanoseconds: 40_000_000)
@@ -405,6 +411,9 @@ struct CompanionRootView: View {
                 while !isPlaySurfaceReady, Date() < hardDeadline {
                     try? await Task.sleep(nanoseconds: 70_000_000)
                 }
+
+                // Hold at READY for 350ms before fade-out
+                try? await Task.sleep(nanoseconds: 350_000_000)
 
                 withAnimation(.easeOut(duration: 0.35)) {
                     showLaunchScreen = false
@@ -831,6 +840,64 @@ struct MainShellView: View {
     }
 }
 
+/// Glass-backed tab button — glass tinted on iOS 26+, stroke-only on earlier.
+private struct TabButtonGlass: ViewModifier {
+    let selected: Bool
+    let hovered: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *) {
+            let tint: Color = selected
+                ? BrandingColors.glyphGreen.opacity(0.45)
+                : (hovered ? BrandingColors.glyphGreen.opacity(0.15) : Color.white.opacity(0.06))
+            content
+                .glassEffect(.regular.tint(tint).interactive(), in: .rect(cornerRadius: 4))
+        } else {
+            content
+                .background(hovered ? BrandingColors.glyphGreen.opacity(0.08) : Color.clear)
+                .overlay {
+                    Rectangle()
+                        .stroke(
+                            selected
+                            ? BrandingColors.glyphGreen.opacity(0.72)
+                            : Color.white.opacity(hovered ? 0.32 : 0.16),
+                            lineWidth: 1
+                        )
+                }
+        }
+    }
+}
+
+/// Glass-backed inspector toggle — mirrors TabButtonGlass with accent color.
+private struct InspectorButtonGlass: ViewModifier {
+    let isActive: Bool
+    let isEnabled: Bool
+    let hovered: Bool
+    let accent: Color
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *) {
+            let tint: Color = !isEnabled
+                ? Color.white.opacity(0.04)
+                : (isActive ? accent.opacity(0.35) : (hovered ? accent.opacity(0.12) : Color.white.opacity(0.06)))
+            content
+                .glassEffect(.regular.tint(tint).interactive(isEnabled), in: .rect(cornerRadius: 4))
+        } else {
+            content
+                .background(isEnabled && hovered ? accent.opacity(0.12) : Color.clear)
+                .overlay {
+                    Rectangle()
+                        .stroke(
+                            isEnabled
+                            ? (isActive ? accent.opacity(0.66) : Color.white.opacity(0.2))
+                            : Color.white.opacity(0.14),
+                            lineWidth: 1
+                        )
+                }
+        }
+    }
+}
+
 private struct ShellCommandNavigator: View {
     let selectedTab: AppTab
     let layoutClass: ShellLayoutClass
@@ -928,20 +995,10 @@ private struct ShellCommandNavigator: View {
                         ? 46
                         : (layoutClass == .phoneLandscapeCompact ? 38 : 50)
                     )
-                    .background(
-                        hovered
-                        ? BrandingColors.glyphGreen.opacity(0.08)
-                        : Color.clear
-                    )
-                    .overlay {
-                        Rectangle()
-                            .stroke(
-                                selected
-                                ? BrandingColors.glyphGreen.opacity(0.72)
-                                : Color.white.opacity(hovered ? 0.32 : 0.16),
-                                lineWidth: 1
-                            )
-                    }
+                    .modifier(TabButtonGlass(
+                        selected: selected,
+                        hovered: hovered
+                    ))
             }
             .buttonStyle(.plain)
             .keyboardShortcut(shortcutKey(for: tab), modifiers: [.command])
@@ -976,20 +1033,12 @@ private struct ShellCommandNavigator: View {
                     : Color.white.opacity(0.34)
                 )
                 .frame(maxWidth: .infinity, minHeight: layoutClass == .phoneLandscapeCompact ? 38 : 44)
-                .background(
-                    isEnabled && (hoveringInspector || (layoutClass == .phoneLandscapeCompact && isActive))
-                    ? accent.opacity(0.12)
-                    : Color.clear
-                )
-                .overlay {
-                    Rectangle()
-                        .stroke(
-                            isEnabled
-                            ? (isActive ? accent.opacity(0.66) : Color.white.opacity(0.2))
-                            : Color.white.opacity(0.14),
-                            lineWidth: 1
-                        )
-                }
+                .modifier(InspectorButtonGlass(
+                    isActive: isActive,
+                    isEnabled: isEnabled,
+                    hovered: hoveringInspector || (layoutClass == .phoneLandscapeCompact && isActive),
+                    accent: accent
+                ))
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
@@ -1269,9 +1318,9 @@ class TubCompanionAppState: NSObject, ObservableObject {
     /// In Xcode, add to Scheme > Run > Arguments Passed On Launch: 
     /// `-DEBUG_SKIP_ENTRY_GATE YES`
     private var debugSkipEntryGate: Bool {
-        // Debug default is ON to avoid blocking launch flow during development.
-        // Explicitly set to NO if you want to exercise the gate.
-        debugFlag("-DEBUG_SKIP_ENTRY_GATE", defaultValue: true)
+        // Debug default is OFF so gate presents normally during development.
+        // Explicitly set to YES to bypass it for rapid iteration.
+        debugFlag("-DEBUG_SKIP_ENTRY_GATE", defaultValue: false)
     }
 
     private var debugResetAppState: Bool {

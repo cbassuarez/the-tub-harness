@@ -37,9 +37,9 @@ struct TubLaunchScreenView: View {
     ]
 
     private let spinnerFrames = ["-", "\\", "|", "/"]
-    private let bootSegments = 36
+    private let bootSegments = 10
     private let bootDuration: TimeInterval = 3.3
-    private let quickFinishDuration: TimeInterval = 0.44
+    private let quickFinishDuration: TimeInterval = 0.8
     private static let transcriptStepDurations: [TimeInterval] = [
         0.16, 0.31, 0.49, 0.11, 0.1, 0.09, 0.09, 0.27, 0.38
     ]
@@ -66,6 +66,11 @@ struct TubLaunchScreenView: View {
             let cursorOn = (Int((elapsed * 2).rounded(.down)) % 2) == 0
             let spinner = spinnerFrames[Int((elapsed * 12).rounded(.down)) % spinnerFrames.count]
             let litSegments = min(bootSegments, max(1, Int((progress * Double(bootSegments)).rounded(.down))))
+            // Ping-pong scanner: bounces within the lit range
+            let scannerPeriod = 0.6
+            let scanPhase = elapsed.truncatingRemainder(dividingBy: scannerPeriod * 2) / scannerPeriod
+            let scannerNorm = scanPhase <= 1.0 ? scanPhase : 2.0 - scanPhase
+            let scannerIndex = litSegments > 1 ? Int(scannerNorm * Double(litSegments - 1)) : 0
             let pulse = 0.65 + 0.35 * sin((elapsed + pulseSeed) * 4.2)
             let activeLineIndex = min(max(0, revealCount - 1), transcriptLines.count - 1)
             let systemMillis = Int((elapsed * 1_000).rounded(.down)) % 1_000
@@ -100,6 +105,7 @@ struct TubLaunchScreenView: View {
                     revealCount: revealCount,
                     activeLineIndex: activeLineIndex,
                     litSegments: litSegments,
+                    scannerIndex: scannerIndex,
                     progress: progress,
                     cursorOn: cursorOn,
                     pulse: pulse
@@ -138,6 +144,7 @@ struct TubLaunchScreenView: View {
         revealCount: Int,
         activeLineIndex: Int,
         litSegments: Int,
+        scannerIndex: Int,
         progress: Double,
         cursorOn: Bool,
         pulse: Double
@@ -223,13 +230,15 @@ struct TubLaunchScreenView: View {
 
             HStack(spacing: 3) {
                 ForEach(0..<bootSegments, id: \.self) { index in
+                    let isLit = index < litSegments
+                    let isScanner = index == scannerIndex && litSegments < bootSegments
                     Rectangle()
-                        .fill(index < litSegments ? Color.white.opacity(0.95) : Color.white.opacity(0.16))
-                        .scaleEffect(y: (!reduceMotion && index == max(0, litSegments - 1)) ? 1.16 : 1.0, anchor: .center)
+                        .fill(isScanner ? Color.white : (isLit ? Color.white.opacity(0.70) : Color.white.opacity(0.16)))
+                        .scaleEffect(y: (!reduceMotion && isScanner) ? 1.3 : 1.0, anchor: .center)
                         .frame(height: 6)
                 }
             }
-            .animation(.linear(duration: 0.08), value: litSegments)
+            .animation(.linear(duration: 0.06), value: scannerIndex)
 
             HStack(spacing: 12) {
                 Text(progress >= 1 ? "READY" : "INITIALIZING")
@@ -595,6 +604,18 @@ struct ConnectionGateView: View {
         appState.forcePresentEntryGate = true
         appState.bypassPreferredEntryIntentOnce = false
         step = .playLive
+        // Attempt quiet TCP connect so we can receive LINK:* acks
+        attemptQuietHarnessConnect()
+    }
+
+    private func attemptQuietHarnessConnect() {
+        guard harnessClient.connectionState == .disconnected else { return }
+        let port = appState.lastKnownHarnessPort
+        harnessClient.discoverHarnessOnLocalNetwork(port: port) { [harnessClient] result in
+            if case .success(let discovered) = result {
+                harnessClient.connectToHarness(host: discovered.host, port: port)
+            }
+        }
     }
 
     private func primeRuntimePermissionsIfNeeded() {
@@ -610,199 +631,261 @@ struct ConnectionGateView: View {
         let routeActive = appState.isExternalAudioRouteActive
             || appState.isCablePathSatisfied
             || appState.isCableRouteSimulated
+        let harnessVisible = harnessClient.connectionState != .disconnected
 
         return VStack(alignment: .leading, spacing: 18) {
-            Text("Cable Required")
-                .playSans(18, weight: .semibold)
-                .foregroundColor(.white)
+            switch pairingPhase {
+            case .idle:
+                if harnessVisible {
+                    // Harness found — instruct user to initiate pairing
+                    Text("Plug In & Play")
+                        .playSans(18, weight: .semibold)
+                        .foregroundColor(.white)
 
-            HStack(spacing: 14) {
-                Image(systemName: "cable.connector")
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.75))
-                    .accessibilityHidden(true)
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 20, weight: .bold))
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "hand.tap.fill")
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                                .symbolEffect(.pulse, options: .repeating)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Initiate pairing on THE TUB")
+                                    .playSans(13, weight: .semibold)
+                                    .foregroundColor(.white)
+                                Text("Tap JOLT 3× quickly, then hold on the 4th press")
+                                    .playSans(11, weight: .regular)
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.04))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .cornerRadius(6)
+
+                    Text("THE TUB will listen for a cable signal for 12 seconds.")
+                        .playSans(11, weight: .regular)
+                        .foregroundColor(.gray)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                } else {
+                    // No harness — scanning
+                    Text("Waiting for harness…")
+                        .playSans(18, weight: .semibold)
+                        .foregroundColor(.white)
+
+                    HStack(spacing: 12) {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.gray)
+                            .scaleEffect(0.9)
+                        Text("Make sure THE TUB harness is running on the same network")
+                            .playSans(11, weight: .regular)
+                            .foregroundColor(.gray)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.03))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+                    .cornerRadius(6)
+                }
+
+                // Manual cable path (collapsed)
+                manualCableDisclosure(routeActive: routeActive)
+
+            case .pairingActive:
+                Text("PAIRING MODE ACTIVE")
+                    .playMono(18, weight: .bold)
                     .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
-                    .accessibilityHidden(true)
-                Image(systemName: "waveform")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.75))
-                    .accessibilityHidden(true)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
-            .padding(.horizontal, 16)
-            .overlay {
-                Rectangle()
-                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
-            }
 
-            Text("No sound will be output unless you are connected to THE TUB USB-C.")
-                .playSans(11, weight: .semibold)
-                .foregroundColor(.gray)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Button(action: {
-                externalAudioRouteMonitor.refreshRouteState()
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 9, weight: .semibold))
-                        .accessibilityHidden(true)
-                    Text("Check again")
-                }
-                .playSans(11, weight: .semibold)
-                .foregroundColor(.gray)
-            }
-            .accessibilityLabel(Text("Check cable connection"))
-            .accessibilityHint(Text("Refresh cable detection"))
-
-            Button(action: {
-                if !routeActive {
-                    appState.markCablePathSatisfied()
-                    addToast("✓ Cable confirmed manually.", style: .success)
-                }
-                appState.forcePresentEntryGate = false
-                appState.requestTabNavigation(.play)
-            }) {
-                Text(routeActive ? "Cable Ready" : "I'm Connected")
-                    .playSans(20, weight: .heavy)
-                    .foregroundColor(.black)
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                    .background(Color(UIColor(named: "GlyphGreen") ?? .green))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Text(routeActive ? "Continue to play" : "Confirm cable connected"))
-            .accessibilityHint(Text("Proceed even if iOS does not expose a cable route"))
-
-            Button(action: {
-                showCableHelp.toggle()
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: showCableHelp ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .accessibilityHidden(true)
-                    Text(showCableHelp ? "Hide cable help" : "Need help finding the cable?")
-                }
-                .playSans(11, weight: .semibold)
-                .foregroundColor(.gray)
-            }
-            .accessibilityLabel(Text(showCableHelp ? "Hide cable help" : "Show cable help"))
-            .accessibilityHint(Text("Toggle detailed cable connection steps"))
-
-            if showCableHelp {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "1.circle.fill")
-                            .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
-                        Text("Connect phone to USB-C audio adapter/cable")
-                    }
-                    HStack(spacing: 10) {
-                        Image(systemName: "2.circle.fill")
-                            .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
-                        Text("Route analog TRS line to THE TUB input")
-                    }
-                    HStack(spacing: 10) {
-                        Image(systemName: "3.circle.fill")
-                            .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
-                        Text("Press 'Check again' when ready")
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 14) {
+                        ZStack {
+                            Circle()
+                                .stroke(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.2), lineWidth: 2)
+                                .frame(width: 48, height: 48)
+                            Circle()
+                                .stroke(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.5), lineWidth: 2)
+                                .frame(width: 48, height: 48)
+                                .scaleEffect(pulseScale)
+                                .opacity(2.0 - Double(pulseScale))
+                            Image(systemName: "cable.connector")
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Now plug in the USB-C cable")
+                                .playSans(14, weight: .semibold)
+                                .foregroundColor(.white)
+                            Text("THE TUB is listening for a signal on all channels")
+                                .playSans(11, weight: .regular)
+                                .foregroundColor(.gray)
+                        }
                     }
                 }
-                .playSans(10)
-                .foregroundColor(.gray)
-                .padding(12)
-                .background(Color.white.opacity(0.04))
-                .cornerRadius(4)
-            }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.3), lineWidth: 1)
+                )
+                .cornerRadius(6)
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                        pulseScale = 1.5
+                    }
+                }
 
-            // SoftLink pairing status from harness
-            pairingStatusBanner
+            case .channelLinked(let ch):
+                Text("CHANNEL \(ch) LINKED")
+                    .playMono(18, weight: .bold)
+                    .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+
+                HStack(spacing: 14) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 36, weight: .bold))
+                        .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Signal confirmed")
+                            .playSans(14, weight: .semibold)
+                            .foregroundColor(.white)
+                        if routeActive {
+                            Text("Entering live session…")
+                                .playSans(11, weight: .regular)
+                                .foregroundColor(.gray)
+                        } else {
+                            Text("Cable linked on harness — plug USB-C into this device")
+                                .playSans(11, weight: .regular)
+                                .foregroundColor(.gray)
+                        }
+                    }
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.4), lineWidth: 1)
+                )
+                .cornerRadius(6)
+                .transition(.scale(scale: 0.96).combined(with: .opacity))
+
+            case .pairingTimeout:
+                pairingErrorContent(
+                    title: "Pairing timed out",
+                    message: "No cable signal detected within the 12-second window. Try again from the harness."
+                )
+                manualCableDisclosure(routeActive: routeActive)
+
+            case .pairingCancelled:
+                pairingErrorContent(
+                    title: "Pairing cancelled",
+                    message: "The harness cancelled the pairing session. Try again."
+                )
+                manualCableDisclosure(routeActive: routeActive)
+            }
 
             secondaryNavRow(backAction: {
                 appState.resetEntryFlow()
                 step = .chooseIntent
             })
         }
+        .animation(.easeInOut(duration: 0.3), value: pairingPhase)
     }
 
     @ViewBuilder
-    private var pairingStatusBanner: some View {
-        switch pairingPhase {
-        case .idle:
-            EmptyView()
-        case .pairingActive:
-            HStack(spacing: 10) {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .tint(Color(UIColor(named: "GlyphGreen") ?? .green))
-                    .scaleEffect(0.8)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("SOFTLINK PAIRING")
-                        .playSans(12, weight: .bold)
+    private func manualCableDisclosure(routeActive: Bool) -> some View {
+        DisclosureGroup(isExpanded: $showCableHelp) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: "1.circle.fill")
                         .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
-                    Text("Clip the cable in now — harness is listening")
-                        .playSans(10, weight: .regular)
-                        .foregroundColor(.gray)
+                    Text("Connect phone to USB-C audio adapter/cable")
                 }
-                Spacer()
-            }
-            .padding(12)
-            .background(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.08))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.3), lineWidth: 1)
-            )
-            .cornerRadius(6)
-            .transition(.opacity.combined(with: .move(edge: .bottom)))
-        case .channelLinked(let ch):
-            HStack(spacing: 10) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("CH\(ch) LINKED")
-                        .playSans(12, weight: .bold)
+                HStack(spacing: 10) {
+                    Image(systemName: "2.circle.fill")
                         .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
-                    Text("Signal confirmed — you're connected")
-                        .playSans(10, weight: .regular)
-                        .foregroundColor(.gray)
+                    Text("Route analog TRS line to THE TUB input")
                 }
-                Spacer()
+                HStack(spacing: 10) {
+                    Image(systemName: "3.circle.fill")
+                        .foregroundColor(Color(UIColor(named: "GlyphGreen") ?? .green))
+                    Text("Press 'Check again' when ready")
+                }
+
+                Button(action: {
+                    externalAudioRouteMonitor.refreshRouteState()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("Check again")
+                    }
+                    .playSans(11, weight: .semibold)
+                    .foregroundColor(.gray)
+                }
+                .padding(.top, 4)
+
+                Button(action: {
+                    if !routeActive {
+                        appState.markCablePathSatisfied()
+                        addToast("✓ Cable confirmed manually.", style: .success)
+                    }
+                    appState.forcePresentEntryGate = false
+                    appState.requestTabNavigation(.play)
+                }) {
+                    Text(routeActive ? "Cable Ready" : "I'm Connected")
+                        .playSans(16, weight: .heavy)
+                        .foregroundColor(gateLabelForeground)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .modifier(GateButtonGlass())
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
             }
-            .padding(12)
-            .background(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color(UIColor(named: "GlyphGreen") ?? .green).opacity(0.4), lineWidth: 1)
-            )
-            .cornerRadius(6)
-            .transition(.opacity.combined(with: .scale(scale: 0.96)))
-        case .pairingTimeout:
-            pairingErrorBanner(message: "Pairing timed out — try again from the harness")
-        case .pairingCancelled:
-            pairingErrorBanner(message: "Pairing cancelled")
+            .playSans(10)
+            .foregroundColor(.gray)
+            .padding(.top, 8)
+        } label: {
+            Text("Manual cable setup")
+                .playSans(11, weight: .semibold)
+                .foregroundColor(.gray)
         }
+        .tint(.gray)
     }
 
-    private func pairingErrorBanner(message: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "xmark.circle.fill")
-                .font(.system(size: 18, weight: .bold))
-                .foregroundColor(.orange)
+    private func pairingErrorContent(title: String, message: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundColor(.orange)
+                Text(title)
+                    .playSans(16, weight: .bold)
+                    .foregroundColor(.orange)
+            }
             Text(message)
-                .playSans(11, weight: .semibold)
-                .foregroundColor(.orange)
-            Spacer()
+                .playSans(11, weight: .regular)
+                .foregroundColor(.gray)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(12)
-        .background(Color.orange.opacity(0.08))
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.06))
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                .stroke(Color.orange.opacity(0.25), lineWidth: 1)
         )
         .cornerRadius(6)
-        .transition(.opacity)
     }
 
     private var feedBankContent: some View {
@@ -969,13 +1052,20 @@ struct ConnectionGateView: View {
     }
 
     private var statusStrip: some View {
-        HStack(spacing: 18) {
+        let isPairing = pairingPhase == .pairingActive
+        let isLinked: Bool = {
+            if case .channelLinked = pairingPhase { return true }
+            return false
+        }()
+
+        return HStack(spacing: 18) {
             gateStatusPill(
                 label: "CABLE",
                 active: appState.isExternalAudioRouteActive
                     || appState.isCablePathSatisfied
                     || appState.isCableRouteSimulated
             )
+            .opacity(isPairing ? (pulseScale > 1.2 ? 1 : 0.5) : 1)
             .offset(x: slideInPills ? 0 : -20)
             .opacity(slideInPills ? 1 : 0)
             .animation(.easeOut(duration: 0.5).delay(0.1), value: slideInPills)
@@ -990,7 +1080,7 @@ struct ConnectionGateView: View {
 
             gateStatusPill(
                 label: "SESSION",
-                active: appState.sessionId != nil
+                active: isLinked || appState.sessionId != nil
             )
             .offset(x: slideInPills ? 0 : -20)
             .opacity(slideInPills ? 1 : 0)
@@ -1024,16 +1114,15 @@ struct ConnectionGateView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .playSans(14, weight: .bold)
-                .foregroundColor(.black)
+                .foregroundColor(gateLabelForeground)
 
             Text(subtitle)
                 .playSans(10)
-                .foregroundColor(.black.opacity(0.75))
+                .foregroundColor(gateLabelForeground.opacity(0.75))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(Color(UIColor(named: "GlyphGreen") ?? .green))
-        .cornerRadius(4)
+        .modifier(GateButtonGlass())
     }
 
     @ViewBuilder
@@ -1068,26 +1157,52 @@ struct ConnectionGateView: View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(.black)
+                .foregroundColor(gateIconForeground)
                 .accessibilityHidden(true)
             
             VStack(alignment: .leading, spacing: 8) {
                 Text(title)
                     .playSans(14, weight: .bold)
-                    .foregroundColor(.black)
+                    .foregroundColor(gateLabelForeground)
 
                 Text(subtitle)
                     .playSans(10)
-                    .foregroundColor(.black.opacity(0.75))
+                    .foregroundColor(gateLabelForeground.opacity(0.75))
             }
             Spacer()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(Color(UIColor(named: "GlyphGreen") ?? .green))
-        .cornerRadius(4)
+        .modifier(GateButtonGlass())
     }
-    
+
+    private var gateIconForeground: Color {
+        if #available(iOS 26, *) { return .white }
+        return .black
+    }
+
+    private var gateLabelForeground: Color {
+        if #available(iOS 26, *) { return .white }
+        return .black
+    }
+}
+
+/// Glass-backed gate entry button — prominent tinted glass on iOS 26+,
+/// opaque green fill on earlier.
+private struct GateButtonGlass: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *) {
+            content
+                .glassEffect(
+                    .regular.tint(BrandingColors.glyphGreen).interactive(),
+                    in: .rect(cornerRadius: 4)
+                )
+        } else {
+            content
+                .background(Color(UIColor(named: "GlyphGreen") ?? .green))
+                .cornerRadius(4)
+        }
+    }
 }
 
 struct ConnectionRequiredOverlay: View {
@@ -1142,9 +1257,9 @@ struct ConnectionRequiredOverlay: View {
                     Button(action: primaryAction) {
                         Text(primaryActionLabel)
                             .playSans(12, weight: .bold)
-                            .foregroundColor(.black)
+                            .foregroundColor(overlayPrimaryForeground)
                             .frame(maxWidth: .infinity, minHeight: 46)
-                            .background(Color(UIColor(named: "GlyphGreen") ?? .green))
+                            .modifier(GateButtonGlass())
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("connection.overlay.primary")
@@ -1156,10 +1271,7 @@ struct ConnectionRequiredOverlay: View {
                             .playSans(11, weight: .semibold)
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity, minHeight: 44)
-                            .overlay {
-                                Rectangle()
-                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
-                            }
+                            .tubGlass(tint: Color.white, opacity: 0.08, border: Color.white.opacity(0.28))
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("connection.overlay.back")
@@ -1183,7 +1295,14 @@ struct ConnectionRequiredOverlay: View {
                         .playMono(10)
                         .foregroundColor(.gray)
                 }
-                .padding(16)
+                .padding(20)
+                .frame(maxWidth: 400)
+                .background(Color.black)
+                .overlay {
+                    Rectangle()
+                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                }
+                .padding(.horizontal, 24)
             }
         }
         .allowsHitTesting(shouldBlockInteraction)
@@ -1270,6 +1389,11 @@ struct ConnectionRequiredOverlay: View {
             return true
         }
         return shouldRenderGateContent
+    }
+
+    private var overlayPrimaryForeground: Color {
+        if #available(iOS 26, *) { return .white }
+        return .black
     }
 
     private func beginQuietReconnectIfNeeded(force: Bool) {
