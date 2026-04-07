@@ -2855,4 +2855,79 @@ struct TheTubHarnessTests {
         let checkTime = holdStart.addingTimeInterval(0.6)
         #expect(gesture.shouldTrigger(at: checkTime))
     }
+
+    // MARK: - KinectUDPProvider
+
+    @Test("KinectUDPProvider parses valid body detection packet")
+    func kinectUDPProviderParsesPacket() {
+        let provider = KinectUDPProvider()
+        let json = """
+        {"bodies":[
+            {"bodyIndex":0,"x":960.0,"y":540.0,"depthZ":2.5,"confidence":0.9,"isTracked":true},
+            {"bodyIndex":1,"x":300.0,"y":400.0,"depthZ":3.2,"confidence":0.7,"isTracked":true}
+        ]}
+        """
+        provider.parsePacket(Data(json.utf8))
+
+        let bodies = provider.getActiveBodies()
+        #expect(bodies.count == 2)
+        #expect(bodies[0].bodyIndex == 0)
+        #expect(bodies[0].position.x == 960.0)
+        #expect(bodies[0].depthZ == 2.5)
+        #expect(bodies[0].confidence == 0.9)
+        #expect(bodies[1].bodyIndex == 1)
+        #expect(bodies[1].depthZ == 3.2)
+    }
+
+    @Test("KinectUDPProvider handles empty bodies array")
+    func kinectUDPProviderEmptyBodies() {
+        let provider = KinectUDPProvider()
+        provider.parsePacket(Data(#"{"bodies":[]}"#.utf8))
+
+        let bodies = provider.getActiveBodies()
+        #expect(bodies.isEmpty)
+    }
+
+    @Test("KinectUDPProvider filters untracked bodies")
+    func kinectUDPProviderFiltersUntracked() {
+        let provider = KinectUDPProvider()
+        let json = """
+        {"bodies":[
+            {"bodyIndex":0,"x":100.0,"y":200.0,"depthZ":1.5,"confidence":0.8,"isTracked":true},
+            {"bodyIndex":1,"x":300.0,"y":400.0,"depthZ":2.0,"confidence":0.3,"isTracked":false}
+        ]}
+        """
+        provider.parsePacket(Data(json.utf8))
+
+        let bodies = provider.getActiveBodies()
+        #expect(bodies.count == 1)
+        #expect(bodies[0].bodyIndex == 0)
+    }
+
+    @Test("KinectUDPProvider getNearestBody returns closest")
+    func kinectUDPProviderNearestBody() {
+        let provider = KinectUDPProvider()
+        let json = """
+        {"bodies":[
+            {"bodyIndex":0,"x":100.0,"y":100.0,"depthZ":2.0,"confidence":0.9,"isTracked":true},
+            {"bodyIndex":1,"x":900.0,"y":500.0,"depthZ":3.0,"confidence":0.8,"isTracked":true}
+        ]}
+        """
+        provider.parsePacket(Data(json.utf8))
+
+        let nearest = provider.getNearestBody(to: CGPoint(x: 850, y: 450))
+        #expect(nearest?.bodyIndex == 1)
+    }
+
+    @Test("KinectUDPProvider ignores malformed packets")
+    func kinectUDPProviderMalformedPacket() {
+        let provider = KinectUDPProvider()
+        // First set valid data
+        provider.parsePacket(Data(#"{"bodies":[{"bodyIndex":0,"x":100.0,"y":200.0,"depthZ":1.0,"confidence":0.5,"isTracked":true}]}"#.utf8))
+        #expect(provider.getActiveBodies().count == 1)
+
+        // Malformed packet should be ignored, previous data remains
+        provider.parsePacket(Data("not json".utf8))
+        #expect(provider.getActiveBodies().count == 1)
+    }
 }

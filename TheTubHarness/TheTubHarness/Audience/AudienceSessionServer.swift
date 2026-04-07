@@ -81,6 +81,8 @@ class AudienceSessionServer: ObservableObject {
         .init(descriptorId: "strike", label: "STRIKE", priority: 0.58, isVisible: true, systemStateId: nil),
     ]
 
+    var bodyClaimResolver: AudienceBodyClaimResolver?
+
     let decoder: JSONDecoder
     let encoder: JSONEncoder
 
@@ -809,6 +811,16 @@ class AudienceSessionServer: ObservableObject {
         }
 
         print("Received preference event from session \(event.sessionId): \(event.eventType)")
+
+        // Resolve body claim for this session
+        if let resolver = bodyClaimResolver,
+           let session = activeSessions[event.sessionId],
+           let claim = resolver.resolveActiveClaim(for: session, activeSessions: activeSessions) {
+            resolver.updateSessionInteraction(event.sessionId)
+            DispatchQueue.main.async {
+                self.claimStates[event.sessionId] = claim
+            }
+        }
     }
 
     private func preferenceEvent(sessionId: String, from payload: SteerVectorPayload) -> AudiencePreferenceEvent {

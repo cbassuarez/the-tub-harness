@@ -41,8 +41,8 @@ enum LearnJumpTarget {
 
     var commandTitle: String {
         switch self {
-        case .steer: return "JUMP STEER"
-        case .play: return "JUMP PLAY"
+        case .steer: return "JUMP TO STEER"
+        case .play: return "JUMP TO PLAY"
         }
     }
 }
@@ -541,13 +541,13 @@ struct ReadLearnView: View {
 
                     HStack(spacing: 10) {
                         commandButton(
-                            title: "JUMP STEER",
+                            title: "JUMP TO STEER",
                             action: viewModel.jumpToSteer,
                             identifier: "learn.command.jumpSteer",
                             accessibilityHint: "Open the Steer tab now"
                         )
                         commandButton(
-                            title: "JUMP PLAY",
+                            title: "JUMP TO PLAY",
                             action: viewModel.jumpToPlay,
                             identifier: "learn.command.jumpPlay",
                             accessibilityHint: "Open the Play tab now"
@@ -760,13 +760,13 @@ struct ReadLearnView: View {
                         accessibilityHint: "Open manual mode"
                     )
                     commandButton(
-                        title: "JUMP STEER",
+                        title: "JUMP TO STEER",
                         action: viewModel.jumpToSteer,
                         identifier: "learn.command.jumpSteer",
                         accessibilityHint: "Open the Steer tab now"
                     )
                     commandButton(
-                        title: "JUMP PLAY",
+                        title: "JUMP TO PLAY",
                         action: viewModel.jumpToPlay,
                         identifier: "learn.command.jumpPlay",
                         accessibilityHint: "Open the Play tab now"
@@ -781,13 +781,13 @@ struct ReadLearnView: View {
                         accessibilityHint: "Return to guided briefing mode"
                     )
                     commandButton(
-                        title: "JUMP STEER",
+                        title: "JUMP TO STEER",
                         action: viewModel.jumpToSteer,
                         identifier: "learn.command.jumpSteer",
                         accessibilityHint: "Open the Steer tab now"
                     )
                     commandButton(
-                        title: "JUMP PLAY",
+                        title: "JUMP TO PLAY",
                         action: viewModel.jumpToPlay,
                         identifier: "learn.command.jumpPlay",
                         accessibilityHint: "Open the Play tab now"

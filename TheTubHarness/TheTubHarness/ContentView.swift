@@ -439,6 +439,7 @@ private enum JoltHoldSource: Hashable {
     case mouse
     case keyboard
     case softLink
+    case hardware
 }
 
 private enum TimelineMetricToggle: String, Hashable {
@@ -1771,6 +1772,8 @@ struct ContentView: View {
     private let webcamPool = USGSWebcamPool()
     private let videoClipPool = JoltVideoClipPool()
     @StateObject private var speechTranscriber = SpeechTranscriber()
+    @StateObject private var hardwareInput = HardwareInputController()
+    @StateObject private var kinectProvider = KinectUDPProvider()
 
     private let modeEngine = ModeEngine()
 
@@ -1878,6 +1881,26 @@ struct ContentView: View {
                 audio?.ingestLiveInputBuffer(buffer, time: time)
             }
             speechTranscriber.requestAuthorization()
+
+            // Hardware panel (Teensy USB serial)
+            hardwareInput.onModeChange = { [weak client] newMode in
+                client?.setMode(newMode)
+                DispatchQueue.main.async { mode = newMode }
+            }
+            hardwareInput.onJoltPressed = { [weak client] in
+                client?.pulseJolt()
+            }
+            hardwareInput.onJoltHeldChange = { newHeld in
+                DispatchQueue.main.async {
+                    setJoltHold(.hardware, active: newHeld)
+                }
+            }
+            hardwareInput.start()
+
+            // Kinect body tracking (UDP from Python bridge)
+            kinectProvider.start()
+            audienceServer.bodyClaimResolver = AudienceBodyClaimResolver(kinectProvider: kinectProvider)
+
             analyzer.onLiveInputRawBuffers = { [weak audio, weak speechTranscriber] audioBufferList, frameCount, sampleRate in
                 audio?.ingestLiveInputAudioBuffers(audioBufferList, frameCount: frameCount, sampleRate: sampleRate)
                 speechTranscriber?.appendRawAudio(audioBufferList, frameCount: frameCount, sampleRate: sampleRate)
@@ -1964,6 +1987,8 @@ struct ContentView: View {
         }
         .onDisappear {
             releaseAllJoltHolds()
+            hardwareInput.stop()
+            kinectProvider.stop()
             modelServer.stop()
         }
     }
@@ -2063,6 +2088,16 @@ struct ContentView: View {
             tone: isReplayRunning ? .warning : .idle
         )
         .fixedSize(horizontal: true, vertical: true)
+        ShellStatusPill(
+            title: "Panel",
+            value: hardwareInput.isConnected ? "Connected" : "---",
+            tone: hardwareInput.isConnected ? .positive : .idle
+        )
+        ShellStatusPill(
+            title: "Kinect",
+            value: kinectProvider.isReceiving ? "\(kinectProvider.bodyCount) bodies" : "---",
+            tone: kinectProvider.isReceiving ? .positive : .idle
+        )
     }
 
     @ViewBuilder

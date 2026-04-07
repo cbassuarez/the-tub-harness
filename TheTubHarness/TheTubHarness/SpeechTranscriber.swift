@@ -389,11 +389,23 @@ enum StageTextModeration {
         }
 
         // Catch obfuscated patterns spread over punctuation (example: f.u.c.k).
-        let collapsed = normalizeToken(trimmed)
-        for term in blockedTerms where term.count >= 4 {
-            if collapsed.contains(term) {
-                return redactionToken
+        // Check each whitespace-delimited segment independently so that
+        // innocent prefixes like "VOICE:" aren't collapsed with the
+        // profanity and over-redacted.
+        var segments = trimmed.split(separator: " ", omittingEmptySubsequences: false)
+        var anySegmentRedacted = false
+        for i in segments.indices {
+            let collapsed = normalizeToken(String(segments[i]))
+            for term in blockedTerms where term.count >= 4 {
+                if collapsed.contains(term) {
+                    segments[i] = Substring(redactionToken)
+                    anySegmentRedacted = true
+                    break
+                }
             }
+        }
+        if anySegmentRedacted {
+            return segments.joined(separator: " ")
         }
 
         return result

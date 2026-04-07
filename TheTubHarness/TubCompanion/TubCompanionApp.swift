@@ -1192,7 +1192,7 @@ private struct ShellInspectorPane: View {
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
                 CommandRailButton(
-                    title: "JUMP STEER",
+                    title: "JUMP TO STEER",
                     systemImage: "slider.horizontal.3",
                     isEnabled: true,
                     isActive: false,
@@ -1200,7 +1200,7 @@ private struct ShellInspectorPane: View {
                     action: onJumpSteer
                 )
                 CommandRailButton(
-                    title: "JUMP PLAY",
+                    title: "JUMP TO PLAY",
                     systemImage: "play.fill",
                     isEnabled: true,
                     isActive: false,

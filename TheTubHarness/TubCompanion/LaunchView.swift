@@ -359,7 +359,7 @@ struct ConnectionGateView: View {
     let presentation: ConnectionGatePresentation
     let preferredIntent: EntryIntent?
 
-    @State private var step: GateStep = .chooseIntent
+    @State private var step: GateStep
     @State private var isAttemptingLocalConnect = false
     @State private var showCableHelp = false
     @State private var toasts: [Toast] = []
@@ -371,6 +371,26 @@ struct ConnectionGateView: View {
     @State private var hasAttemptedAutoHarnessConnect = false
     @State private var didPrimeRuntimePermissions = false
     @State private var pairingPhase: PairingPhase = .idle
+
+    init(
+        appState: TubCompanionAppState,
+        harnessClient: HarnessClient,
+        externalAudioRouteMonitor: ExternalAudioRouteMonitor,
+        presentation: ConnectionGatePresentation,
+        preferredIntent: EntryIntent?
+    ) {
+        self._appState = ObservedObject(wrappedValue: appState)
+        self._harnessClient = ObservedObject(wrappedValue: harnessClient)
+        self._externalAudioRouteMonitor = ObservedObject(wrappedValue: externalAudioRouteMonitor)
+        self.presentation = presentation
+        self.preferredIntent = preferredIntent
+
+        switch preferredIntent {
+        case .playLive: _step = State(initialValue: .playLive)
+        case .feedBank: _step = State(initialValue: .feedBank)
+        case nil: _step = State(initialValue: .chooseIntent)
+        }
+    }
 
     enum PairingPhase: Equatable {
         case idle
@@ -526,7 +546,7 @@ struct ConnectionGateView: View {
     private var chooseIntentContent: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("How do you want to enter?")
-                .playSans(18, weight: .semibold)
+                .playSans(18, weight: .bold)
                 .foregroundColor(.white)
 
             Text("Choose one path. You can change it later.")
@@ -627,7 +647,7 @@ struct ConnectionGateView: View {
                 if harnessVisible {
                     // Harness found — instruct user to initiate pairing
                     Text("Plug In & Play")
-                        .playSans(18, weight: .semibold)
+                        .playSans(18, weight: .bold)
                         .foregroundColor(.white)
 
                     VStack(alignment: .leading, spacing: 12) {
@@ -640,7 +660,7 @@ struct ConnectionGateView: View {
                                 Text("Initiate pairing on THE TUB")
                                     .playSans(13, weight: .semibold)
                                     .foregroundColor(.white)
-                                Text("Tap JOLT 4× quickly, then hold on the 5th press")
+                                Text("Tap RED button 4× quickly, then hold on the 5th press")
                                     .playSans(11, weight: .regular)
                                     .foregroundColor(.gray)
                             }

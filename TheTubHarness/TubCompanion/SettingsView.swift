@@ -1245,7 +1245,9 @@ struct SettingsView: View {
                                         isEnabled: true,
                                         isActive: true,
                                         isSolid: true,
-                                        accent: BrandingColors.glyphGreen
+                                        accent: viewModel.isHarnessLinked
+                                            ? BrandingColors.glyphGreen
+                                            : BrandingColors.warningYellow
                                     ) {
                                         viewModel.reconnectHarness()
                                     }
