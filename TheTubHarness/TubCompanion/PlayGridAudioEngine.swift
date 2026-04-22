@@ -235,6 +235,21 @@ final class PlayGridAudioEngine {
             guard self.ensureEngineRunningLocked() else { return }
             guard !self.longVoices.isEmpty else { return }
 
+            // Hot path for scrub gestures: if sources are unchanged, only update gains.
+            // This avoids repeated micro-fades + reapplication that cause audible stutter.
+            if self.canUpdateLongBlendInPlaceLocked(primaryURL: primaryURL, secondaryURL: secondaryURL) {
+                self.longFadeGeneration += 1
+                self.isLongPaused = false
+                self.isLongFadeOutActive = false
+                self.applyLongBlendGainsLocked(
+                    primaryURL: primaryURL,
+                    secondaryURL: secondaryURL,
+                    mix: mix,
+                    gain: gain
+                )
+                return
+            }
+
             // Micro-fade mixer to 0 before source swap
             self.longDuckGeneration += 1
             let generation = self.longDuckGeneration
@@ -685,9 +700,6 @@ final class PlayGridAudioEngine {
     }
 
     private func applyLongBlendSourcesLocked(primaryURL: URL, secondaryURL: URL?, mix: Float, gain: Float) -> Bool {
-        let clampedMix = max(0, min(1, mix))
-        let clampedGain = max(0, min(1, gain))
-
         guard ensureLongFilePlayingLocked(on: .a, url: primaryURL) else { return false }
         let hasSecondary = secondaryURL != nil && secondaryURL != primaryURL
         if hasSecondary {
@@ -700,6 +712,35 @@ final class PlayGridAudioEngine {
             retainedLongBuffers.removeValue(forKey: LongPlaybackSlot.b.rawValue)
             longSlotURLs[LongPlaybackSlot.b.rawValue] = nil
         }
+
+        applyLongBlendGainsLocked(
+            primaryURL: primaryURL,
+            secondaryURL: secondaryURL,
+            mix: mix,
+            gain: gain
+        )
+        return true
+    }
+
+    private func canUpdateLongBlendInPlaceLocked(primaryURL: URL, secondaryURL: URL?) -> Bool {
+        guard LongPlaybackSlot.a.rawValue < longSlotURLs.count else { return false }
+        guard longSlotURLs[LongPlaybackSlot.a.rawValue] == primaryURL else { return false }
+        guard longVoices[LongPlaybackSlot.a.rawValue].isPlaying || isLongPaused else { return false }
+
+        let hasSecondary = secondaryURL != nil && secondaryURL != primaryURL
+        if hasSecondary {
+            guard LongPlaybackSlot.b.rawValue < longSlotURLs.count else { return false }
+            guard longSlotURLs[LongPlaybackSlot.b.rawValue] == secondaryURL else { return false }
+            guard longVoices[LongPlaybackSlot.b.rawValue].isPlaying || isLongPaused else { return false }
+        }
+
+        return true
+    }
+
+    private func applyLongBlendGainsLocked(primaryURL: URL, secondaryURL: URL?, mix: Float, gain: Float) {
+        let clampedMix = max(0, min(1, mix))
+        let clampedGain = max(0, min(1, gain))
+        let hasSecondary = secondaryURL != nil && secondaryURL != primaryURL
 
         let leftGain: Float
         let rightGain: Float
@@ -715,7 +756,6 @@ final class PlayGridAudioEngine {
         longVoices[LongPlaybackSlot.b.rawValue].volume = rightGain
         activeLongSlot = hasSecondary && rightGain > leftGain ? .b : .a
         activeLongURL = hasSecondary && rightGain > leftGain ? secondaryURL : primaryURL
-        return true
     }
 
     private func ensureLongFilePlayingLocked(on slot: LongPlaybackSlot, url: URL?) -> Bool {
@@ -1046,5 +1086,62 @@ extension PlayGridAudioEngine {
             }
             return $0.path.localizedStandardCompare($1.path) == .orderedAscending
         }
+    }
+
+    nonisolated static func discoverLongBankOverrideLibrary() -> [URL] {
+        let allowedExtensions = ["wav", "aif", "aiff", "caf", "m4a", "mp3"]
+        let preferredSubdirectories: [String] = [
+            "Samples/long_bank_gradient",
+            "Assets/Samples/long_bank_gradient",
+            "Samples/long_bank",
+            "Assets/Samples/long_bank"
+        ]
+        var discovered: [URL] = []
+        var seen = Set<String>()
+
+        for subdirectory in preferredSubdirectories {
+            for ext in allowedExtensions {
+                let urls = Bundle.main.urls(forResourcesWithExtension: ext, subdirectory: subdirectory) ?? []
+                for url in urls {
+                    let key = url.resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
+                    if seen.insert(key).inserted {
+                        discovered.append(url)
+                    }
+                }
+            }
+            if !discovered.isEmpty {
+                // Use the first configured override directory that has content.
+                break
+            }
+        }
+
+        // Some project configurations flatten resources at bundle root.
+        // In that case, use filename pattern matching for curated long-bank clips.
+        if discovered.isEmpty {
+            for ext in allowedExtensions {
+                let urls = Bundle.main.urls(forResourcesWithExtension: ext, subdirectory: nil) ?? []
+                for url in urls where isLongBankOverrideCandidate(url) {
+                    let key = url.resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
+                    if seen.insert(key).inserted {
+                        discovered.append(url)
+                    }
+                }
+            }
+        }
+
+        return discovered.sorted {
+            let left = $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent)
+            if left != .orderedSame {
+                return left == .orderedAscending
+            }
+            return $0.path.localizedStandardCompare($1.path) == .orderedAscending
+        }
+    }
+
+    nonisolated private static func isLongBankOverrideCandidate(_ url: URL) -> Bool {
+        let stem = url.deletingPathExtension().lastPathComponent
+        guard stem.count >= 4 else { return false }
+        let chars = Array(stem)
+        return chars[0].isNumber && chars[1].isNumber && chars[2] == "_"
     }
 }

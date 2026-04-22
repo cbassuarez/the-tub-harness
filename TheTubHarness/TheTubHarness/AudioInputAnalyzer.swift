@@ -351,7 +351,7 @@ nonisolated private final class CoreAudioLiveInputDriver {
 
     private var deviceID: AudioDeviceID = 0
     private var ioProcID: AudioDeviceIOProcID?
-    private var sampleRate: Double = 48_000
+    private var sampleRate: Double = 44_100
     private var inputBlock: InputBlock?
 
     deinit {
@@ -364,7 +364,7 @@ nonisolated private final class CoreAudioLiveInputDriver {
             throw NSError(domain: "AudioInputDriver", code: 1, userInfo: [NSLocalizedDescriptionKey: "Input device not found"])
         }
         self.deviceID = resolvedDeviceID
-        self.sampleRate = CoreAudioInputCatalog.nominalSampleRate(forUID: inputUID) ?? 48_000
+        self.sampleRate = CoreAudioInputCatalog.nominalSampleRate(forUID: inputUID) ?? 44_100
         self.inputBlock = inputBlock
 
         var maybeProcID: AudioDeviceIOProcID?
@@ -549,12 +549,14 @@ struct FeaturePacketSnapshot {
 
 /// Captures audio input and computes a bounded feature frame at ~10 Hz.
 final class AudioInputAnalyzer: ObservableObject {
+    private static let preferredHardwareSampleRate: Double = 44_100
+
     private let lock = NSLock()
     private let analysisQueue = DispatchQueue(label: "tub.audio.analysis", qos: .userInitiated)
     private let deviceRefreshQueue = DispatchQueue(label: "tub.audio.input.devices", qos: .userInitiated)
 
     private let audioIn = AudioInService()
-    private var extractor = FeatureExtractor(sampleRate: 48_000)
+    private var extractor = FeatureExtractor(sampleRate: AudioInputAnalyzer.preferredHardwareSampleRate)
     private var timer: DispatchSourceTimer?
     private var cancellables: Set<AnyCancellable> = []
     private var inputProfilesByUID: [String: InputRoutingProfile] = [:]
@@ -979,6 +981,8 @@ final class AudioInputAnalyzer: ObservableObject {
 }
 
 private final class AudioInService: ObservableObject {
+    private static let preferredHardwareSampleRate: Double = 44_100
+
     @Published private(set) var status: AudioInStatus = .stopped
     @Published private(set) var activeInputName: String = "System Default"
 
@@ -990,7 +994,7 @@ private final class AudioInService: ObservableObject {
     private var ring: [Float] = Array(repeating: 0, count: 96_000)
     private var writeIndex: Int = 0
     private var filled: Bool = false
-    private var sampleRateStorage: Double = 48_000
+    private var sampleRateStorage: Double = 44_100
     private var lastIngestNs: UInt64 = 0
     private var preferredInputUID: String?
     private var usesExternalFeed: Bool = false
@@ -1192,7 +1196,13 @@ private final class AudioInService: ObservableObject {
         lock.unlock()
 
         let routeUID = preferredUID ?? CoreAudioInputCatalog.defaultInputUID() ?? ""
-        let sampleRate = max(8_000, CoreAudioInputCatalog.nominalSampleRate(forUID: routeUID) ?? 48_000)
+        if !routeUID.isEmpty {
+            _ = CoreAudioInputCatalog.enforceNominalSampleRate(
+                forUID: routeUID,
+                preferred: Self.preferredHardwareSampleRate
+            )
+        }
+        let sampleRate = max(8_000, CoreAudioInputCatalog.nominalSampleRate(forUID: routeUID) ?? Self.preferredHardwareSampleRate)
         let channels = max(0, CoreAudioInputCatalog.inputChannels(forUID: routeUID) ?? 0)
 
         guard !routeUID.isEmpty, channels > 0 else {
@@ -1477,6 +1487,14 @@ nonisolated enum CoreAudioInputCatalog {
         return nominalSampleRate(id)
     }
 
+    @discardableResult
+    static func enforceNominalSampleRate(forUID uid: String, preferred: Double = 44_100) -> (requested: Bool, applied: Bool, actual: Double?) {
+        guard let id = deviceID(forUID: uid) else {
+            return (requested: false, applied: false, actual: nil)
+        }
+        return enforceNominalSampleRate(id: id, preferred: preferred)
+    }
+
     static func setCurrentInputDevice(on inputNode: AVAudioInputNode, uid: String) throws {
         guard let id = deviceID(forUID: uid) else {
             throw NSError(domain: "AudioInput", code: 1, userInfo: [NSLocalizedDescriptionKey: "Input device not found"])
@@ -1572,6 +1590,68 @@ nonisolated enum CoreAudioInputCatalog {
         let status = AudioObjectGetPropertyData(id, &address, 0, nil, &size, &rate)
         guard status == noErr, rate > 0 else { return nil }
         return rate
+    }
+
+    private static func enforceNominalSampleRate(id: AudioDeviceID, preferred: Double) -> (requested: Bool, applied: Bool, actual: Double?) {
+        let target = max(8_000, min(384_000, preferred))
+        if let current = nominalSampleRate(id), abs(current - target) <= 0.5 {
+            return (requested: false, applied: true, actual: current)
+        }
+        guard supportsNominalSampleRate(id: id, target: target) else {
+            return (requested: false, applied: false, actual: nominalSampleRate(id))
+        }
+
+        var desired = Float64(target)
+        var size = UInt32(MemoryLayout<Float64>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectSetPropertyData(id, &address, 0, nil, size, &desired)
+        guard status == noErr else {
+            return (requested: true, applied: false, actual: nominalSampleRate(id))
+        }
+
+        for _ in 0..<12 {
+            if let current = nominalSampleRate(id), abs(current - target) <= 0.5 {
+                return (requested: true, applied: true, actual: current)
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return (requested: true, applied: false, actual: nominalSampleRate(id))
+    }
+
+    private static func supportsNominalSampleRate(id: AudioDeviceID, target: Double) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyAvailableNominalSampleRates,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(id, &address, 0, nil, &size) == noErr else {
+            return true
+        }
+        let count = Int(size) / MemoryLayout<AudioValueRange>.size
+        guard count > 0 else { return true }
+
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(size),
+            alignment: MemoryLayout<AudioValueRange>.alignment
+        )
+        defer { raw.deallocate() }
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, raw) == noErr else {
+            return true
+        }
+        let ranges = raw.bindMemory(to: AudioValueRange.self, capacity: count)
+        let epsilon = 0.5
+        for index in 0..<count {
+            let range = ranges[index]
+            if target + epsilon >= range.mMinimum && target - epsilon <= range.mMaximum {
+                return true
+            }
+        }
+        return false
     }
 }
 
@@ -1696,6 +1776,14 @@ nonisolated enum CoreAudioOutputCatalog {
         return nominalSampleRate(id)
     }
 
+    @discardableResult
+    static func enforceNominalSampleRate(forUID uid: String, preferred: Double = 44_100) -> (requested: Bool, applied: Bool, actual: Double?) {
+        guard let id = deviceID(forUID: uid) else {
+            return (requested: false, applied: false, actual: nil)
+        }
+        return enforceNominalSampleRate(id: id, preferred: preferred)
+    }
+
     private static func defaultOutputDeviceID() -> AudioDeviceID? {
         var id = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
@@ -1751,6 +1839,68 @@ nonisolated enum CoreAudioOutputCatalog {
         let status = AudioObjectGetPropertyData(id, &address, 0, nil, &size, &rate)
         guard status == noErr, rate.isFinite, rate >= 8_000, rate <= 384_000 else { return nil }
         return rate
+    }
+
+    private static func enforceNominalSampleRate(id: AudioDeviceID, preferred: Double) -> (requested: Bool, applied: Bool, actual: Double?) {
+        let target = max(8_000, min(384_000, preferred))
+        if let current = nominalSampleRate(id), abs(current - target) <= 0.5 {
+            return (requested: false, applied: true, actual: current)
+        }
+        guard supportsNominalSampleRate(id: id, target: target) else {
+            return (requested: false, applied: false, actual: nominalSampleRate(id))
+        }
+
+        var desired = target
+        let size = UInt32(MemoryLayout<Double>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectSetPropertyData(id, &address, 0, nil, size, &desired)
+        guard status == noErr else {
+            return (requested: true, applied: false, actual: nominalSampleRate(id))
+        }
+
+        for _ in 0..<12 {
+            if let current = nominalSampleRate(id), abs(current - target) <= 0.5 {
+                return (requested: true, applied: true, actual: current)
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return (requested: true, applied: false, actual: nominalSampleRate(id))
+    }
+
+    private static func supportsNominalSampleRate(id: AudioDeviceID, target: Double) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyAvailableNominalSampleRates,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(id, &address, 0, nil, &size) == noErr else {
+            return true
+        }
+        let count = Int(size) / MemoryLayout<AudioValueRange>.size
+        guard count > 0 else { return true }
+
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(size),
+            alignment: MemoryLayout<AudioValueRange>.alignment
+        )
+        defer { raw.deallocate() }
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, raw) == noErr else {
+            return true
+        }
+        let ranges = raw.bindMemory(to: AudioValueRange.self, capacity: count)
+        let epsilon = 0.5
+        for index in 0..<count {
+            let range = ranges[index]
+            if target + epsilon >= range.mMinimum && target - epsilon <= range.mMaximum {
+                return true
+            }
+        }
+        return false
     }
 
     private static func deviceUID(_ id: AudioDeviceID) -> String? {

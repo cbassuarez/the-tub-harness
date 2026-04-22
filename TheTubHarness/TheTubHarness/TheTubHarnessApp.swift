@@ -12,8 +12,8 @@ import AppKit
 import CoreData
 
 private enum HarnessLaunchOptions {
-    static func parseRecordInputAudio(arguments: [String]) -> Bool? {
-        guard let idx = arguments.firstIndex(of: "--record-input-audio"), idx + 1 < arguments.count else {
+    static func parseBoolean(arguments: [String], key: String) -> Bool? {
+        guard let idx = arguments.firstIndex(of: key), idx + 1 < arguments.count else {
             return nil
         }
         let raw = arguments[idx + 1].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -25,6 +25,22 @@ private enum HarnessLaunchOptions {
         default:
             return nil
         }
+    }
+
+    static func parseString(arguments: [String], key: String) -> String? {
+        guard let idx = arguments.firstIndex(of: key), idx + 1 < arguments.count else {
+            return nil
+        }
+        let raw = arguments[idx + 1].trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? nil : raw
+    }
+
+    static func parseRecordInputAudio(arguments: [String]) -> Bool? {
+        parseBoolean(arguments: arguments, key: "--record-input-audio")
+    }
+
+    static func parseAutoStart(arguments: [String]) -> Bool? {
+        parseBoolean(arguments: arguments, key: "--autostart")
     }
 
     static func parseMode(arguments: [String]) -> HarnessRunMode? {
@@ -39,12 +55,18 @@ private enum HarnessLaunchOptions {
 struct TheTubHarnessApp: App {
     let persistenceController = PersistenceController.shared
     private let defaultRecordInputAudio: Bool
+    private let autoStartRun: Bool
+    private let preferredInputDeviceHint: String?
+    private let preferredOutputDeviceHint: String?
     @State private var selectedMode: HarnessRunMode?
     @StateObject private var audienceServer = AudienceSessionServer()
 
     init() {
         let args = ProcessInfo.processInfo.arguments
         defaultRecordInputAudio = HarnessLaunchOptions.parseRecordInputAudio(arguments: args) ?? false
+        autoStartRun = HarnessLaunchOptions.parseAutoStart(arguments: args) ?? false
+        preferredInputDeviceHint = HarnessLaunchOptions.parseString(arguments: args, key: "--input-hint")
+        preferredOutputDeviceHint = HarnessLaunchOptions.parseString(arguments: args, key: "--output-hint")
         _selectedMode = State(initialValue: HarnessLaunchOptions.parseMode(arguments: args))
         BundledFontRegistrar.registerAll()
         ManifestCatalog.shared.logValidationSummary(context: "app")
@@ -55,7 +77,13 @@ struct TheTubHarnessApp: App {
         WindowGroup {
             Group {
                 if let mode = selectedMode {
-                    ContentView(runMode: mode, defaultRecordInputAudio: defaultRecordInputAudio)
+                    ContentView(
+                        runMode: mode,
+                        defaultRecordInputAudio: defaultRecordInputAudio,
+                        autoStartRun: autoStartRun,
+                        launchInputDeviceHint: preferredInputDeviceHint,
+                        launchOutputDeviceHint: preferredOutputDeviceHint
+                    )
                         .environment(\.managedObjectContext, persistenceController.container.viewContext)
                         .environmentObject(audienceServer)
                 } else {

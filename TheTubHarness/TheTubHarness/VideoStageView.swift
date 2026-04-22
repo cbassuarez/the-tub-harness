@@ -10,10 +10,61 @@ private enum JoltMedia {
     case video
 }
 
+/// Which physical viewport this stage output is rendering into.
+/// `.solo` is the legacy single-screen path. `.leftHalf` / `.rightHalf`
+/// participate in the dual-projector rig and may render unified (double-wide,
+/// split across the pair) or split (independent content per side) jolts.
+enum StageViewportRole: Equatable {
+    case solo
+    case leftHalf
+    case rightHalf
+
+    var isPaired: Bool { self != .solo }
+}
+
+/// How a single jolt event is distributed across the dual-projector pair.
+fileprivate enum JoltSpanKind: Equatable {
+    /// One image/video fills the viewport. Only valid for `.solo`.
+    case solo
+    /// Each side renders independent media (different seed per side).
+    case split
+    /// One double-wide image spans both viewports (each shows one half).
+    case unified
+}
+
+fileprivate enum StageSpanResolver {
+    /// Per-mode bias for unified (double-wide) jolts vs. split (independent) jolts.
+    /// Mode 4/5 favor wild split variety; mode 6/7 favor coherent panoramic sweeps.
+    static func unifiedProbability(mode: Int) -> Double {
+        switch mode {
+        case 4, 5: return 0.30
+        case 6, 7: return 0.70
+        default:   return 0.45
+        }
+    }
+
+    static func spanKind(role: StageViewportRole, seed: UInt64, mode: Int) -> JoltSpanKind {
+        guard role.isPaired else { return .solo }
+        let prng = StagePRNG(seed: seed ^ 0x5F4A_9C13_7B82_D61E)
+        return prng.value(at: 0) < unifiedProbability(mode: mode) ? .unified : .split
+    }
+
+    /// Split jolts use a per-side seed so left and right render different frames.
+    static func sideSeed(base: UInt64, role: StageViewportRole, span: JoltSpanKind) -> UInt64 {
+        guard span == .split else { return base }
+        switch role {
+        case .solo, .leftHalf: return base
+        case .rightHalf:       return base ^ 0xA5A5_A5A5_5A5A_5A5A
+        }
+    }
+}
+
 struct StageOutputView: View {
     @ObservedObject var store: VideoStageStore
     var webcamPool: USGSWebcamPool?
     var videoClipPool: JoltVideoClipPool?
+    var viewportRole: StageViewportRole = .solo
+    var horizontalFlip: Bool = false
 
     @State private var flashReleaseAt: Date?
     @State private var activeJoltPlayer: AVPlayer?
@@ -23,109 +74,145 @@ struct StageOutputView: View {
             TimelineView(.periodic(from: .now, by: 1.0 / 60.0)) { timeline in
                 let snapshot = store.snapshot
                 let now = timeline.date
-                let flashOpacity = currentFlashOpacity(snapshot: snapshot, now: now)
+                let pianoTunerActive = store.pianoTunerActive
+                let flashOpacity = pianoTunerActive ? 0 : currentFlashOpacity(snapshot: snapshot, now: now)
                 let flashPattern = StageFlashPattern(snapshot: snapshot, now: now)
 
+                let spanKind = StageSpanResolver.spanKind(
+                    role: viewportRole,
+                    seed: snapshot.joltSeed,
+                    mode: snapshot.mode
+                )
+                let sideSeed = StageSpanResolver.sideSeed(
+                    base: snapshot.joltSeed,
+                    role: viewportRole,
+                    span: spanKind
+                )
+
                 let joltMedia: JoltMedia = {
+                    guard !pianoTunerActive else { return .none }
                     guard flashOpacity > 0.001,
                           [4, 5, 6, 7].contains(snapshot.mode) else { return .none }
-                    if activeJoltPlayer != nil,
+                    // Unified jolts must frame-sync across two viewports; defer to
+                    // webcam to avoid AVPlayer drift between independent windows.
+                    if spanKind != .unified,
+                       activeJoltPlayer != nil,
                        let pool = videoClipPool,
-                       pool.shouldUseVideo(seed: snapshot.joltSeed) {
+                       pool.shouldUseVideo(seed: sideSeed) {
                         return .video
                     }
-                    if let img = webcamPool?.imageForSeed(snapshot.joltSeed) {
+                    if let img = webcamPool?.imageForSeed(sideSeed) {
                         return .webcamImage(img)
                     }
                     return .none
                 }()
 
                 let showNormalFlash: Bool = {
+                    guard !pianoTunerActive else { return false }
                     if case .none = joltMedia { return flashOpacity > 0.001 }
                     return false
                 }()
 
-                ZStack {
-                    // Normal stage + effects
-                    ZStack {
-                        StageBackdropCanvas(snapshot: snapshot, now: now, flashPattern: flashPattern, flashOpacity: flashOpacity)
-                            .ignoresSafeArea()
+                let unifiedOffsetX: CGFloat = {
+                    guard spanKind == .unified else { return 0 }
+                    return viewportRole == .rightHalf ? -proxy.size.width : 0
+                }()
+                let mediaWidth: CGFloat = spanKind == .unified ? proxy.size.width * 2 : proxy.size.width
 
-                        if snapshot.isRunning {
-                            StageTerminalLogLayer(snapshot: snapshot, now: now, canvasSize: proxy.size)
-                            StageWordmarkField(snapshot: snapshot, now: now, canvasSize: proxy.size, flashOpacity: flashOpacity)
-                        } else {
-                            StageStandbyField(snapshot: snapshot)
-                            // Show SoftLink sprites even when session isn't running.
-                            if !snapshot.sprites.isEmpty {
+                ZStack {
+                    if pianoTunerActive {
+                        StagePianoTunerAudioOffField()
+                    } else {
+                        // Normal stage + effects
+                        ZStack {
+                            StageBackdropCanvas(snapshot: snapshot, now: now, flashPattern: flashPattern, flashOpacity: flashOpacity)
+                                .ignoresSafeArea()
+
+                            if snapshot.isRunning {
                                 StageTerminalLogLayer(snapshot: snapshot, now: now, canvasSize: proxy.size)
+                                StageWordmarkField(snapshot: snapshot, now: now, canvasSize: proxy.size, flashOpacity: flashOpacity)
+                            } else {
+                                StageStandbyField(snapshot: snapshot)
+                                // Show SoftLink sprites even when session isn't running.
+                                if !snapshot.sprites.isEmpty {
+                                    StageTerminalLogLayer(snapshot: snapshot, now: now, canvasSize: proxy.size)
+                                }
+                            }
+
+                            if showNormalFlash {
+                                StageFlashOverlay(snapshot: snapshot, pattern: flashPattern, opacity: flashOpacity)
+                                    .allowsHitTesting(false)
+                            }
+
+                            // Prominent SoftLink lower-third overlay
+                            if case .inactive = store.softLinkPhase {} else {
+                                SoftLinkPairingOverlay(phase: store.softLinkPhase, now: now, canvasSize: proxy.size)
                             }
                         }
+                        .modifier(StageJoltDistortion(
+                            joltHeld: snapshot.joltHeld,
+                            flashOpacity: flashOpacity,
+                            joltSeed: snapshot.joltSeed,
+                            now: now
+                        ))
+                        .modifier(StageFilmGrade(
+                            canvasSize: proxy.size,
+                            time: now.timeIntervalSinceReferenceDate,
+                            audio: snapshot.stageAudio
+                        ))
 
-                        if showNormalFlash {
-                            StageFlashOverlay(snapshot: snapshot, pattern: flashPattern, opacity: flashOpacity)
-                                .allowsHitTesting(false)
-                        }
-
-                        // Prominent SoftLink lower-third overlay
-                        if case .inactive = store.softLinkPhase {} else {
-                            SoftLinkPairingOverlay(phase: store.softLinkPhase, now: now, canvasSize: proxy.size)
-                        }
-                    }
-                    .modifier(StageJoltDistortion(
-                        joltHeld: snapshot.joltHeld,
-                        flashOpacity: flashOpacity,
-                        joltSeed: snapshot.joltSeed,
-                        now: now
-                    ))
-                    .modifier(StageFilmGrade(
-                        canvasSize: proxy.size,
-                        time: now.timeIntervalSinceReferenceDate,
-                        audio: snapshot.stageAudio
-                    ))
-
-                    // Jolt media: raw image or video, outside all post-processing
-                    switch joltMedia {
-                    case .webcamImage(let cgImage):
-                        Image(decorative: cgImage, scale: 1.0)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
+                        // Jolt media: raw image or video, outside all post-processing.
+                        // Unified span renders at 2× width and offsets so left/right
+                        // viewports show contiguous halves of the same source image.
+                        switch joltMedia {
+                        case .webcamImage(let cgImage):
+                            ZStack(alignment: .leading) {
+                                Image(decorative: cgImage, scale: 1.0)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                                    .frame(width: mediaWidth, height: proxy.size.height)
+                                    .offset(x: unifiedOffsetX)
+                            }
                             .opacity(flashOpacity)
-                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
                             .clipped()
                             .allowsHitTesting(false)
-                    case .video:
-                        if let player = activeJoltPlayer {
-                            JoltVideoPlayerView(player: player)
-                                .opacity(flashOpacity)
-                                .frame(width: proxy.size.width, height: proxy.size.height)
-                                .clipped()
-                                .allowsHitTesting(false)
+                        case .video:
+                            if let player = activeJoltPlayer {
+                                JoltVideoPlayerView(player: player)
+                                    .opacity(flashOpacity)
+                                    .frame(width: proxy.size.width, height: proxy.size.height)
+                                    .clipped()
+                                    .allowsHitTesting(false)
+                            }
+                        case .none:
+                            EmptyView()
                         }
-                    case .none:
-                        EmptyView()
                     }
                 }
                 .frame(width: proxy.size.width, height: proxy.size.height)
                 .background(StageIndustrialPalette.graphite.color)
+                .scaleEffect(x: horizontalFlip ? -1 : 1, y: 1, anchor: .center)
             }
         }
         .background(StageIndustrialPalette.graphite.color)
         .preferredColorScheme(.dark)
         .onChange(of: store.snapshot.joltHeld) { _, isHeld in
-            if isHeld {
+            if isHeld && !store.pianoTunerActive {
                 flashReleaseAt = nil
                 let mode = store.snapshot.mode
-                let seed = store.snapshot.joltSeed
+                let baseSeed = store.snapshot.joltSeed
+                let span = StageSpanResolver.spanKind(role: viewportRole, seed: baseSeed, mode: mode)
+                let sideSeed = StageSpanResolver.sideSeed(base: baseSeed, role: viewportRole, span: span)
                 let poolExists = videoClipPool != nil
                 let hasClips = videoClipPool?.hasClips ?? false
-                let shouldVideo = videoClipPool?.shouldUseVideo(seed: seed) ?? false
-                print("[JoltDebug] jolt START mode=\(mode) seed=\(seed) poolExists=\(poolExists) hasClips=\(hasClips) shouldVideo=\(shouldVideo)")
-                // Start video if this jolt should use video
-                if [4, 5, 6, 7].contains(mode),
+                let shouldVideo = span != .unified && (videoClipPool?.shouldUseVideo(seed: sideSeed) ?? false)
+                print("[JoltDebug] jolt START mode=\(mode) seed=\(baseSeed) role=\(viewportRole) span=\(span) poolExists=\(poolExists) hasClips=\(hasClips) shouldVideo=\(shouldVideo)")
+                // Unified jolts route to webcam to avoid AVPlayer drift across windows.
+                if shouldVideo,
+                   [4, 5, 6, 7].contains(mode),
                    let pool = videoClipPool,
-                   pool.shouldUseVideo(seed: seed),
-                   let player = pool.playerForSeed(seed) {
+                   let player = pool.playerForSeed(sideSeed) {
                     activeJoltPlayer = player
                     player.play()
                     print("[JoltDebug] video player ACTIVE")
@@ -143,6 +230,15 @@ struct StageOutputView: View {
                     }
                 }
             }
+        }
+        .onChange(of: store.pianoTunerActive) { _, active in
+            guard active else { return }
+            flashReleaseAt = nil
+            if let player = activeJoltPlayer {
+                player.pause()
+            }
+            activeJoltPlayer = nil
+            videoClipPool?.deactivate()
         }
     }
 
@@ -176,6 +272,45 @@ private struct StageStandbyField: View {
                 .font(IBMPlexMonoFont.font(.medium, size: 13))
                 .foregroundStyle(StageIndustrialPalette.dimSignal.color.opacity(0.34))
                 .tracking(2.4)
+        }
+    }
+}
+
+private struct StagePianoTunerAudioOffField: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    StageIndustrialPalette.graphite.color,
+                    StageIndustrialPalette.slate.color,
+                    StageIndustrialPalette.graphite.color
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                Text("Piano Tuner Audio Off")
+                    .font(IBMPlexMonoFont.font(.bold, size: 56))
+                    .foregroundStyle(StageIndustrialPalette.signal.color.opacity(0.94))
+                    .tracking(2.4)
+
+                Text("Release JOLT/object to restore audio")
+                    .font(IBMPlexMonoFont.font(.medium, size: 22))
+                    .foregroundStyle(StageIndustrialPalette.signal.color.opacity(0.94))
+                    .multilineTextAlignment(.center)
+                    .tracking(1.0)
+
+                Text("Unattended reset requires a physical release. Audio stays ducked until JOLT is released.")
+                    .font(IBMPlexMonoFont.font(.regular, size: 15))
+                    .foregroundStyle(StageIndustrialPalette.dimSignal.color.opacity(0.86))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 840)
+                    .padding(.top, 4)
+            }
+            .padding(.horizontal, 36)
+            .padding(.vertical, 24)
         }
     }
 }

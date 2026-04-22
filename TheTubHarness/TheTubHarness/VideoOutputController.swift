@@ -1070,6 +1070,7 @@ enum VideoStageMapper {
 final class VideoStageStore: ObservableObject {
     @Published private(set) var snapshot: VideoStageSnapshot = .standby(for: 0)
     @Published private(set) var softLinkPhase: SoftLinkVisualPhase = .inactive
+    @Published private(set) var pianoTunerActive: Bool = false
 
     private var currentMode: Int = 0
     private var context: ModelMonitorContext?
@@ -1196,6 +1197,11 @@ final class VideoStageStore: ObservableObject {
         }
         print("[SoftLink-VS] ingested \(events.count) events, phase=\(softLinkPhase)")
         rebuildSnapshot()
+    }
+
+    func setPianoTunerActive(_ active: Bool) {
+        guard pianoTunerActive != active else { return }
+        pianoTunerActive = active
     }
 
     private func schedulePhaseClear(after delay: TimeInterval) {
@@ -1488,67 +1494,64 @@ final class VideoStageStore: ObservableObject {
         return sprites
     }
 }
-struct StageDisplayReference: Codable, Equatable {
-    var displayID: UInt32?
-    var localizedName: String
-    var frameSignature: String
-}
-
 struct VideoOutputPreferences: Codable, Equatable {
-    var isPreviewEnabled: Bool
-    var selectedDisplay: StageDisplayReference?
+    var preview1Enabled: Bool
+    var preview2Enabled: Bool
+    var swapLR: Bool
+    var flipPrimary: Bool
+    var flipSecondary: Bool
 
-    static let `default` = VideoOutputPreferences(isPreviewEnabled: false, selectedDisplay: nil)
-}
+    static let `default` = VideoOutputPreferences(
+        preview1Enabled: false,
+        preview2Enabled: false,
+        swapLR: false,
+        flipPrimary: false,
+        flipSecondary: false
+    )
 
-struct StageDisplayInfo: Identifiable, Equatable {
-    let id: String
-    let reference: StageDisplayReference
-    let title: String
-    let isMain: Bool
-    let frame: CGRect
-    let visibleFrame: CGRect
-
-    init(screen: NSScreen) {
-        let reference = StageDisplayReference(
-            displayID: screen.displayID,
-            localizedName: screen.localizedName,
-            frameSignature: screen.frame.stageFrameSignature
-        )
-        self.reference = reference
-        self.id = reference.persistedKey
-        self.title = screen.localizedName + (screen == NSScreen.main ? " • Main" : "")
-        self.isMain = screen == NSScreen.main
-        self.frame = screen.frame
-        self.visibleFrame = screen.visibleFrame
+    private enum CodingKeys: String, CodingKey {
+        case preview1Enabled
+        case preview2Enabled
+        case swapLR
+        case flipPrimary
+        case flipSecondary
+        // Legacy single-toggle schema.
+        case isPreviewEnabled
     }
 
-    func matches(_ target: StageDisplayReference) -> Bool {
-        if let lhs = reference.displayID, let rhs = target.displayID, lhs == rhs {
-            return true
-        }
-        return reference.localizedName == target.localizedName && reference.frameSignature == target.frameSignature
+    init(
+        preview1Enabled: Bool,
+        preview2Enabled: Bool,
+        swapLR: Bool,
+        flipPrimary: Bool,
+        flipSecondary: Bool
+    ) {
+        self.preview1Enabled = preview1Enabled
+        self.preview2Enabled = preview2Enabled
+        self.swapLR = swapLR
+        self.flipPrimary = flipPrimary
+        self.flipSecondary = flipSecondary
     }
-}
 
-extension StageDisplayReference {
-    var persistedKey: String {
-        if let displayID {
-            return "display_\(displayID)"
-        }
-        return "display_\(localizedName)_\(frameSignature)"
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let legacyPreview = try container.decodeIfPresent(Bool.self, forKey: .isPreviewEnabled) ?? false
+        self.preview1Enabled = try container.decodeIfPresent(Bool.self, forKey: .preview1Enabled) ?? legacyPreview
+        self.preview2Enabled = try container.decodeIfPresent(Bool.self, forKey: .preview2Enabled) ?? legacyPreview
+        self.swapLR = try container.decodeIfPresent(Bool.self, forKey: .swapLR) ?? false
+        self.flipPrimary = try container.decodeIfPresent(Bool.self, forKey: .flipPrimary) ?? false
+        self.flipSecondary = try container.decodeIfPresent(Bool.self, forKey: .flipSecondary) ?? false
     }
-}
 
-private extension CGRect {
-    var stageFrameSignature: String {
-        "\(Int(origin.x))x\(Int(origin.y))_\(Int(width))x\(Int(height))"
-    }
-}
-
-private extension NSScreen {
-    var displayID: UInt32? {
-        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber).map { $0.uint32Value }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(preview1Enabled, forKey: .preview1Enabled)
+        try container.encode(preview2Enabled, forKey: .preview2Enabled)
+        try container.encode(swapLR, forKey: .swapLR)
+        try container.encode(flipPrimary, forKey: .flipPrimary)
+        try container.encode(flipSecondary, forKey: .flipSecondary)
+        // Keep legacy key to make downgrade behavior predictable.
+        try container.encode(preview1Enabled || preview2Enabled, forKey: .isPreviewEnabled)
     }
 }
 
@@ -1586,13 +1589,23 @@ enum VideoOutputStatus: Equatable {
 
 @MainActor
 final class VideoOutputController: ObservableObject {
-    @Published private(set) var displays: [StageDisplayInfo] = []
-    @Published private(set) var isPreviewEnabled: Bool = false
+    @Published private(set) var isPreview1Enabled: Bool = false
+    @Published private(set) var isPreview2Enabled: Bool = false
     @Published private(set) var isPresenting: Bool = false
     @Published private(set) var status: VideoOutputStatus = .hidden
     @Published private(set) var warningText: String?
-    @Published private(set) var selectedDisplayTitle: String = "Main Display"
-    @Published private(set) var selectedDisplayID: String?
+    @Published private(set) var swapLR: Bool = false
+    @Published private(set) var flipPrimary: Bool = false
+    @Published private(set) var flipSecondary: Bool = false
+
+    var isPreviewEnabled: Bool {
+        isPreview1Enabled || isPreview2Enabled
+    }
+
+    /// Legacy compatibility; output mapping is always dual-capable now.
+    var isDualConfigured: Bool {
+        true
+    }
 
     private let appName = "TheTubHarness"
     private let persistenceFilename = "video_output.json"
@@ -1600,15 +1613,19 @@ final class VideoOutputController: ObservableObject {
     private weak var store: VideoStageStore?
     private var webcamPool: USGSWebcamPool?
     private var videoClipPool: JoltVideoClipPool?
-    private var previewWindow: StagePreviewWindow?
-    private var presentationWindow: StagePresentationWindow?
+    private var previewWindow1: StagePreviewWindow?
+    private var previewWindow2: StagePreviewWindow?
     private var screenObserver: NSObjectProtocol?
 
     init() {
         loadPreferences()
         installScreenObserver()
-        refreshDisplays()
-        isPreviewEnabled = preferences.isPreviewEnabled
+        isPreview1Enabled = preferences.preview1Enabled
+        isPreview2Enabled = preferences.preview2Enabled
+        swapLR = preferences.swapLR
+        flipPrimary = preferences.flipPrimary
+        flipSecondary = preferences.flipSecondary
+        updatePresentationStatus()
     }
 
     deinit {
@@ -1619,10 +1636,13 @@ final class VideoOutputController: ObservableObject {
 
     func bind(store: VideoStageStore) {
         self.store = store
-        refreshDisplays()
-        if preferences.isPreviewEnabled {
-            presentPreviewWindow(reveal: false)
+        if preferences.preview1Enabled {
+            presentPreviewWindow(slot: .output1, reveal: false)
         }
+        if preferences.preview2Enabled {
+            presentPreviewWindow(slot: .output2, reveal: false)
+        }
+        updatePresentationStatus()
     }
 
     func bind(webcamPool: USGSWebcamPool) {
@@ -1634,53 +1654,92 @@ final class VideoOutputController: ObservableObject {
     }
 
     func setPreviewEnabled(_ enabled: Bool) {
-        preferences.isPreviewEnabled = enabled
-        isPreviewEnabled = enabled
-        persistPreferences()
-        if enabled {
-            presentPreviewWindow(reveal: true)
-        } else {
-            closePreviewWindow()
-        }
-        updatePresentationStatus()
+        setPreview1Enabled(enabled, reveal: true)
+        setPreview2Enabled(enabled, reveal: true)
     }
 
     func revealPreviewWindow() {
-        if !preferences.isPreviewEnabled {
-            setPreviewEnabled(true)
+        revealPreview1Window()
+    }
+
+    func setPreview1Enabled(_ enabled: Bool) {
+        setPreview1Enabled(enabled, reveal: true)
+    }
+
+    func setPreview2Enabled(_ enabled: Bool) {
+        setPreview2Enabled(enabled, reveal: true)
+    }
+
+    func revealPreview1Window() {
+        if !preferences.preview1Enabled {
+            setPreview1Enabled(true, reveal: true)
             return
         }
-        presentPreviewWindow(reveal: true)
+        presentPreviewWindow(slot: .output1, reveal: true)
+    }
+
+    func revealPreview2Window() {
+        if !preferences.preview2Enabled {
+            setPreview2Enabled(true, reveal: true)
+            return
+        }
+        presentPreviewWindow(slot: .output2, reveal: true)
     }
 
     func setPresentationEnabled(_ enabled: Bool) {
-        isPresenting = enabled
+        // Legacy hook: "presentation" now means the two output windows.
         if enabled {
-            presentPresentationWindow(reveal: true)
-        } else {
-            closePresentationWindow()
+            revealPreview1Window()
+            revealPreview2Window()
+        }
+        isPresenting = false
+        updatePresentationStatus()
+    }
+
+    // Legacy no-op selectors retained for API compatibility.
+    func selectDisplay(_ displayID: String) {
+        _ = displayID
+    }
+
+    func selectPrimaryDisplay(_ displayID: String) {
+        _ = displayID
+    }
+
+    func selectSecondaryDisplay(_ displayID: String?) {
+        _ = displayID
+    }
+
+    func toggleSwapLR() {
+        preferences.swapLR.toggle()
+        swapLR = preferences.swapLR
+        persistPreferences()
+        refreshOpenPreviewWindows(reveal: false)
+        updatePresentationStatus()
+    }
+
+    func setFlipPrimary(_ flipped: Bool) {
+        preferences.flipPrimary = flipped
+        flipPrimary = flipped
+        persistPreferences()
+        if isPreview1Enabled {
+            presentPreviewWindow(slot: .output1, reveal: false)
         }
         updatePresentationStatus()
     }
 
-    func selectDisplay(_ displayID: String) {
-        guard let match = displays.first(where: { $0.id == displayID }) else { return }
-        preferences.selectedDisplay = match.reference
+    func setFlipSecondary(_ flipped: Bool) {
+        preferences.flipSecondary = flipped
+        flipSecondary = flipped
         persistPreferences()
-        refreshDisplays()
-        if preferences.isPreviewEnabled {
-            presentPreviewWindow(reveal: true)
+        if isPreview2Enabled {
+            presentPreviewWindow(slot: .output2, reveal: false)
         }
-        if isPresenting {
-            presentPresentationWindow(reveal: true)
-        }
+        updatePresentationStatus()
     }
 
     func refreshDisplays() {
-        displays = NSScreen.screens.map(StageDisplayInfo.init)
-        let resolved = resolvedPreferredDisplay()
-        selectedDisplayTitle = resolved?.title ?? displays.first?.title ?? "Main Display"
-        selectedDisplayID = resolved?.id
+        // Kept for compatibility with existing call sites.
+        refreshOpenPreviewWindows(reveal: false)
         updatePresentationStatus()
     }
 
@@ -1693,184 +1752,188 @@ final class VideoOutputController: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.refreshDisplays()
-                if self.preferences.isPreviewEnabled {
-                    self.presentPreviewWindow(reveal: false)
-                }
-                if self.isPresenting {
-                    self.presentPresentationWindow(reveal: false)
-                }
             }
         }
     }
 
-    private func resolvedPreferredDisplay() -> StageDisplayInfo? {
-        if let target = preferences.selectedDisplay {
-            return displays.first(where: { $0.matches(target) })
+    private func setPreview1Enabled(_ enabled: Bool, reveal: Bool) {
+        preferences.preview1Enabled = enabled
+        isPreview1Enabled = enabled
+        persistPreferences()
+        if enabled {
+            presentPreviewWindow(slot: .output1, reveal: reveal)
+        } else {
+            closePreviewWindow(slot: .output1)
         }
-        return displays.first(where: { $0.isMain }) ?? displays.first
+        updatePresentationStatus()
     }
 
-    private func fallbackDisplay() -> StageDisplayInfo? {
-        displays.first(where: { $0.isMain }) ?? displays.first
+    private func setPreview2Enabled(_ enabled: Bool, reveal: Bool) {
+        preferences.preview2Enabled = enabled
+        isPreview2Enabled = enabled
+        persistPreferences()
+        if enabled {
+            presentPreviewWindow(slot: .output2, reveal: reveal)
+        } else {
+            closePreviewWindow(slot: .output2)
+        }
+        updatePresentationStatus()
     }
 
-    private func presentPreviewWindow(reveal: Bool) {
+    private enum OutputSlot: CaseIterable {
+        case output1
+        case output2
+
+        var title: String {
+            switch self {
+            case .output1: return "The Tub Output 1"
+            case .output2: return "The Tub Output 2"
+            }
+        }
+    }
+
+    private func viewportRole(for slot: OutputSlot) -> StageViewportRole {
+        switch (slot, preferences.swapLR) {
+        case (.output1, false): return .leftHalf
+        case (.output1, true):  return .rightHalf
+        case (.output2, false): return .rightHalf
+        case (.output2, true):  return .leftHalf
+        }
+    }
+
+    private func horizontalFlip(for slot: OutputSlot) -> Bool {
+        switch slot {
+        case .output1: return preferences.flipPrimary
+        case .output2: return preferences.flipSecondary
+        }
+    }
+
+    private func window(for slot: OutputSlot) -> StagePreviewWindow? {
+        switch slot {
+        case .output1: return previewWindow1
+        case .output2: return previewWindow2
+        }
+    }
+
+    private func setWindow(_ window: StagePreviewWindow?, for slot: OutputSlot) {
+        switch slot {
+        case .output1: previewWindow1 = window
+        case .output2: previewWindow2 = window
+        }
+    }
+
+    private func isSlotEnabled(_ slot: OutputSlot) -> Bool {
+        switch slot {
+        case .output1: return preferences.preview1Enabled
+        case .output2: return preferences.preview2Enabled
+        }
+    }
+
+    private func setSlotEnabled(_ slot: OutputSlot, enabled: Bool) {
+        switch slot {
+        case .output1:
+            preferences.preview1Enabled = enabled
+            isPreview1Enabled = enabled
+        case .output2:
+            preferences.preview2Enabled = enabled
+            isPreview2Enabled = enabled
+        }
+    }
+
+    private func presentPreviewWindow(slot: OutputSlot, reveal: Bool) {
         guard let store else { return }
-        guard let resolved = resolveDisplayTarget() else {
-            status = .missingDisplay(preferences.selectedDisplay?.localizedName ?? "No display")
-            warningText = "No usable display is available for the preview window."
-            return
-        }
 
-        let window = previewWindow ?? StagePreviewWindow()
-        if previewWindow == nil {
-            window.title = "The Tub Stage Preview"
-            window.contentView = NSHostingView(rootView: StageOutputView(store: store, webcamPool: webcamPool, videoClipPool: videoClipPool))
+        let rootView = StageOutputView(
+            store: store,
+            webcamPool: webcamPool,
+            videoClipPool: videoClipPool,
+            viewportRole: viewportRole(for: slot),
+            horizontalFlip: horizontalFlip(for: slot)
+        )
+
+        let existingWindow = window(for: slot)
+        let window = existingWindow ?? StagePreviewWindow()
+        if existingWindow == nil {
+            window.title = slot.title
             window.onClosed = { [weak self] in
                 guard let self else { return }
-                self.preferences.isPreviewEnabled = false
-                self.isPreviewEnabled = false
-                self.previewWindow = nil
+                self.setSlotEnabled(slot, enabled: false)
+                self.setWindow(nil, for: slot)
                 self.persistPreferences()
                 self.updatePresentationStatus()
             }
-            previewWindow = window
+            window.setFrame(defaultOutputFrame(for: slot), display: true)
+            setWindow(window, for: slot)
         }
+        window.contentView = NSHostingView(rootView: rootView)
 
-        window.setFrame(centeredPreviewFrame(in: resolved.screen.visibleFrame), display: true)
         if reveal {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
         } else {
             window.orderFrontRegardless()
         }
-
-        switch resolved.kind {
-        case .preferred:
-            warningText = nil
-        case .fallback:
-            warningText = "Saved stage display is unavailable. Preview is showing on \(resolved.screen.title)."
-        }
-    }
-
-    private func presentPresentationWindow(reveal: Bool) {
-        guard let store else { return }
-        guard let resolved = resolveDisplayTarget() else {
-            status = .missingDisplay(preferences.selectedDisplay?.localizedName ?? "No display")
-            warningText = "No usable display is available for stage presentation."
-            isPresenting = false
-            return
-        }
-
-        let window = presentationWindow ?? StagePresentationWindow()
-        if presentationWindow == nil {
-            window.contentView = NSHostingView(rootView: StageOutputView(store: store, webcamPool: webcamPool, videoClipPool: videoClipPool))
-            presentationWindow = window
-        }
-
-        window.setFrame(resolved.screen.frame, display: true)
-        window.setFrameOrigin(resolved.screen.frame.origin)
-        window.orderFrontRegardless()
-        if reveal {
-            NSApp.activate(ignoringOtherApps: true)
-        }
-
-        switch resolved.kind {
-        case .preferred:
-            if !preferences.isPreviewEnabled {
-                warningText = nil
-            }
-        case .fallback:
-            warningText = "Saved stage display is unavailable. Presentation is showing on \(resolved.screen.title)."
-        }
     }
 
     private func updatePresentationStatus() {
-        if isPresenting {
-            if let resolved = resolveDisplayTarget() {
-                switch resolved.kind {
-                case .preferred:
-                    status = .presenting(resolved.screen.title)
-                    if !preferences.isPreviewEnabled {
-                        warningText = nil
-                    }
-                case .fallback:
-                    status = .fallback(resolved.screen.title)
-                    warningText = "Saved stage display is unavailable. Presentation is showing on \(resolved.screen.title)."
-                }
-            } else {
-                status = .missingDisplay(preferences.selectedDisplay?.localizedName ?? "No display")
-                warningText = "No usable display is available for stage presentation."
-            }
-            return
+        var activeOutputs: [String] = []
+        if isPreview1Enabled {
+            activeOutputs.append("Output 1")
+        }
+        if isPreview2Enabled {
+            activeOutputs.append("Output 2")
         }
 
-        if preferences.isPreviewEnabled {
-            if let resolved = resolveDisplayTarget() {
-                switch resolved.kind {
-                case .preferred:
-                    status = .previewing(resolved.screen.title)
-                    warningText = nil
-                case .fallback:
-                    status = .fallback(resolved.screen.title)
-                    warningText = "Saved stage display is unavailable. Preview is showing on \(resolved.screen.title)."
-                }
-            } else {
-                status = .missingDisplay(preferences.selectedDisplay?.localizedName ?? "No display")
-                warningText = "No usable display is available for the preview window."
-            }
-            return
-        }
-
-        warningText = nil
-        status = .hidden
-    }
-
-    private func closePreviewWindow() {
-        previewWindow?.orderOut(nil)
-        previewWindow?.close()
-        previewWindow = nil
-        if !isPresenting {
+        if activeOutputs.isEmpty {
+            status = .hidden
             warningText = nil
+            return
+        }
+
+        status = .previewing(activeOutputs.joined(separator: " + "))
+        warningText = nil
+    }
+
+    private func refreshOpenPreviewWindows(reveal: Bool) {
+        for slot in OutputSlot.allCases where isSlotEnabled(slot) {
+            presentPreviewWindow(slot: slot, reveal: reveal)
         }
     }
 
-    private func closePresentationWindow() {
-        presentationWindow?.orderOut(nil)
-        presentationWindow?.close()
-        presentationWindow = nil
+    private func closePreviewWindow(slot: OutputSlot) {
+        let existing = window(for: slot)
+        existing?.orderOut(nil)
+        existing?.close()
+        setWindow(nil, for: slot)
     }
 
-    private enum ResolvedDisplayKind {
-        case preferred
-        case fallback
-    }
+    private func defaultOutputFrame(for slot: OutputSlot) -> CGRect {
+        let visibleFrame = NSScreen.main?.visibleFrame ?? CGRect(x: 120, y: 120, width: 1728, height: 972)
+        let horizontalInset: CGFloat = 28
+        let gutter: CGFloat = 20
+        let width = min(max(visibleFrame.width * 0.44, 880), 1420)
+        let height = min(max(visibleFrame.height * 0.62, 540), 920)
+        let baseY = visibleFrame.midY - (height / 2)
 
-    private struct ResolvedDisplayTarget {
-        let screen: StageDisplayInfo
-        let kind: ResolvedDisplayKind
-    }
-
-    private func resolveDisplayTarget() -> ResolvedDisplayTarget? {
-        if let target = preferences.selectedDisplay,
-           let preferred = displays.first(where: { $0.matches(target) }) {
-            return ResolvedDisplayTarget(screen: preferred, kind: .preferred)
+        let fitsSideBySide = (2 * width) + (2 * horizontalInset) + gutter <= visibleFrame.width
+        switch slot {
+        case .output1:
+            return CGRect(
+                x: visibleFrame.minX + horizontalInset,
+                y: baseY,
+                width: width,
+                height: height
+            )
+        case .output2:
+            return CGRect(
+                x: fitsSideBySide
+                    ? (visibleFrame.maxX - width - horizontalInset)
+                    : (visibleFrame.minX + horizontalInset + 48),
+                y: fitsSideBySide ? baseY : (baseY - 48),
+                width: width,
+                height: height
+            )
         }
-        if preferences.selectedDisplay != nil, let fallback = fallbackDisplay() {
-            return ResolvedDisplayTarget(screen: fallback, kind: .fallback)
-        }
-        if let preferred = resolvedPreferredDisplay() {
-            return ResolvedDisplayTarget(screen: preferred, kind: .preferred)
-        }
-        return nil
-    }
-
-    private func centeredPreviewFrame(in visibleFrame: CGRect) -> CGRect {
-        let width = min(max(visibleFrame.width * 0.72, 960), 1680)
-        let height = min(max(visibleFrame.height * 0.68, 620), 980)
-        let x = visibleFrame.midX - (width / 2)
-        let y = visibleFrame.midY - (height / 2)
-        return CGRect(x: x, y: y, width: width, height: height)
     }
 
     private func loadPreferences() {
@@ -1914,37 +1977,18 @@ private final class StagePreviewWindow: NSWindow {
         isOpaque = true
         backgroundColor = .black
         titleVisibility = .visible
-        titlebarAppearsTransparent = true
+        titlebarAppearsTransparent = false
         hasShadow = true
         isReleasedWhenClosed = false
         level = .normal
-        collectionBehavior = [.fullScreenAuxiliary]
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        minSize = NSSize(width: 720, height: 405)
     }
 
     override func close() {
         super.close()
         onClosed?()
     }
-}
-
-private final class StagePresentationWindow: NSWindow {
-    init() {
-        super.init(
-            contentRect: .zero,
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        isOpaque = true
-        backgroundColor = .black
-        hasShadow = false
-        level = .normal
-        ignoresMouseEvents = true
-        collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-    }
-
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
 }
 
 struct StagePRNG {

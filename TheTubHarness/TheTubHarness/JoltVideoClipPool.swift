@@ -27,10 +27,53 @@ final class JoltVideoClipPool {
     private var loadTask: Task<Void, Never>?
 
     private nonisolated static let supportedExtensions: Set<String> = ["mp4", "mov", "m4v"]
+    private nonisolated static let bundledClipSubdirectories: [String] = [
+        "Assets/JoltClips",
+        "JoltClips",
+        "Assets/Video/JoltClips",
+        "Assets/Videos/JoltClips",
+        "Video/JoltClips",
+        "Videos/JoltClips",
+    ]
 
     // MARK: - Public
 
     var hasClips: Bool { !clips.isEmpty }
+
+    /// Resolve the startup directory for jolt clips.
+    ///
+    /// Order:
+    /// 1. `TUB_JOLT_CLIP_DIR` override (if set)
+    /// 2. Bundled clip directories
+    /// 3. Bundle resource root (flattened-bundle fallback)
+    nonisolated static func resolveStartupClipDirectory(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> (url: URL?, source: String) {
+        if let override = environment["TUB_JOLT_CLIP_DIR"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            let url = URL(fileURLWithPath: override, isDirectory: true)
+            return (url, "env:TUB_JOLT_CLIP_DIR")
+        }
+
+        let fileManager = FileManager.default
+        var seen: Set<String> = []
+        let bundles: [Bundle] = [Bundle.main, Bundle(for: JoltVideoClipPool.self)]
+        for bundle in bundles {
+            guard let resourceRoot = bundle.resourceURL else { continue }
+            let candidates = bundledClipSubdirectories.map { resourceRoot.appendingPathComponent($0, isDirectory: true) } + [resourceRoot]
+            for candidate in candidates {
+                let key = candidate.standardizedFileURL.path
+                if seen.contains(key) { continue }
+                seen.insert(key)
+                if containsSupportedClip(in: candidate, fileManager: fileManager) {
+                    return (candidate, "bundle:\(candidate.lastPathComponent)")
+                }
+            }
+        }
+
+        return (nil, "none")
+    }
 
     /// Scan directory for supported video files and load their durations.
     func load(from directoryURL: URL) async {
@@ -92,28 +135,32 @@ final class JoltVideoClipPool {
 
     private nonisolated static func scanClips(directoryURL: URL) async -> ClipScanResult {
         let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: directoryURL.path) else {
+        var isDir = ObjCBool(false)
+        guard fileManager.fileExists(atPath: directoryURL.path, isDirectory: &isDir), isDir.boolValue else {
             return ClipScanResult(
                 entries: [],
                 logs: ["Directory not found: \(directoryURL.path)"]
             )
         }
 
-        let contents: [URL]
-        do {
-            contents = try fileManager.contentsOfDirectory(
-                at: directoryURL,
-                includingPropertiesForKeys: nil
-            )
-        } catch {
+        guard let enumerator = fileManager.enumerator(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
             return ClipScanResult(
                 entries: [],
-                logs: ["Failed to scan directory: \(error.localizedDescription)"]
+                logs: ["Failed to scan directory: \(directoryURL.path)"]
             )
         }
 
-        let videoURLs = contents.filter {
-            Self.supportedExtensions.contains($0.pathExtension.lowercased())
+        let videoURLs: [URL] = enumerator.compactMap { item in
+            guard let url = item as? URL else { return nil }
+            guard Self.supportedExtensions.contains(url.pathExtension.lowercased()) else { return nil }
+            return url
+        }
+        .sorted { lhs, rhs in
+            lhs.lastPathComponent.localizedCaseInsensitiveCompare(rhs.lastPathComponent) == .orderedAscending
         }
 
         var loaded: [ClipScanEntry] = []
@@ -134,6 +181,26 @@ final class JoltVideoClipPool {
         }
 
         return ClipScanResult(entries: loaded, logs: logs)
+    }
+
+    private nonisolated static func containsSupportedClip(in directoryURL: URL, fileManager: FileManager) -> Bool {
+        var isDir = ObjCBool(false)
+        guard fileManager.fileExists(atPath: directoryURL.path, isDirectory: &isDir), isDir.boolValue else {
+            return false
+        }
+        guard let enumerator = fileManager.enumerator(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return false
+        }
+        for case let url as URL in enumerator {
+            if supportedExtensions.contains(url.pathExtension.lowercased()) {
+                return true
+            }
+        }
+        return false
     }
 
     // MARK: - Logging

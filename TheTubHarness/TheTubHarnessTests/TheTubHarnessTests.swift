@@ -159,6 +159,35 @@ struct TheTubHarnessTests {
         #expect(value == "[REDACTED]")
     }
 
+    @Test("AudienceSessionServer handshake payload advertises transport capabilities")
+    func audienceHandshakePayloadAdvertisesTransports() throws {
+        let server = AudienceSessionServer()
+        let now = Date(timeIntervalSince1970: 1_000_000)
+
+        let baselineData = server.handshakePayloadDataForTesting(now: now)
+        let baselineJSON = try JSONSerialization.jsonObject(with: baselineData) as? [String: Any]
+        let baselineTransports = baselineJSON?["transports"] as? [String] ?? []
+        #expect(baselineTransports.contains("direct_tcp"))
+        #expect((baselineJSON?["relayJoinCode"] as? String) == nil)
+
+        let relayExpiry = now.addingTimeInterval(300)
+        server.setRelayAnnouncementForTesting(
+            wsURL: "wss://relay.example.com/v1/link/ws",
+            joinCode: "ABC123",
+            expiresAt: relayExpiry
+        )
+
+        let relayData = server.handshakePayloadDataForTesting(now: now)
+        let relayJSON = try JSONSerialization.jsonObject(with: relayData) as? [String: Any]
+        let relayTransports = relayJSON?["transports"] as? [String] ?? []
+
+        #expect(relayTransports.contains("direct_tcp"))
+        #expect(relayTransports.contains("relay_ws"))
+        #expect((relayJSON?["relayJoinCode"] as? String) == "ABC123")
+        #expect((relayJSON?["relayWsURL"] as? String) == "wss://relay.example.com/v1/link/ws")
+        #expect((relayJSON?["relaySessionExpiresAt"] as? String) != nil)
+    }
+
     @Test("AudienceSessionServer NDJSON parser handles fragmented and multi-message chunks")
     func audienceEnvelopeFramingHandlesFragmentedChunks() throws {
         let server = AudienceSessionServer()
@@ -1267,6 +1296,22 @@ struct TheTubHarnessTests {
         #expect(densityChange?.resolvedToken == "0.66")
         #expect(sampleChange?.resolvedToken == "s004")
         #expect(snapshot.changes.count >= 2)
+    }
+
+    @Test("Video stage store piano tuner takeover flag toggles on and off")
+    func videoStageStorePianoTunerFlagLifecycle() {
+        let store = VideoStageStore()
+        #expect(store.pianoTunerActive == false)
+
+        store.setPianoTunerActive(true)
+        #expect(store.pianoTunerActive == true)
+
+        // Idempotent set should stay stable.
+        store.setPianoTunerActive(true)
+        #expect(store.pianoTunerActive == true)
+
+        store.setPianoTunerActive(false)
+        #expect(store.pianoTunerActive == false)
     }
 
     @Test("Manifest defaults resolve cleanly for modes 4 and 9")

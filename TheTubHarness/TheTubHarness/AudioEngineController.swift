@@ -344,6 +344,12 @@ struct OutputRenderDiagnostics: Equatable {
     var postRoutePeak: Float = 0
 }
 
+struct SirenTrackClip: Equatable {
+    let id: String
+    let sampleRate: Float
+    let samples: [Float]
+}
+
 private struct OutputRenderDiagnosticsSnapshot {
     var callbackCounter: UInt64 = 0
     var frameCount: Int = 0
@@ -620,6 +626,9 @@ nonisolated private let coreAudioLiveOutputRenderCallback: AURenderCallback = { 
 }
 
 final class AudioEngineController: ObservableObject {
+    private static let preferredHardwareSampleRate: Double = 44_100
+    private static let callbackActivityHoldNs: UInt64 = 1_000_000_000
+
     private let engine = AVAudioEngine()
     private let outputMixer = AVAudioMixerNode()
     private let liveOutputDriver = CoreAudioLiveOutputDriver()
@@ -671,9 +680,14 @@ final class AudioEngineController: ObservableObject {
     @Published private(set) var outputRenderDiagnostics: OutputRenderDiagnostics = OutputRenderDiagnostics()
     @Published private(set) var inputRouteWarning: String?
     @Published private(set) var inputRouteProfile: InputRoutingProfile = InputRoutingProfile.defaultProfile(for: "default", inputChannels: 1)
+    @Published private(set) var sirenStatus: SirenSongStatus = .bypass
+    @Published private(set) var sirenPlaylistReady: Bool = false
+    @Published private(set) var sirenTrackCount: Int = 0
+    @Published private(set) var externalLiveInputGainTarget: Double = 1.0
 
     private var outputMeterPollTimer: DispatchSourceTimer?
     private var outputRefreshGeneration: UInt64 = 0
+    private static let performanceFrontPairTrimDb: Double = -5.0
 
     var onInputRecordingAlignment: ((InputAudioAlignment) -> Void)?
     var onLiveInputBufferCaptured: ((AVAudioPCMBuffer, AVAudioTime?) -> Void)?
@@ -726,7 +740,16 @@ final class AudioEngineController: ObservableObject {
         let activeUID = !targetUID.isEmpty ? targetUID : (CoreAudioOutputCatalog.defaultOutputUID() ?? "")
         let activeName = CoreAudioOutputCatalog.deviceName(forUID: activeUID) ?? CoreAudioOutputCatalog.defaultOutputName() ?? "System Default"
         let catalogChannels = max(1, CoreAudioOutputCatalog.outputChannels(forUID: activeUID) ?? CoreAudioOutputCatalog.defaultOutputChannelCount())
-        let sampleRate = CoreAudioOutputCatalog.nominalSampleRate(forUID: activeUID) ?? 48_000.0
+        let sampleRateEnforcement = CoreAudioOutputCatalog.enforceNominalSampleRate(
+            forUID: activeUID,
+            preferred: Self.preferredHardwareSampleRate
+        )
+        let sampleRate = max(
+            8_000,
+            CoreAudioOutputCatalog.nominalSampleRate(forUID: activeUID)
+                ?? sampleRateEnforcement.actual
+                ?? Self.preferredHardwareSampleRate
+        )
         let outputChannels = max(1, catalogChannels)
 
         var profile = profileForOutputUID(activeUID, hardwareChannels: outputChannels)
@@ -737,6 +760,7 @@ final class AudioEngineController: ObservableObject {
             hardwareChannels: outputChannels,
             bindSucceeded: bindSucceeded
         )
+        let effectiveWarning = mergedOutputRouteWarning(routeWarning: routeDecision.warning, sampleRate: sampleRate)
 
         renderState.configure(sampleRate: Float(sampleRate), outputChannels: outputChannels)
         renderState.setOutputRouting(
@@ -745,7 +769,7 @@ final class AudioEngineController: ObservableObject {
             activeMode: routeDecision.mode,
             outputUID: activeUID,
             outputName: activeName,
-            warning: routeDecision.warning
+            warning: effectiveWarning
         )
         let routeInfo = OutputRouteInfo(
             outputUID: activeUID,
@@ -753,7 +777,7 @@ final class AudioEngineController: ObservableObject {
             hardwareChannels: outputChannels,
             activeMode: routeDecision.mode,
             routeLocked: routeDecision.locked,
-            warning: routeDecision.warning,
+            warning: effectiveWarning,
             mappingSummary: profile.mappingSummary()
         )
         activeOutputRoute = routeInfo
@@ -776,6 +800,7 @@ final class AudioEngineController: ObservableObject {
             } catch {
                 liveOutputDriver.stop()
                 let fallbackStarted = startEngineOutputGraph(
+                    outputUID: activeUID,
                     sampleRate: sampleRate,
                     outputChannels: outputChannels,
                     useEngineLiveInputTap: useEngineLiveInputTap
@@ -787,6 +812,7 @@ final class AudioEngineController: ObservableObject {
             }
         } else {
             _ = startEngineOutputGraph(
+                outputUID: activeUID,
                 sampleRate: sampleRate,
                 outputChannels: outputChannels,
                 useEngineLiveInputTap: useEngineLiveInputTap
@@ -801,7 +827,7 @@ final class AudioEngineController: ObservableObject {
             self.activeOutputChannels = outputChannels
             self.outputRouteMode = routeDecision.mode
             self.outputRouteLocked = routeDecision.locked
-            self.outputRouteWarning = routeDecision.warning
+            self.outputRouteWarning = effectiveWarning
             self.outputProfile = profile
             self.outputDevices = CoreAudioOutputCatalog.listOutputDevices()
         }
@@ -809,6 +835,7 @@ final class AudioEngineController: ObservableObject {
 
     @discardableResult
     private func startEngineOutputGraph(
+        outputUID: String,
         sampleRate: Double,
         outputChannels: Int,
         useEngineLiveInputTap: Bool
@@ -819,6 +846,14 @@ final class AudioEngineController: ObservableObject {
             engine.disconnectNodeOutput(sourceNode)
             engine.detach(sourceNode)
             self.sourceNode = nil
+        }
+
+        if !outputUID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            do {
+                try CoreAudioOutputCatalog.setCurrentOutputDevice(on: engine.outputNode, uid: outputUID)
+            } catch {
+                audioError = "output select failed: \(error.localizedDescription)"
+            }
         }
 
         guard let renderFormat = AVAudioFormat(
@@ -996,6 +1031,32 @@ final class AudioEngineController: ObservableObject {
         applyOutputRoutingProfileToRender()
     }
 
+    /// Enforce a deterministic 6-channel house output profile for performance starts.
+    /// This avoids stale persisted trims/mutes from previous machines or sessions.
+    func applyDeterministicPerformanceOutputProfile() {
+        let uid = preferredOutputUID ?? selectedOutputUID
+        guard !uid.isEmpty else { return }
+        let hw = max(1, activeOutputChannels)
+
+        var profile = OutputRoutingProfile.defaultProfile(for: uid, hardwareChannels: hw)
+        profile.preferredMode = .gallery6Locked
+        profile.masterGainDb = min(OutputRoutingProfile.maxMasterGainDb, 3.0)
+        for idx in profile.channels.indices {
+            profile.channels[idx].hardwareOutput = idx + 1
+            profile.channels[idx].gainDb = (idx < 2) ? Self.performanceFrontPairTrimDb : 0
+            profile.channels[idx].delayMs = 0
+            profile.channels[idx].polarityInverted = false
+            profile.channels[idx].muted = false
+            profile.channels[idx].solo = false
+        }
+        profile.sanitize(for: hw)
+
+        outputProfilesByUID[uid] = profile
+        outputProfile = profile
+        persistOutputRoutingStore()
+        applyOutputRoutingProfileToRender()
+    }
+
     func updateOutputProfile(_ mutate: (inout OutputRoutingProfile) -> Void) {
         let uid = preferredOutputUID ?? selectedOutputUID
         guard !uid.isEmpty else { return }
@@ -1030,6 +1091,94 @@ final class AudioEngineController: ObservableObject {
 
     func currentOutputRouteInfo() -> OutputRouteInfo {
         activeOutputRoute
+    }
+
+    private static let sirenAllowedExtensions: Set<String> = ["wav", "aif", "aiff", "caf", "m4a", "mp3"]
+
+    // Known siren-song filenames. Bundled at TheTubHarness/Assets/SirenSong/ in source; Xcode's
+    // synchronized folder refs flatten everything into Contents/Resources root, so we also
+    // match these names directly at the bundle root.
+    private static let sirenKnownStems: Set<String> = [
+        "acharia", "trillion", "wet air pad", "xemf", "xither"
+    ]
+
+    fileprivate static func bundleSirenSongURLs() -> [URL] {
+        guard let resourceRoot = Bundle.main.resourceURL else { return [] }
+        let sirenRoot = resourceRoot.appendingPathComponent("Assets/SirenSong", isDirectory: true)
+        var urls: [URL] = []
+
+        if let direct = try? FileManager.default.contentsOfDirectory(
+            at: sirenRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for url in direct {
+                let ext = url.pathExtension.lowercased()
+                if sirenAllowedExtensions.contains(ext) {
+                    urls.append(url)
+                }
+            }
+        }
+
+        if !urls.isEmpty {
+            return urls.sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+        }
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: resourceRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        for case let url as URL in enumerator {
+            let ext = url.pathExtension.lowercased()
+            guard sirenAllowedExtensions.contains(ext) else { continue }
+            let path = url.path.lowercased()
+            if path.contains("/assets/sirensong/") || path.contains("/sirensong/") {
+                urls.append(url)
+                continue
+            }
+            // Flattened-bundle fallback: match by stem against our known siren filenames.
+            let stem = url.deletingPathExtension().lastPathComponent.lowercased()
+            if sirenKnownStems.contains(stem) {
+                urls.append(url)
+            }
+        }
+        return urls.sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    private static func decodeSirenTrack(from url: URL) -> SirenTrackClip? {
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: file.processingFormat.sampleRate,
+            channels: file.processingFormat.channelCount,
+            interleaved: false
+        ) else { return nil }
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(max(1, file.length))
+        ) else { return nil }
+        do {
+            try file.read(into: buffer)
+        } catch {
+            return nil
+        }
+        guard let channels = buffer.floatChannelData else { return nil }
+        let frameCount = Int(buffer.frameLength)
+        let channelCount = Int(format.channelCount)
+        guard frameCount > 0, channelCount > 0 else { return nil }
+
+        var mono = [Float](repeating: 0, count: frameCount)
+        let invChannels = 1.0 / Float(channelCount)
+        for frame in 0..<frameCount {
+            var acc: Float = 0
+            for ch in 0..<channelCount {
+                acc += channels[ch][frame]
+            }
+            mono[frame] = acc * invChannels
+        }
+        return SirenTrackClip(id: url.lastPathComponent, sampleRate: Float(format.sampleRate), samples: mono)
     }
 
     private func refreshInputRouteState() {
@@ -1098,8 +1247,25 @@ final class AudioEngineController: ObservableObject {
         var profile = outputProfilesByUID[key] ?? OutputRoutingProfile.defaultProfile(for: key, hardwareChannels: hardwareChannels)
         profile.deviceUID = key
         profile.sanitize(for: hardwareChannels)
+        if shouldRestoreSixChannelHouseRouting(profile: profile, hardwareChannels: hardwareChannels) {
+            profile.preferredMode = .gallery6Locked
+            for idx in 0..<min(OutputRoutingProfile.virtualChannelCount, profile.channels.count) {
+                profile.channels[idx].hardwareOutput = idx + 1
+            }
+            profile.sanitize(for: hardwareChannels)
+        }
         outputProfilesByUID[key] = profile
         return profile
+    }
+
+    private func shouldRestoreSixChannelHouseRouting(profile: OutputRoutingProfile, hardwareChannels: Int) -> Bool {
+        guard hardwareChannels >= OutputRoutingProfile.virtualChannelCount else { return false }
+        let mapped = profile.channels.prefix(OutputRoutingProfile.virtualChannelCount).map(\.hardwareOutput)
+        guard !mapped.isEmpty else { return true }
+        let uniqueMapped = Set(mapped)
+        let stereoFoldDown = mapped.allSatisfy { $0 <= 2 }
+        let missingHouseOutputs = Set(1...OutputRoutingProfile.virtualChannelCount).subtracting(uniqueMapped)
+        return stereoFoldDown || !missingHouseOutputs.isEmpty
     }
 
     private func persistOutputRoutingStore() {
@@ -1117,19 +1283,28 @@ final class AudioEngineController: ObservableObject {
         let timer = DispatchSource.makeTimerSource(queue: timerQueue)
         var lastObservedOutputRenderCallbackCount: UInt64 = 0
         var lastObservedDriverCallbackCount: UInt64 = 0
+        var lastRenderCallbackSeenNs: UInt64 = 0
+        var lastDriverCallbackSeenNs: UInt64 = 0
         var lastPublishedLevels = outputHardwareLevels
         var lastPublishedDiagnostics = outputRenderDiagnostics
 
         timer.schedule(deadline: .now() + .milliseconds(180), repeating: .milliseconds(160), leeway: .milliseconds(16))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
+            let nowNs = DispatchTime.now().uptimeNanoseconds
             let levels = self.renderState.consumeOutputHardwareMeterLevels()
             let snapshot = self.renderState.consumeOutputRenderDiagnostics()
             let driverSnapshot = self.liveOutputDriver.callbackSnapshot()
+            if snapshot.callbackCounter != lastObservedOutputRenderCallbackCount {
+                lastRenderCallbackSeenNs = nowNs
+            }
+            if driverSnapshot.count != lastObservedDriverCallbackCount {
+                lastDriverCallbackSeenNs = nowNs
+            }
             let diagnostics = OutputRenderDiagnostics(
-                driverCallbackActive: driverSnapshot.count != lastObservedDriverCallbackCount,
+                driverCallbackActive: nowNs &- lastDriverCallbackSeenNs <= Self.callbackActivityHoldNs,
                 driverCallbackCount: driverSnapshot.count,
-                callbackActive: snapshot.callbackCounter != lastObservedOutputRenderCallbackCount,
+                callbackActive: nowNs &- lastRenderCallbackSeenNs <= Self.callbackActivityHoldNs,
                 frameCount: snapshot.frameCount,
                 bufferCount: snapshot.bufferCount,
                 slotCount: snapshot.slotCount,
@@ -1176,13 +1351,17 @@ final class AudioEngineController: ObservableObject {
             hardwareChannels: hardwareChannels,
             bindSucceeded: true
         )
+        let warning = mergedOutputRouteWarning(
+            routeWarning: decision.warning,
+            sampleRate: CoreAudioOutputCatalog.nominalSampleRate(forUID: uiSelected) ?? Self.preferredHardwareSampleRate
+        )
         renderState.setOutputRouting(
             profile: profile,
             hardwareChannels: hardwareChannels,
             activeMode: decision.mode,
             outputUID: uiSelected,
             outputName: uiName,
-            warning: decision.warning
+            warning: warning
         )
         activeOutputRoute = OutputRouteInfo(
             outputUID: uiSelected,
@@ -1190,7 +1369,7 @@ final class AudioEngineController: ObservableObject {
             hardwareChannels: hardwareChannels,
             activeMode: decision.mode,
             routeLocked: decision.locked,
-            warning: decision.warning,
+            warning: warning,
             mappingSummary: profile.mappingSummary()
         )
 
@@ -1201,7 +1380,7 @@ final class AudioEngineController: ObservableObject {
         outputProfile = profile
         outputRouteMode = decision.mode
         outputRouteLocked = decision.locked
-        outputRouteWarning = decision.warning
+        outputRouteWarning = warning
         persistOutputRoutingStore()
     }
 
@@ -1227,6 +1406,17 @@ final class AudioEngineController: ObservableObject {
             && abs(lhs.postRoutePeak - rhs.postRoutePeak) <= 0.012
     }
 
+    private func mergedOutputRouteWarning(routeWarning: String?, sampleRate: Double) -> String? {
+        var warnings: [String] = []
+        if let routeWarning, !routeWarning.isEmpty {
+            warnings.append(routeWarning)
+        }
+        if abs(sampleRate - Self.preferredHardwareSampleRate) > 1.0 {
+            warnings.append("sample_rate_\(Int(sampleRate.rounded()))Hz_expected_44100Hz")
+        }
+        return warnings.isEmpty ? nil : warnings.joined(separator: " | ")
+    }
+
     private func applyOutputRoutingProfileToRender() {
         let uid = preferredOutputUID ?? selectedOutputUID
         guard !uid.isEmpty else { return }
@@ -1237,13 +1427,17 @@ final class AudioEngineController: ObservableObject {
             hardwareChannels: channels,
             bindSucceeded: true
         )
+        let warning = mergedOutputRouteWarning(
+            routeWarning: decision.warning,
+            sampleRate: CoreAudioOutputCatalog.nominalSampleRate(forUID: uid) ?? Self.preferredHardwareSampleRate
+        )
         renderState.setOutputRouting(
             profile: profile,
             hardwareChannels: channels,
             activeMode: decision.mode,
             outputUID: uid,
             outputName: activeOutputName,
-            warning: decision.warning
+            warning: warning
         )
         let routeInfo = OutputRouteInfo(
             outputUID: uid,
@@ -1251,7 +1445,7 @@ final class AudioEngineController: ObservableObject {
             hardwareChannels: channels,
             activeMode: decision.mode,
             routeLocked: decision.locked,
-            warning: decision.warning,
+            warning: warning,
             mappingSummary: profile.mappingSummary()
         )
         activeOutputRoute = routeInfo
@@ -1259,7 +1453,7 @@ final class AudioEngineController: ObservableObject {
             self.outputProfile = profile
             self.outputRouteMode = decision.mode
             self.outputRouteLocked = decision.locked
-            self.outputRouteWarning = decision.warning
+            self.outputRouteWarning = warning
         }
     }
 
@@ -1293,6 +1487,91 @@ final class AudioEngineController: ObservableObject {
                 xfadeMs: xfadeMs
             )
         )
+    }
+
+    @discardableResult
+    func loadSirenSongPlaylistFromBundle() -> Int {
+        let urls = Self.bundleSirenSongURLs()
+        var tracks: [SirenTrackClip] = []
+        tracks.reserveCapacity(urls.count)
+        for url in urls {
+            if let clip = Self.decodeSirenTrack(from: url) {
+                tracks.append(clip)
+            }
+        }
+        renderState.setSirenTracks(tracks)
+        DispatchQueue.main.async {
+            self.sirenTrackCount = tracks.count
+            self.sirenPlaylistReady = !tracks.isEmpty
+        }
+        return tracks.count
+    }
+
+    func setSirenSongActive(_ active: Bool, fadeSeconds: Double) {
+        let enabled = active && sirenPlaylistReady
+        renderState.setSirenPlayback(active: enabled, fadeSeconds: max(0.0, Float(fadeSeconds)))
+    }
+
+    func setExternalLiveInputGain(target: Double, rampSeconds: Double) {
+        let clamped = min(max(target, 0.0), 1.0)
+        renderState.setExternalInputGain(target: Float(clamped), rampSeconds: max(0.0, Float(rampSeconds)))
+        DispatchQueue.main.async {
+            self.externalLiveInputGainTarget = clamped
+        }
+    }
+
+    func setPianoTunerDuckActive(
+        _ active: Bool,
+        duckGain: Double = 0.02,
+        fadeDownSeconds: Double = 0.8,
+        fadeUpSeconds: Double = 0.25
+    ) {
+        renderState.setPianoTunerDuck(
+            active: active,
+            duckGain: Float(min(max(duckGain, 0.0), 1.0)),
+            fadeDownSeconds: max(0.0, Float(fadeDownSeconds)),
+            fadeUpSeconds: max(0.0, Float(fadeUpSeconds))
+        )
+    }
+
+    func setSirenStatus(_ status: SirenSongStatus) {
+        DispatchQueue.main.async {
+            self.sirenStatus = status
+        }
+    }
+
+    func loadSirenSongPlaylistForTesting(_ tracks: [SirenTrackClip]) {
+        renderState.setSirenTracks(tracks)
+        self.sirenTrackCount = tracks.count
+        self.sirenPlaylistReady = !tracks.isEmpty
+    }
+
+    func externalInputGainSnapshotForTesting() -> (current: Double, target: Double) {
+        let snapshot = renderState.externalInputGainSnapshot()
+        return (current: Double(snapshot.current), target: Double(snapshot.target))
+    }
+
+    func sirenPlaybackSnapshotForTesting() -> (trackCount: Int, activeTarget: Bool, gainCurrent: Double, gainTarget: Double) {
+        let snapshot = renderState.sirenPlaybackSnapshot()
+        return (
+            trackCount: snapshot.trackCount,
+            activeTarget: snapshot.activeTarget,
+            gainCurrent: Double(snapshot.gainCurrent),
+            gainTarget: Double(snapshot.gainTarget)
+        )
+    }
+
+    func pianoTunerDuckSnapshotForTesting() -> (activeTarget: Bool, current: Double, target: Double) {
+        let snapshot = renderState.pianoTunerDuckSnapshot()
+        return (
+            activeTarget: snapshot.activeTarget,
+            current: Double(snapshot.current),
+            target: Double(snapshot.target)
+        )
+    }
+
+    func advanceRenderAutomationForTesting(frames: Int) {
+        renderState.advanceAutomationOnly(frames: frames)
     }
 
     func snapshotSafetyInterventions() -> [String] {
@@ -1627,11 +1906,59 @@ private struct FeedbackAction {
 }
 
 private struct FeedbackDetector {
+    private var prevSample: Float = 0
+    private var envFast: Float = 0
+    private var envSlow: Float = 0
+    private var deltaEnv: Float = 0
+    private var lowTrack: Float = 0
+    private var highEnv: Float = 0
+    private var risk: Float = 0
+    private var holdSamples: Int = 0
+
     mutating func process(_ sample: Float, sampleRate: Float) -> FeedbackAction {
-        _ = sample
-        _ = sampleRate
-        // TODO(the-tub): add narrowband peak persistence detector -> auto-notch + temporary attenuation.
-        return FeedbackAction(wetScale: 1.0, levelScale: 1.0, active: false)
+        let sr = max(8_000.0, sampleRate)
+        let absx = abs(sample)
+        envFast += 0.020 * (absx - envFast)
+        envSlow += 0.0022 * (absx - envSlow)
+
+        let delta = abs(sample - prevSample)
+        prevSample = sample
+        deltaEnv += 0.030 * (delta - deltaEnv)
+
+        lowTrack += 0.012 * (sample - lowTrack)
+        let high = sample - lowTrack
+        highEnv += 0.020 * (abs(high) - highEnv)
+
+        let activeSignal = envFast > 0.015
+        let steadyTone = deltaEnv < (envFast * 0.20)
+        let risingLoop = envFast > (envSlow * 1.45)
+        let brightBias = highEnv > (envFast * 0.45)
+
+        let trigger = activeSignal && steadyTone && (risingLoop || brightBias)
+        if trigger {
+            risk += 0.020 + (0.070 * min(1.0, envFast * 8.0))
+        } else {
+            risk -= 0.012
+        }
+        risk = max(0.0, min(1.5, risk))
+
+        if risk > 0.92 {
+            holdSamples = max(holdSamples, Int(sr * 0.45))
+        }
+        if holdSamples > 0 {
+            holdSamples -= 1
+            risk = max(risk, 0.75)
+        }
+
+        let active = holdSamples > 0 || risk > 0.95
+        guard active else {
+            return FeedbackAction(wetScale: 1.0, levelScale: 1.0, active: false)
+        }
+
+        let severity = max(0.0, min(1.0, (risk - 0.70) / 0.60))
+        let wetScale = max(0.18, 1.0 - (0.78 * severity))
+        let levelScale = max(0.60, 1.0 - (0.40 * severity))
+        return FeedbackAction(wetScale: wetScale, levelScale: levelScale, active: true)
     }
 }
 
@@ -2877,6 +3204,29 @@ nonisolated private final class MasterRenderState {
     private var targetInputLagSamples: Int = 2_048
     private var pendingInputFlush: Bool = false
     private var inputResampleState = InputResampleState()
+    private var externalInputGainCurrent: Float = 1.0
+    private var externalInputGainTarget: Float = 1.0
+    private var externalInputGainStep: Float = 0.0
+    private var externalInputGainRampRemaining: Int = 0
+    private var pianoTunerDuckActiveTarget: Bool = false
+    private var pianoTunerDuckCurrent: Float = 1.0
+    private var pianoTunerDuckTarget: Float = 1.0
+    private var pianoTunerDuckStep: Float = 0.0
+    private var pianoTunerDuckRampRemaining: Int = 0
+
+    private var sirenTracks: [SirenTrackClip] = []
+    private var sirenOrder: [Int] = []
+    private var sirenOrderCursor: Int = 0
+    private var sirenTrackIndex: Int = -1
+    private var sirenPlayhead: Float = 0
+    private var sirenPlayStep: Float = 1
+    private var sirenActiveTarget: Bool = false
+    private var sirenGainCurrent: Float = 0.0
+    private var sirenGainTarget: Float = 0.0
+    private var sirenGainStep: Float = 0.0
+    private var sirenGainRampRemaining: Int = 0
+    private var sirenNominalGain: Float = 0.34
+    private var sirenRng: UInt64 = 0xD4B5_17C5_4A3F_1E29
 
     private var motionPhase: Float = 0
     private var bandMotionPhase: Float = 0
@@ -3005,6 +3355,12 @@ nonisolated private final class MasterRenderState {
     private var mode4HighEnv: Float = 0
     private var mode4Noisiness: Float = 0
 
+    // Modes 5/6 share the mode-4 transient DSP, but point at a separate siren-song library.
+    private var mode56SampleLibrary: [Mode4SampleClip] = []
+    private var mode56CategoryToIndices: [String: [Int]] = [:]
+    private var mode56LibraryLoaded: Bool = false
+    private var mode46LastDispatchMode: Int = -1
+
     // Modes 5/6 resonifier state.
     private var resonVoices = Array(repeating: ResonVoice(), count: 8)
     private var resonInstrumentCache: [String: ResonInstrument] = [:]
@@ -3085,6 +3441,23 @@ nonisolated private final class MasterRenderState {
             self.maxInputLagSamples = max(512, Int(self.sampleRate * 0.090))
             self.targetInputLagSamples = min(self.maxInputLagSamples - 32, max(256, Int(self.sampleRate * 0.040)))
             self.inputResampleState.reset(sourceSampleRate: self.sampleRate)
+            self.externalInputGainCurrent = 1.0
+            self.externalInputGainTarget = 1.0
+            self.externalInputGainStep = 0.0
+            self.externalInputGainRampRemaining = 0
+            self.pianoTunerDuckActiveTarget = false
+            self.pianoTunerDuckCurrent = 1.0
+            self.pianoTunerDuckTarget = 1.0
+            self.pianoTunerDuckStep = 0.0
+            self.pianoTunerDuckRampRemaining = 0
+            self.sirenTrackIndex = -1
+            self.sirenPlayhead = 0
+            self.sirenPlayStep = 1
+            self.sirenActiveTarget = false
+            self.sirenGainCurrent = 0
+            self.sirenGainTarget = 0
+            self.sirenGainStep = 0
+            self.sirenGainRampRemaining = 0
             self.hpAlpha = hpfAlpha(fc: 100.0, sampleRate: self.sampleRate)
             self.reverb.configure(sampleRate: self.sampleRate)
             self.reverb.setTarget(controlCurrent.reverb)
@@ -3153,6 +3526,9 @@ nonisolated private final class MasterRenderState {
             self.mode3State = Mode3InharmonicState()
             self.mode7State.configure(sampleRate: self.sampleRate)
             reloadMode4SampleLibrary(bankId: controlCurrent.bankId ?? "samples_A")
+            if !mode56LibraryLoaded {
+                loadMode56SampleLibraryFromBundle()
+            }
             preloadResonifierDefaults()
             setMode7TargetMatrix(mappingId: "swap_pairs", mappingFamily: "bucket_swap", bias: 0.5, varianceAmt: 0.2, seed: 7)
             mode4SessionId = "session_\(Int(Date().timeIntervalSince1970))"
@@ -3167,7 +3543,11 @@ nonisolated private final class MasterRenderState {
             clamped.level = min(max(clamped.level, 0), 1)
             clamped.dryLevel = min(max(clamped.dryLevel, 0), 1)
             if clamped.mode == 7 {
-                clamped.wetLevel = min(max(clamped.wetLevel, 0.75), 1.0)
+                clamped.wetLevel = min(max(clamped.wetLevel, 0.88), 1.0)
+                clamped.dryLevel = min(max(clamped.dryLevel, 0.0), 0.10)
+            } else if clamped.mode == 4 {
+                clamped.wetLevel = min(max(clamped.wetLevel, 0.82), 1.0)
+                clamped.dryLevel = min(max(clamped.dryLevel, 0.0), 0.20)
             } else {
                 clamped.wetLevel = min(max(clamped.wetLevel, 0), 0.60)
             }
@@ -3181,9 +3561,11 @@ nonisolated private final class MasterRenderState {
                 || pendingControl?.mode == 6
             if clamped.mode == 4 {
                 let requestedBankId = clamped.bankId ?? "samples_A"
-                if !mode4ActiveOrPending || requestedBankId != mode4LibraryBankId {
+                if requestedBankId != mode4LibraryBankId || mode4SampleLibrary.isEmpty {
                     reloadMode4SampleLibrary(bankId: requestedBankId)
                     pendingInputFlush = true
+                } else if !mode4ActiveOrPending {
+                    resetMode4RuntimeState()
                 }
             }
             if clamped.mode == 5 || clamped.mode == 6 {
@@ -3283,6 +3665,113 @@ nonisolated private final class MasterRenderState {
         }
     }
 
+    func setSirenTracks(_ tracks: [SirenTrackClip]) {
+        stateLock.withLock {
+            sirenTracks = tracks.filter { !$0.samples.isEmpty && $0.sampleRate > 1.0 }
+            sirenTrackIndex = -1
+            sirenPlayhead = 0
+            sirenPlayStep = 1
+            sirenActiveTarget = false
+            sirenGainCurrent = 0
+            sirenGainTarget = 0
+            sirenGainStep = 0
+            sirenGainRampRemaining = 0
+            sirenReshuffleOrderLocked()
+        }
+    }
+
+    func setSirenPlayback(active: Bool, fadeSeconds: Float) {
+        stateLock.withLock {
+            let shouldEnable = active && !sirenTracks.isEmpty
+            sirenActiveTarget = shouldEnable
+            let nextTarget: Float = shouldEnable ? sirenNominalGain : 0.0
+            if fadeSeconds <= 0 {
+                sirenGainCurrent = nextTarget
+                sirenGainTarget = nextTarget
+                sirenGainStep = 0
+                sirenGainRampRemaining = 0
+            } else {
+                let total = max(1, Int(sampleRate * fadeSeconds))
+                sirenGainTarget = nextTarget
+                sirenGainStep = (sirenGainTarget - sirenGainCurrent) / Float(total)
+                sirenGainRampRemaining = total
+            }
+            if shouldEnable && sirenTrackIndex < 0 {
+                sirenTrackIndex = nextSirenTrackIndexLocked()
+                sirenPlayhead = 0
+                if sirenTrackIndex >= 0 {
+                    sirenPlayStep = sirenTracks[sirenTrackIndex].sampleRate / max(8_000.0, sampleRate)
+                }
+            }
+        }
+    }
+
+    func setExternalInputGain(target: Float, rampSeconds: Float) {
+        stateLock.withLock {
+            let clamped = min(max(target, 0.0), 1.0)
+            if rampSeconds <= 0 {
+                externalInputGainCurrent = clamped
+                externalInputGainTarget = clamped
+                externalInputGainStep = 0
+                externalInputGainRampRemaining = 0
+            } else {
+                let total = max(1, Int(sampleRate * rampSeconds))
+                externalInputGainTarget = clamped
+                externalInputGainStep = (externalInputGainTarget - externalInputGainCurrent) / Float(total)
+                externalInputGainRampRemaining = total
+            }
+        }
+    }
+
+    func setPianoTunerDuck(active: Bool, duckGain: Float, fadeDownSeconds: Float, fadeUpSeconds: Float) {
+        stateLock.withLock {
+            let clampedDuckGain = min(max(duckGain, 0.0), 1.0)
+            pianoTunerDuckActiveTarget = active
+            let nextTarget: Float = active ? clampedDuckGain : 1.0
+            let rampSeconds = active ? fadeDownSeconds : fadeUpSeconds
+            if rampSeconds <= 0 {
+                pianoTunerDuckCurrent = nextTarget
+                pianoTunerDuckTarget = nextTarget
+                pianoTunerDuckStep = 0
+                pianoTunerDuckRampRemaining = 0
+            } else {
+                let total = max(1, Int(sampleRate * rampSeconds))
+                pianoTunerDuckTarget = nextTarget
+                pianoTunerDuckStep = (pianoTunerDuckTarget - pianoTunerDuckCurrent) / Float(total)
+                pianoTunerDuckRampRemaining = total
+            }
+        }
+    }
+
+    func externalInputGainSnapshot() -> (current: Float, target: Float) {
+        stateLock.withLock {
+            (externalInputGainCurrent, externalInputGainTarget)
+        }
+    }
+
+    func sirenPlaybackSnapshot() -> (trackCount: Int, activeTarget: Bool, gainCurrent: Float, gainTarget: Float) {
+        stateLock.withLock {
+            (sirenTracks.count, sirenActiveTarget, sirenGainCurrent, sirenGainTarget)
+        }
+    }
+
+    func pianoTunerDuckSnapshot() -> (activeTarget: Bool, current: Float, target: Float) {
+        stateLock.withLock {
+            (pianoTunerDuckActiveTarget, pianoTunerDuckCurrent, pianoTunerDuckTarget)
+        }
+    }
+
+    func advanceAutomationOnly(frames: Int) {
+        guard frames > 0 else { return }
+        stateLock.withLock {
+            for _ in 0..<frames {
+                advanceExternalInputGainLocked()
+                advancePianoTunerDuckLocked()
+                advanceSirenGainLocked()
+            }
+        }
+    }
+
     func setOutputTest(active: Bool, channelIndex: Int, scanAll: Bool, levelDb: Double) {
         stateLock.withLock {
             outputTestActive = active
@@ -3348,6 +3837,12 @@ nonisolated private final class MasterRenderState {
             out.append("output_channels:\(outputHardwareChannels)")
             out.append("output_mode:\(outputRouteMode.rawValue)")
             out.append("output_mapping:\(outputProfile.mappingSummary())")
+            out.append("siren_tracks:\(sirenTracks.count)")
+            out.append("siren_active:\(sirenActiveTarget ? 1 : 0)")
+            out.append("siren_gain:\(String(format: "%.3f", sirenGainCurrent))")
+            out.append("external_input_gain:\(String(format: "%.3f", externalInputGainCurrent))")
+            out.append("piano_tuner_active:\(pianoTunerDuckActiveTarget ? 1 : 0)")
+            out.append("piano_tuner_gain:\(String(format: "%.3f", pianoTunerDuckCurrent))")
             if let outputRouteWarning, !outputRouteWarning.isEmpty {
                 out.append(outputRouteWarning)
             }
@@ -3646,7 +4141,11 @@ nonisolated private final class MasterRenderState {
                     transitionSafetyScale += (1.0 - transitionSafetyScale) * 0.0025
                 }
 
-                let input = inputScratch[n]
+                advanceExternalInputGainLocked()
+                advancePianoTunerDuckLocked()
+                advanceSirenGainLocked()
+
+                let input = inputScratch[n] * externalInputGainCurrent
                 let hp = processInputHPF(input)
                 let fb = feedbackDetector.process(hp, sampleRate: sampleRate)
                 if fb.active {
@@ -3728,6 +4227,7 @@ nonisolated private final class MasterRenderState {
                     )
 
                 case 4:
+                    prepareMode46DispatchTransition(to: 4)
                     processMode4(
                         input: hp,
                         interventions: &interventions,
@@ -3736,27 +4236,33 @@ nonisolated private final class MasterRenderState {
                     )
 
                 case 5:
-                    processResonifier(
+                    prepareMode46DispatchTransition(to: 5)
+                    swap(&mode4SampleLibrary, &mode56SampleLibrary)
+                    swap(&mode4CategoryToIndices, &mode56CategoryToIndices)
+                    processMode4(
                         input: hp,
-                        mode: 5,
-                        cpuAction: activeCpu,
                         interventions: &interventions,
                         &ch0, &ch1, &ch2, &ch3, &ch4, &ch5,
                         reverbSend: &reverbSend
                     )
+                    swap(&mode4SampleLibrary, &mode56SampleLibrary)
+                    swap(&mode4CategoryToIndices, &mode56CategoryToIndices)
 
                 case 6:
-                    processResonifier(
+                    prepareMode46DispatchTransition(to: 6)
+                    swap(&mode4SampleLibrary, &mode56SampleLibrary)
+                    swap(&mode4CategoryToIndices, &mode56CategoryToIndices)
+                    processMode4(
                         input: hp,
-                        mode: 6,
-                        cpuAction: activeCpu,
                         interventions: &interventions,
                         &ch0, &ch1, &ch2, &ch3, &ch4, &ch5,
                         reverbSend: &reverbSend
                     )
-                    // Keep mode 6 centered on pitched instrument output, not input-bed texture.
-                    let hasResonVoices = resonVoices.contains(where: { $0.active })
-                    if hasResonVoices {
+                    swap(&mode4SampleLibrary, &mode56SampleLibrary)
+                    swap(&mode4CategoryToIndices, &mode56CategoryToIndices)
+                    // Mode 6 keeps the wet+dry dichotomy — bleed a little input bed under the sampled voices.
+                    let hasMode6Voices = mode4Voices.contains(where: { $0.active })
+                    if hasMode6Voices {
                         let dry = hp * Float(controlCurrent.dryLevel) * 0.15
                         ch1 += dry * 0.5
                         ch4 += dry * 0.5
@@ -3764,9 +4270,15 @@ nonisolated private final class MasterRenderState {
 
                 case 7:
                     let swapped = processMode7(input: hp)
-                    dryMono = hp * min(Float(controlCurrent.dryLevel), 0.12)
-                    fxMono = swapped * min(1.0, Float(controlCurrent.wetLevel) * 1.08)
-                    reverbSend = fxMono * 0.015
+                    dryMono = hp * min(Float(controlCurrent.dryLevel), 0.03)
+                    fxMono = swapped * max(0.95, min(1.45, Float(controlCurrent.wetLevel) * 1.32))
+                    reverbSend = fxMono * 0.010
+                    if fb.active {
+                        // Mode 7 can build narrowband room loops quickly; use stronger wet ducking.
+                        let mode7FeedbackDuck = max(0.04, min(0.82, fb.wetScale * fb.wetScale * 0.52))
+                        fxMono *= mode7FeedbackDuck
+                        reverbSend = 0
+                    }
                     placeMainObject(
                         sample: dryMono + fxMono,
                         spread: max(0.60, Float(controlCurrent.spread)),
@@ -3813,7 +4325,8 @@ nonisolated private final class MasterRenderState {
                     reverbWet = processMode3ReverbClamp(input: reverbWet)
                 } else if controlCurrent.mode == 7 {
                     // Keep Mode 7 character dominated by redistribution, not room wash.
-                    reverbWet *= 0.16
+                    // If feedback guard is active, force room send fully down for this frame.
+                    reverbWet *= fb.active ? 0.0 : 0.12
                 }
                 let diffuse = reverbWet * 0.408
                 ch0 += diffuse
@@ -3823,7 +4336,18 @@ nonisolated private final class MasterRenderState {
                 ch4 += diffuse
                 ch5 += diffuse
 
-                let master = Float(controlCurrent.level) * modeFade * feedbackLevelScale * transitionSafetyScale
+                let sirenMono = nextSirenRawSampleLocked() * sirenGainCurrent
+                if abs(sirenMono) > 0.000_001 {
+                    // Keep attract playback broad and room-legible without relying on a single speaker pair.
+                    ch0 += sirenMono * 0.40
+                    ch1 += sirenMono * 0.52
+                    ch2 += sirenMono * 0.40
+                    ch3 += sirenMono * 0.40
+                    ch4 += sirenMono * 0.52
+                    ch5 += sirenMono * 0.40
+                }
+
+                let master = Float(controlCurrent.level) * modeFade * feedbackLevelScale * transitionSafetyScale * pianoTunerDuckCurrent
                 ch0 *= master; ch1 *= master; ch2 *= master
                 ch3 *= master; ch4 *= master; ch5 *= master
 
@@ -4037,6 +4561,128 @@ nonisolated private final class MasterRenderState {
         return pink * outputTestLevelLinear
     }
 
+    private func advanceExternalInputGainLocked() {
+        if externalInputGainRampRemaining > 0 {
+            externalInputGainCurrent += externalInputGainStep
+            externalInputGainRampRemaining -= 1
+            if externalInputGainRampRemaining <= 0 {
+                externalInputGainCurrent = externalInputGainTarget
+                externalInputGainStep = 0
+            }
+        } else {
+            externalInputGainCurrent = externalInputGainTarget
+        }
+        externalInputGainCurrent = min(max(externalInputGainCurrent, 0.0), 1.0)
+    }
+
+    private func advancePianoTunerDuckLocked() {
+        if pianoTunerDuckRampRemaining > 0 {
+            pianoTunerDuckCurrent += pianoTunerDuckStep
+            pianoTunerDuckRampRemaining -= 1
+            if pianoTunerDuckRampRemaining <= 0 {
+                pianoTunerDuckCurrent = pianoTunerDuckTarget
+                pianoTunerDuckStep = 0
+            }
+        } else {
+            pianoTunerDuckCurrent = pianoTunerDuckTarget
+        }
+        pianoTunerDuckCurrent = min(max(pianoTunerDuckCurrent, 0.0), 1.0)
+    }
+
+    private func advanceSirenGainLocked() {
+        if sirenGainRampRemaining > 0 {
+            sirenGainCurrent += sirenGainStep
+            sirenGainRampRemaining -= 1
+            if sirenGainRampRemaining <= 0 {
+                sirenGainCurrent = sirenGainTarget
+                sirenGainStep = 0
+            }
+        } else {
+            sirenGainCurrent = sirenGainTarget
+        }
+        sirenGainCurrent = min(max(sirenGainCurrent, 0.0), max(0.0, sirenNominalGain))
+
+        if !sirenActiveTarget && sirenGainCurrent <= 0.000_01 {
+            sirenTrackIndex = -1
+            sirenPlayhead = 0
+            sirenPlayStep = 1
+        }
+    }
+
+    private func sirenReshuffleOrderLocked() {
+        sirenOrder = Array(0..<sirenTracks.count)
+        guard sirenOrder.count > 1 else {
+            sirenOrderCursor = 0
+            return
+        }
+        for i in stride(from: sirenOrder.count - 1, through: 1, by: -1) {
+            sirenRng = sirenRng &* 6364136223846793005 &+ 1442695040888963407
+            let j = Int((sirenRng >> 33) % UInt64(i + 1))
+            if i != j {
+                sirenOrder.swapAt(i, j)
+            }
+        }
+        sirenOrderCursor = 0
+    }
+
+    private func nextSirenTrackIndexLocked() -> Int {
+        guard !sirenOrder.isEmpty else { return -1 }
+        if sirenOrderCursor >= sirenOrder.count {
+            sirenReshuffleOrderLocked()
+        }
+        guard !sirenOrder.isEmpty else { return -1 }
+        let index = sirenOrder[sirenOrderCursor]
+        sirenOrderCursor += 1
+        return index
+    }
+
+    private func nextSirenRawSampleLocked() -> Float {
+        guard !sirenTracks.isEmpty else { return 0 }
+        guard sirenActiveTarget || sirenGainCurrent > 0.000_01 else { return 0 }
+
+        if sirenTrackIndex < 0 || sirenTrackIndex >= sirenTracks.count {
+            sirenTrackIndex = nextSirenTrackIndexLocked()
+            sirenPlayhead = 0
+            if sirenTrackIndex >= 0 {
+                sirenPlayStep = sirenTracks[sirenTrackIndex].sampleRate / max(8_000.0, sampleRate)
+            }
+        }
+        guard sirenTrackIndex >= 0, sirenTrackIndex < sirenTracks.count else { return 0 }
+
+        let track = sirenTracks[sirenTrackIndex]
+        if track.samples.count < 2 {
+            sirenTrackIndex = nextSirenTrackIndexLocked()
+            sirenPlayhead = 0
+            if sirenTrackIndex >= 0 {
+                sirenPlayStep = sirenTracks[sirenTrackIndex].sampleRate / max(8_000.0, sampleRate)
+            }
+            return 0
+        }
+
+        let i0 = Int(sirenPlayhead)
+        if i0 >= track.samples.count - 1 {
+            sirenTrackIndex = nextSirenTrackIndexLocked()
+            sirenPlayhead = 0
+            if sirenTrackIndex >= 0 {
+                sirenPlayStep = sirenTracks[sirenTrackIndex].sampleRate / max(8_000.0, sampleRate)
+            }
+            return 0
+        }
+
+        let i1 = min(track.samples.count - 1, i0 + 1)
+        let frac = sirenPlayhead - Float(i0)
+        let sample = track.samples[i0] + ((track.samples[i1] - track.samples[i0]) * frac)
+        sirenPlayhead += max(0.05, sirenPlayStep)
+        if sirenPlayhead >= Float(track.samples.count - 1) {
+            sirenTrackIndex = nextSirenTrackIndexLocked()
+            sirenPlayhead = 0
+            if sirenTrackIndex >= 0 {
+                sirenPlayStep = sirenTracks[sirenTrackIndex].sampleRate / max(8_000.0, sampleRate)
+            }
+        }
+        return sample
+    }
+
     private func copyInputFrames(into out: inout [Float], frames: Int) {
         ringLock.lock()
         let cap = inputRing.count
@@ -4217,51 +4863,92 @@ nonisolated private final class MasterRenderState {
 
     private func mode4IsAudioFile(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
-        return ext == "wav" || ext == "aif" || ext == "aiff" || ext == "caf"
+        return ext == "wav" || ext == "aif" || ext == "aiff" || ext == "caf" || ext == "m4a" || ext == "mp3"
     }
 
-    private func mode4ScanFallbackAudioFiles(relativeDirectories: [String]) -> [URL] {
+    private func mode4FallbackDirectories(bankId: String, manifestAssets: [BankAsset]) -> [String] {
+        var preferredDirs: [String] = []
+        if bankId == "samples_A" {
+            preferredDirs = [
+                "TubCompanion/Samples",
+                "Samples",
+                "Samples/ultrachunk",
+                "Samples/long_bank_gradient",
+                "Assets/Samples/ultrachunk",
+                "Assets/Samples/long_bank_gradient",
+            ]
+        }
+
+        let manifestDirs = manifestAssets
+            .map { ($0.path as NSString).deletingLastPathComponent }
+            .filter { !$0.isEmpty }
+
+        var merged: [String] = []
+        var seen: Set<String> = []
+        for raw in preferredDirs + manifestDirs {
+            let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
+            if seen.insert(key).inserted {
+                merged.append(key)
+            }
+        }
+        return merged
+    }
+
+    private func mode4ScanFallbackAudioFiles(
+        relativeDirectories: [String],
+        includeAssetRootScan: Bool = true,
+        stopAfterFirstDirectoryWithContent: Bool = false
+    ) -> [URL] {
         let fm = FileManager.default
+        let roots = mode4AssetRoots()
         var out: [URL] = []
         var seen: Set<String> = []
-        var scanDirs: [URL] = []
 
         let cleanedDirs = relativeDirectories
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        for dir in cleanedDirs {
-            if dir.hasPrefix("/") {
-                scanDirs.append(URL(fileURLWithPath: dir, isDirectory: true))
-            } else {
-                for root in mode4AssetRoots() {
-                    scanDirs.append(root.appendingPathComponent(dir, isDirectory: true))
-                }
-            }
-        }
-
-        var rootScanned: Set<String> = []
-        for root in mode4AssetRoots() {
-            let key = root.standardizedFileURL.path
-            if rootScanned.contains(key) { continue }
-            rootScanned.insert(key)
-            scanDirs.append(root)
-        }
-
-        for dirURL in scanDirs {
+        @discardableResult
+        func scanDirectory(_ dirURL: URL) -> Bool {
             var isDir = ObjCBool(false)
-            guard fm.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            guard fm.fileExists(atPath: dirURL.path, isDirectory: &isDir), isDir.boolValue else { return false }
             guard let entries = try? fm.contentsOfDirectory(
                 at: dirURL,
                 includingPropertiesForKeys: [.isRegularFileKey],
                 options: [.skipsHiddenFiles]
-            ) else { continue }
+            ) else { return false }
+            var found = false
             for entry in entries {
                 guard mode4IsAudioFile(entry) else { continue }
-                let key = entry.standardizedFileURL.path
+                let key = entry.resolvingSymlinksInPath().standardizedFileURL.path
                 if seen.contains(key) { continue }
                 seen.insert(key)
                 out.append(entry)
+                found = true
+            }
+            return found
+        }
+
+        for dir in cleanedDirs {
+            var foundInDir = false
+            if dir.hasPrefix("/") {
+                foundInDir = scanDirectory(URL(fileURLWithPath: dir, isDirectory: true))
+            } else {
+                for root in roots {
+                    if scanDirectory(root.appendingPathComponent(dir, isDirectory: true)) {
+                        foundInDir = true
+                    }
+                }
+            }
+            if stopAfterFirstDirectoryWithContent, foundInDir {
+                break
+            }
+        }
+
+        if includeAssetRootScan {
+            for root in roots {
+                _ = scanDirectory(root)
             }
         }
 
@@ -4540,6 +5227,23 @@ nonisolated private final class MasterRenderState {
         return cleaned.isEmpty ? "general" : cleaned
     }
 
+    private func resetMode4RuntimeState() {
+        mode4NoSamplesDryOnly = mode4SampleLibrary.isEmpty
+        mode4RecentClipIndices.removeAll(keepingCapacity: true)
+        mode4TriggerAccumulator = 0
+        mode4PrevInput = 0
+        mode4InputEnv = 0
+        mode4LowTrack = 0
+        mode4LowEnv = 0
+        mode4HighEnv = 0
+        mode4Noisiness = 0
+        mode4LastTriggerSamplesAgo = 100_000
+        for i in mode4Voices.indices {
+            mode4Voices[i].active = false
+        }
+        mode4ActiveVoices = 0
+    }
+
     private func reloadMode4SampleLibrary(bankId: String) {
         mode4LibraryBankId = bankId
         mode4SampleLibrary.removeAll(keepingCapacity: true)
@@ -4569,14 +5273,13 @@ nonisolated private final class MasterRenderState {
         }
 
         var loaded: [Mode4SampleClip] = []
-        let fallbackDirs = Array(
-            Set(
-                bank.assets.map { asset in
-                    (asset.path as NSString).deletingLastPathComponent
-                }
-            )
+        let fallbackDirs = mode4FallbackDirectories(bankId: bankId, manifestAssets: bank.assets)
+        let preferUnifiedSamplesBank = bankId == "samples_A"
+        let fallbackPool = mode4ScanFallbackAudioFiles(
+            relativeDirectories: fallbackDirs,
+            includeAssetRootScan: !preferUnifiedSamplesBank,
+            stopAfterFirstDirectoryWithContent: preferUnifiedSamplesBank
         )
-        let fallbackPool = mode4ScanFallbackAudioFiles(relativeDirectories: fallbackDirs)
         var assetsToLoad = mode4ExpandedAssets(bankId: bankId, manifestAssets: bank.assets, fallbackPool: fallbackPool)
         if assetsToLoad.count > bank.assets.count {
             mode4LoadInterventions.append("mode4_asset_pool_expanded:\(bank.assets.count)->\(assetsToLoad.count)")
@@ -4591,20 +5294,20 @@ nonisolated private final class MasterRenderState {
             if resolvedURL == nil {
                 let desiredBasename = mode4PathBasename(asset.path).lowercased()
                 if let matched = fallbackPool.first(where: { candidate in
-                    let key = candidate.standardizedFileURL.path
+                    let key = candidate.resolvingSymlinksInPath().standardizedFileURL.path
                     if consumedFallback.contains(key) { return false }
                     let candidateName = candidate.lastPathComponent.lowercased()
                     return candidateName == desiredBasename || mode4FilenameMatchesAssetId(filename: candidate.lastPathComponent, assetId: asset.id)
                 }) {
                     resolvedURL = matched
-                    consumedFallback.insert(matched.standardizedFileURL.path)
+                    consumedFallback.insert(matched.resolvingSymlinksInPath().standardizedFileURL.path)
                 }
             }
             if resolvedURL == nil {
                 while fallbackCursor < fallbackPool.count {
                     let candidate = fallbackPool[fallbackCursor]
                     fallbackCursor += 1
-                    let key = candidate.standardizedFileURL.path
+                    let key = candidate.resolvingSymlinksInPath().standardizedFileURL.path
                     if consumedFallback.contains(key) { continue }
                     consumedFallback.insert(key)
                     resolvedURL = candidate
@@ -4635,7 +5338,7 @@ nonisolated private final class MasterRenderState {
                 )
                 loaded.append(clip)
                 if !usedFallback {
-                    consumedFallback.insert(url.standardizedFileURL.path)
+                    consumedFallback.insert(url.resolvingSymlinksInPath().standardizedFileURL.path)
                 }
             } catch {
                 mode4LoadInterventions.append("mode4_sample_unreadable:\(asset.id)")
@@ -4654,6 +5357,58 @@ nonisolated private final class MasterRenderState {
         if mode4LoadInterventions.count > 16 {
             mode4LoadInterventions = Array(mode4LoadInterventions.prefix(16))
         }
+    }
+
+    private func prepareMode46DispatchTransition(to current: Int) {
+        if mode46LastDispatchMode == current {
+            return
+        }
+        // Any hop between {4,5,6} crosses a library boundary — stop in-flight voices so their
+        // cached clipIndex can't resolve into the wrong library after the swap.
+        let prior = mode46LastDispatchMode
+        mode46LastDispatchMode = current
+        guard prior == 4 || prior == 5 || prior == 6 else { return }
+        guard current != prior else { return }
+        for i in mode4Voices.indices {
+            mode4Voices[i].active = false
+        }
+        mode4ActiveVoices = 0
+        mode4RecentClipIndices.removeAll(keepingCapacity: true)
+        mode4TriggerAccumulator = 0
+        mode4LastTriggerSamplesAgo = 100_000
+    }
+
+    private func loadMode56SampleLibraryFromBundle() {
+        mode56SampleLibrary.removeAll(keepingCapacity: true)
+        mode56CategoryToIndices.removeAll(keepingCapacity: true)
+
+        let urls = AudioEngineController.bundleSirenSongURLs()
+        var loaded: [Mode4SampleClip] = []
+        loaded.reserveCapacity(urls.count)
+        for url in urls {
+            do {
+                let decoded = try decodeMode4MonoSamples(from: url)
+                guard decoded.samples.count >= 64 else { continue }
+                let analysis = analyzeMode4Clip(samples: decoded.samples, sampleRate: decoded.sampleRate)
+                let clip = Mode4SampleClip(
+                    id: url.deletingPathExtension().lastPathComponent,
+                    category: "siren",
+                    gain: 1.0,
+                    sampleRate: max(8_000, decoded.sampleRate),
+                    samples: decoded.samples,
+                    analysis: analysis
+                )
+                loaded.append(clip)
+            } catch {
+                continue
+            }
+        }
+
+        mode56SampleLibrary = loaded
+        for i in loaded.indices {
+            mode56CategoryToIndices[loaded[i].category, default: []].append(i)
+        }
+        mode56LibraryLoaded = true
     }
 
     private func stableSeed(for text: String) -> UInt64 {
@@ -5781,8 +6536,9 @@ nonisolated private final class MasterRenderState {
         reverbSend: inout Float
     ) {
         mode4LastTriggerSamplesAgo += 1
-        let dryDuck: Float = mode4ActiveVoices > 0 ? 0.80 : 1.0
-        let clean = input * Float(max(0.22, controlCurrent.dryLevel)) * dryDuck
+        let dryMix = max(0.0, min(0.20, Float(controlCurrent.dryLevel)))
+        let dryDuck: Float = mode4ActiveVoices > 0 ? 0.22 : 0.55
+        let clean = input * dryMix * dryDuck
         placeMainObject(
             sample: clean,
             spread: Float(min(0.55, controlCurrent.spread)),
@@ -5791,7 +6547,7 @@ nonisolated private final class MasterRenderState {
             mode: 4,
             &ch0, &ch1, &ch2, &ch3, &ch4, &ch5
         )
-        reverbSend = clean * 0.09
+        reverbSend = clean * 0.03
 
         let onsetMetric = abs(input - mode4PrevInput)
         mode4PrevInput = input
@@ -5810,6 +6566,7 @@ nonisolated private final class MasterRenderState {
             brightness: max(0, min(1, 0.62 * brightLive + 0.38 * Float(controlCurrent.bandHighLevel))),
             lowBand: max(0, min(1, 0.62 * lowLive + 0.38 * Float(controlCurrent.bandLowLevel)))
         )
+        let inputActivity = max(0, min(1, (mode4InputEnv * 18.0) + (onsetMetric * 28.0)))
 
         if mode4SampleLibrary.isEmpty {
             mode4NoSamplesDryOnly = true
@@ -5818,12 +6575,15 @@ nonisolated private final class MasterRenderState {
         }
         mode4NoSamplesDryOnly = false
 
-        let baseTriggerHz = 0.30 + (1.6 * Float(controlCurrent.gestureRate)) + (4.8 * Float(controlCurrent.interruptiveness))
-        let featureBoost = 0.56 + (1.35 * liveFeatures.onsetNoisy) + (0.22 * (1.0 - Float(controlCurrent.memoryWeight)))
-        let triggerHz = min(18.0, baseTriggerHz * featureBoost)
+        let baseTriggerHz = 0.60 + (2.2 * Float(controlCurrent.gestureRate)) + (6.8 * Float(controlCurrent.interruptiveness))
+        let featureBoost = 0.50
+            + (1.40 * inputActivity)
+            + (0.95 * liveFeatures.onsetNoisy)
+            + (0.30 * (1.0 - Float(controlCurrent.memoryWeight)))
+        let triggerHz = min(24.0, baseTriggerHz * featureBoost)
         mode4TriggerAccumulator += triggerHz / sampleRate
 
-        let minGapSamples = Int((0.018 + 0.11 * (1.0 - Float(controlCurrent.interruptiveness))) * sampleRate)
+        let minGapSamples = Int((0.012 + 0.075 * (1.0 - Float(controlCurrent.interruptiveness))) * sampleRate)
         if mode4LastTriggerSamplesAgo > minGapSamples {
             var spawned = 0
             while mode4TriggerAccumulator >= 1.0, spawned < 2 {
@@ -5832,8 +6592,8 @@ nonisolated private final class MasterRenderState {
                 spawned += 1
             }
 
-            let impulseChance = min(0.22, triggerHz / sampleRate * (0.4 + 0.6 * liveFeatures.onsetNoisy))
-            if liveFeatures.onsetNoisy > 0.72, randomUnit() < impulseChance {
+            let impulseChance = min(0.30, triggerHz / sampleRate * (0.45 + 0.55 * inputActivity))
+            if (liveFeatures.onsetNoisy > 0.66 || inputActivity > 0.62), randomUnit() < impulseChance {
                 spawnMode4Voice(liveFeatures: liveFeatures, interventions: &interventions)
             }
         }
@@ -5856,7 +6616,17 @@ nonisolated private final class MasterRenderState {
                 ? Float(max(0, remaining)) / Float(max(1, mode4Voices[i].fadeOutSamples))
                 : 1.0
             let env = max(0, min(1, inEnv * outEnv))
-            let wetScale = max(0.22, min(1, Float(controlCurrent.gestureLevel) * 1.35))
+            let wetIntent = max(0, min(1, Float(controlCurrent.wetLevel)))
+            let gestureMix = max(0, min(1, Float(controlCurrent.gestureLevel)))
+            let wetScale = max(
+                0.60,
+                min(
+                    1.70,
+                    (0.62 + 1.00 * gestureMix)
+                        * (0.68 + 0.55 * wetIntent)
+                        * (0.70 + 0.45 * inputActivity)
+                )
+            )
             let voiceOut = src * env * mode4Voices[i].gain * wetScale
 
             GridSpatializer.fillNormalizedPointGains(
@@ -5866,7 +6636,7 @@ nonisolated private final class MasterRenderState {
                 into: &targetGains
             )
             applyGains(voiceOut, gains: targetGains, &ch0, &ch1, &ch2, &ch3, &ch4, &ch5)
-            reverbSend += voiceOut * 0.10
+            reverbSend += voiceOut * 0.06
 
             if mode4Voices[i].reverse {
                 mode4Voices[i].playhead -= mode4Voices[i].playbackStep
@@ -7061,8 +7831,10 @@ nonisolated private final class MasterRenderState {
         let delta = abs(input - mode7State.prevInput)
         mode7State.prevInput = input
         mode7State.inputEnv += 0.0038 * (abs(input) - mode7State.inputEnv)
-        let onsetThreshold = 0.006 + (0.025 * (1.0 - Float(controlCurrent.sharpness)))
-        let loudEnough = mode7State.inputEnv > 0.010
+        let sharp = max(0, min(1, Float(controlCurrent.sharpness)))
+        let inputActivity = max(0, min(1, (mode7State.inputEnv * 16.0) + (delta * 18.0)))
+        let onsetThreshold = 0.004 + (0.020 * (1.0 - sharp))
+        let loudEnough = mode7State.inputEnv > 0.006
         let minOnsetGap = Int64(sampleRate * 0.055)
         if loudEnough,
            delta > onsetThreshold,
@@ -7119,14 +7891,34 @@ nonisolated private final class MasterRenderState {
             wet += mode7State.mapped[i] * mode7State.scheduler.liveBandGains[i]
         }
 
-        let targetNorm = min(1.85, max(0.40, 0.26 / max(0.02, abs(wet))))
-        mode7State.loudnessNorm += 0.0018 * (targetNorm - mode7State.loudnessNorm)
+        // Emphasize moving spectral edges so the redistribution reads in a real room.
+        var spectralEdge: Float = 0
+        var lowMidBody: Float = 0
+        for i in 0..<mode7State.mapped.count {
+            let band = mode7State.mapped[i] * mode7State.scheduler.liveBandGains[i]
+            let left = i > 0 ? mode7State.mapped[i - 1] * mode7State.scheduler.liveBandGains[i - 1] : band
+            let right = i + 1 < mode7State.mapped.count ? mode7State.mapped[i + 1] * mode7State.scheduler.liveBandGains[i + 1] : band
+            spectralEdge += band - 0.5 * (left + right)
+            if i >= 1 && i <= 4 {
+                let weight: Float = i <= 2 ? 1.12 : 1.0
+                lowMidBody += band * weight
+            }
+        }
+        let edgeGain = (0.22 + 1.10 * sharp) * (0.35 + 0.95 * inputActivity)
+        wet += spectralEdge * edgeGain
+        wet += lowMidBody * (0.10 + 0.16 * (1.0 - sharp))
+
+        let targetNorm = min(2.40, max(0.70, 0.40 / max(0.03, abs(wet))))
+        mode7State.loudnessNorm += 0.0035 * (targetNorm - mode7State.loudnessNorm)
         wet *= mode7State.loudnessNorm
 
-        let cutoff = 1_500.0 + (6_500.0 * (1.0 - Float(controlCurrent.sharpness) * 0.70))
+        let cutoff = 1_400.0 + (8_600.0 * (0.20 + 0.80 * sharp))
         let alpha = onePoleAlpha(cutoffHz: cutoff, sampleRate: sampleRate)
         mode7State.hfClampY += alpha * (wet - mode7State.hfClampY)
-        return tanhf(mode7State.hfClampY * 1.08)
+        let clampMix = 0.30 + (0.40 * (1.0 - sharp))
+        let postClamp = (wet * (1.0 - clampMix)) + (mode7State.hfClampY * clampMix)
+        let drive = 1.24 + (0.62 * inputActivity) + (0.32 * sharp)
+        return tanhf(postClamp * drive)
     }
 
     private func wrappedSample(_ index: Int) -> Float {
@@ -7329,19 +8121,18 @@ nonisolated private final class MasterRenderState {
         let bits = max(8, min(24, Int((8.0 + (bitDepthControl * 8.0)).rounded())))
         let bitDepthNorm = (Float(bits) - 8.0) / 16.0
         let severity = min(1.0, max(0.0, (0.58 * (1.0 - bitDepthNorm)) + (0.42 * downNorm)))
-        // Make mode 3 input-first: pre-drive the mic signal, then crush.
-        let preGain = 1.8 + (8.0 * drive)
+        // Gallery-safe bitcrush: keep the bloom, drop the RAT-pedal gain stage.
+        let preGain = 0.85 + (2.2 * drive)
         let driven = tanhf(input * preGain)
         let texture = processMode3Inharmonic(input: driven)
         let textureMix = 0.02 + (0.10 * resonance)
         let source = (driven * (1.0 - textureMix)) + (texture * textureMix)
         let crushed = processMode3BitCore(input: source)
         let crusherDelta = crushed - source
-        let emphasized = crushed + (crusherDelta * (0.30 + (0.95 * severity)))
+        let emphasized = crushed + (crusherDelta * (0.10 + (0.25 * severity)))
         let shaped = processMode3SafetyShaping(input: emphasized)
-        // Keep final saturation as safety glue, not the main timbre source.
-        let glue = 0.90 + (0.14 * drive)
-        return tanhf(shaped * glue) * 0.95
+        let glue = 0.85 + (0.10 * drive)
+        return tanhf(shaped * glue) * 0.35
     }
 
     private func processMode3Inharmonic(input: Float) -> Float {

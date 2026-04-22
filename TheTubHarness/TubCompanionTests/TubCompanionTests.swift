@@ -581,7 +581,11 @@ struct TubCompanionTests {
         #expect(appState.steerHackSession.roundIndex == 2)
         appState.recordSteerHackInput(didMatch: true, observedToken: "CC")
 
-        #expect(appState.steerAccessState == .grantedAnimating)
+        if case .grantedAnimating = appState.steerAccessState {
+            #expect(true)
+        } else {
+            Issue.record("Expected granted animating state after successful steer challenge.")
+        }
         await wait(1.5)
         #expect(appState.steerAccessState == .unlocked)
     }
@@ -695,7 +699,11 @@ struct TubCompanionTests {
         #expect(viewModel.roundDisplay == 4)
         viewModel.submitMatchForTesting(true)
 
-        #expect(viewModel.state == .grantedAnimating)
+        if case .grantedAnimating = viewModel.state {
+            #expect(true)
+        } else {
+            Issue.record("Expected granted animating state after successful settings unlock challenge.")
+        }
         await wait(1.2)
         #expect(viewModel.state == .unlocked)
     }
@@ -936,6 +944,52 @@ struct TubCompanionTests {
         #expect(published)
         #expect(harnessClient.lastOperatorVectorState?.sessionId == "session-peer")
         #expect(abs((harnessClient.lastOperatorVectorState?.param ?? 0) - 0.33) < 0.001)
+    }
+
+    @Test
+    func harnessClientHandshakeMetadataPublishesRelayCodeAndPathHints() {
+        let harnessClient = HarnessClient()
+        let expiry = Date().addingTimeInterval(600)
+        let payload = HarnessClient.HandshakeResponse(
+            status: "ok",
+            service: "tub-harness-audience",
+            protocolVersion: "ndjson-envelope-v1",
+            audiencePort: 9911,
+            hostHints: ["10.10.10.5"],
+            transports: ["direct_tcp", "relay_ws"],
+            relayJoinCode: "AB12CD",
+            relayWsURL: "wss://relay.example.com/v1/link/ws",
+            relaySessionExpiresAt: ISO8601DateFormatter().string(from: expiry),
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            message: nil
+        )
+
+        harnessClient.ingestHandshakeForTesting(payload)
+        #expect(harnessClient.relayJoinCode == "AB12CD")
+        #expect(harnessClient.transportStatus.contains("RELAY READY"))
+        #expect(harnessClient.networkFingerprint.count > 0)
+    }
+
+    @Test
+    func harnessClientHandshakeMetadataHonorsManualRelayCodeOverride() {
+        let harnessClient = HarnessClient()
+        harnessClient.setRelayJoinCodeOverride("ZX90QP")
+        let payload = HarnessClient.HandshakeResponse(
+            status: "ok",
+            service: "tub-harness-audience",
+            protocolVersion: "ndjson-envelope-v1",
+            audiencePort: 9911,
+            hostHints: ["10.10.10.6"],
+            transports: ["direct_tcp", "relay_ws"],
+            relayJoinCode: "AB12CD",
+            relayWsURL: "wss://relay.example.com/v1/link/ws",
+            relaySessionExpiresAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(400)),
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            message: nil
+        )
+
+        harnessClient.ingestHandshakeForTesting(payload)
+        #expect(harnessClient.relayJoinCode == "ZX90QP")
     }
 
     @Test

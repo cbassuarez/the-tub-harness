@@ -4,23 +4,72 @@ import Combine
 import AppKit
 #endif
 
+private enum TubPathDefaults {
+    private static let defaultTubMLRootName = "the-tub-ml"
+
+    static var tubMLRoot: URL {
+        if let envRoot = ProcessInfo.processInfo.environment["TUB_ML_ROOT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !envRoot.isEmpty {
+            return URL(fileURLWithPath: envRoot, isDirectory: true)
+        }
+
+        let fm = FileManager.default
+        let cwd = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+        let home = fm.homeDirectoryForCurrentUser
+        let candidates: [URL] = [
+            cwd.appendingPathComponent(defaultTubMLRootName, isDirectory: true),
+            cwd.deletingLastPathComponent().appendingPathComponent(defaultTubMLRootName, isDirectory: true),
+            home.appendingPathComponent(defaultTubMLRootName, isDirectory: true),
+        ]
+        for candidate in candidates {
+            var isDir = ObjCBool(false)
+            if fm.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue {
+                return candidate
+            }
+        }
+        return home.appendingPathComponent(defaultTubMLRootName, isDirectory: true)
+    }
+
+    static var evalDatasetPath: String {
+        tubMLRoot.appendingPathComponent("datasets/phase1/bootstrap_golden.jsonl").path
+    }
+
+    static var evalBaselinePath: String {
+        tubMLRoot.appendingPathComponent("models/policy_v1.pt").path
+    }
+
+    static var evalCandidatePath: String {
+        tubMLRoot.appendingPathComponent("models/policy_v1_mode4.pt").path
+    }
+}
+
 final class ModelServerProcess: ObservableObject {
     @Published private(set) var isRunning: Bool = false
     @Published private(set) var statusMessage: String = "stopped"
 
     private var process: Process?
-    private let tubMlRoot = "/Users/seb/the-tub-ml"
+    private let tubMlRoot: String = TubPathDefaults.tubMLRoot.path
     private let configRelPath = "configs/stub_policy_v1.yaml"
 
     func start() {
         guard process == nil else { return }
+        var isDir = ObjCBool(false)
+        if !FileManager.default.fileExists(atPath: tubMlRoot, isDirectory: &isDir) || !isDir.boolValue {
+            statusMessage = "ml root missing: \(tubMlRoot)"
+            return
+        }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
         let venvBin = "\(tubMlRoot)/.venv/bin/tub-ml"
-        let fallback = "source \(tubMlRoot)/.venv/bin/activate && tub-ml"
+        let activatePath = "\(tubMlRoot)/.venv/bin/activate"
+        let escapedRoot = Self.shellEscape(tubMlRoot)
+        let escapedVenvBin = Self.shellEscape(venvBin)
+        let escapedActivate = Self.shellEscape(activatePath)
+        let escapedConfigPath = Self.shellEscape(configRelPath)
         let cmd = [
-            "cd \(tubMlRoot)",
-            "if [ -x \(venvBin) ]; then \(venvBin) serve --config \(configRelPath); else \(fallback) serve --config \(configRelPath); fi"
+            "cd \(escapedRoot)",
+            "if [ -x \(escapedVenvBin) ]; then \(escapedVenvBin) serve --config \(escapedConfigPath); else source \(escapedActivate) && tub-ml serve --config \(escapedConfigPath); fi"
         ].joined(separator: " && ")
         proc.arguments = ["-lc", cmd]
         proc.currentDirectoryURL = URL(fileURLWithPath: tubMlRoot)
@@ -54,6 +103,12 @@ final class ModelServerProcess: ObservableObject {
 
     deinit {
         process?.interrupt()
+    }
+
+    private static func shellEscape(_ raw: String) -> String {
+        if raw.isEmpty { return "''" }
+        let escaped = raw.replacingOccurrences(of: "'", with: "'\"'\"'")
+        return "'\(escaped)'"
     }
 }
 
@@ -440,6 +495,17 @@ private enum JoltHoldSource: Hashable {
     case keyboard
     case softLink
     case hardware
+}
+
+private extension JoltHoldSource {
+    var isPianoTunerEligible: Bool {
+        switch self {
+        case .mouse, .keyboard, .hardware:
+            return true
+        case .softLink:
+            return false
+        }
+    }
 }
 
 private enum TimelineMetricToggle: String, Hashable {
@@ -1757,6 +1823,9 @@ struct ModeChooserView: View {
 
 struct ContentView: View {
     let runMode: HarnessRunMode
+    private let autoStartRun: Bool
+    private let launchInputDeviceHint: String?
+    private let launchOutputDeviceHint: String?
     @EnvironmentObject private var audienceServer: AudienceSessionServer
 
     @StateObject private var modelServer = ModelServerProcess()
@@ -1774,6 +1843,7 @@ struct ContentView: View {
     @StateObject private var speechTranscriber = SpeechTranscriber()
     @StateObject private var hardwareInput = HardwareInputController()
     @StateObject private var kinectProvider = KinectUDPProvider()
+    @StateObject private var sirenSong = SirenSongCoordinator()
 
     private let modeEngine = ModeEngine()
 
@@ -1787,9 +1857,9 @@ struct ContentView: View {
     @State private var replayStatus: String?
     @State private var isReplayRunning: Bool = false
     @State private var replayCancelToken: ReplayCancellationToken?
-    @State private var evalDatasetPath: String = "/Users/seb/the-tub-ml/datasets/phase1/bootstrap_golden.jsonl"
-    @State private var evalBaselinePath: String = "/Users/seb/the-tub-ml/models/policy_v1.pt"
-    @State private var evalCandidatePath: String = "/Users/seb/the-tub-ml/models/policy_v1_mode4.pt"
+    @State private var evalDatasetPath: String = TubPathDefaults.evalDatasetPath
+    @State private var evalBaselinePath: String = TubPathDefaults.evalBaselinePath
+    @State private var evalCandidatePath: String = TubPathDefaults.evalCandidatePath
     @State private var evalModesCSV: String = ""
     @State private var evalStatus: String?
     @State private var evalReportText: String = ""
@@ -1799,10 +1869,29 @@ struct ContentView: View {
     @State private var showOutputRoutingModal: Bool = false
     @State private var showManualReplayEntry: Bool = false
     @State private var joltHoldSources: Set<JoltHoldSource> = []
+    @State private var pianoTunerCoordinator = PianoTunerHoldCoordinator()
+    @State private var isPianoTunerActive: Bool = false
     @State private var isTransportTransitioning: Bool = false
+    @State private var didScheduleLaunchBootstrap: Bool = false
+    @State private var launchBootstrapAttemptsRemaining: Int = 0
+    private let sirenHeartbeat = Timer.publish(every: 0.20, on: .main, in: .common).autoconnect()
+    private let pianoTunerDuckGain: Double = 0.02
+    private let pianoTunerDuckDownSeconds: Double = 0.8
+    private let pianoTunerDuckUpSeconds: Double = 0.25
 
-    init(runMode: HarnessRunMode = .training, defaultRecordInputAudio: Bool = false) {
+    init(
+        runMode: HarnessRunMode = .training,
+        defaultRecordInputAudio: Bool = false,
+        autoStartRun: Bool = false,
+        launchInputDeviceHint: String? = nil,
+        launchOutputDeviceHint: String? = nil
+    ) {
         self.runMode = runMode
+        self.autoStartRun = autoStartRun
+        self.launchInputDeviceHint = launchInputDeviceHint?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.launchOutputDeviceHint = launchOutputDeviceHint?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         _recordInputAudio = State(initialValue: defaultRecordInputAudio)
     }
 
@@ -1881,6 +1970,28 @@ struct ContentView: View {
                 audio?.ingestLiveInputBuffer(buffer, time: time)
             }
             speechTranscriber.requestAuthorization()
+            sirenSong.onAudioCommand = { [weak audio] command in
+                guard let audio else { return }
+                switch command {
+                case let .setSirenActive(active, fadeSeconds):
+                    audio.setSirenSongActive(active, fadeSeconds: fadeSeconds)
+                case let .setExternalInputGain(target, rampSeconds):
+                    audio.setExternalLiveInputGain(target: target, rampSeconds: rampSeconds)
+                }
+            }
+            sirenSong.onEvent = { [weak controlRoom] message in
+                DispatchQueue.main.async {
+                    let lower = message.lowercased()
+                    let severity: ControlRoomSeverity = lower.contains("bypass") ? .warning : .info
+                    controlRoom?.appendEvent(message, severity: severity)
+                }
+            }
+            let sirenTracks = audio.loadSirenSongPlaylistFromBundle()
+            if sirenTracks > 0 {
+                controlRoom.appendEvent("Siren playlist ready (\(sirenTracks) tracks).", severity: .info)
+            } else {
+                controlRoom.appendEvent("Siren disabled: no bundle tracks in Assets/SirenSong.", severity: .warning)
+            }
 
             // Hardware panel (Teensy USB serial)
             hardwareInput.onModeChange = { [weak client] newMode in
@@ -1888,7 +1999,11 @@ struct ContentView: View {
                 DispatchQueue.main.async { mode = newMode }
             }
             hardwareInput.onJoltPressed = { [weak client] in
-                client?.pulseJolt()
+                DispatchQueue.main.async {
+                    guard !isReplayRunning else { return }
+                    guard !isPianoTunerActive else { return }
+                    client?.pulseJolt()
+                }
             }
             hardwareInput.onJoltHeldChange = { newHeld in
                 DispatchQueue.main.async {
@@ -1896,6 +2011,8 @@ struct ContentView: View {
                 }
             }
             hardwareInput.start()
+            hardwareInput.refreshAvailableDevices()
+            syncSirenSongState()
 
             // Kinect body tracking (UDP from Python bridge)
             kinectProvider.start()
@@ -1918,10 +2035,19 @@ struct ContentView: View {
             }
             softLink.videoStore = videoStage
             softLink.audienceServer = audienceServer
+            videoStage.setPianoTunerActive(false)
             print("[SoftLink-CV] ★ direct refs SET on softLink")
-            if ProcessInfo.processInfo.environment["TUB_PRELOAD_JOLT_CLIPS"] == "1" {
-                let clipDirectory = URL(fileURLWithPath: "/Users/seb/Desktop/video-for-modes4-7")
-                videoClipPool.loadInBackground(from: clipDirectory)
+            if ProcessInfo.processInfo.environment["TUB_DISABLE_JOLT_VIDEO_CLIPS"] != "1" {
+                let clipResolution = JoltVideoClipPool.resolveStartupClipDirectory()
+                if let clipDirectory = clipResolution.url {
+                    videoClipPool.loadInBackground(from: clipDirectory)
+                    print("[JoltDebug] loading clip pool from \(clipDirectory.path) [\(clipResolution.source)]")
+                } else {
+                    print("[JoltDebug] no bundled jolt clips found (source=\(clipResolution.source)); webcam-only fallback active")
+                    controlRoom.appendEvent("Jolt clips not found in bundle; webcam fallback active.", severity: .warning)
+                }
+            } else {
+                print("[JoltDebug] clip pool loading disabled by TUB_DISABLE_JOLT_VIDEO_CLIPS=1")
             }
             analyzer.refreshInputDevices()
             audio.refreshInputRouting()
@@ -1930,6 +2056,7 @@ struct ContentView: View {
             syncLiveInputCaptureInfo()
             syncSessionInputRouteMetadata()
             syncSessionOutputRouteMetadata()
+            scheduleLaunchBootstrapIfNeeded()
 
             audio.onInputRecordingAlignment = { alignment in
                 client.noteSessionAudioAlignment(hostTime: alignment.hostTime, sampleIndex: alignment.sampleIndex)
@@ -1951,6 +2078,9 @@ struct ContentView: View {
         .onChange(of: analyzer.inputRouteProfile) { _, _ in
             syncLiveInputCaptureInfo()
             syncSessionInputRouteMetadata()
+        }
+        .onReceive(sirenHeartbeat) { now in
+            syncSirenSongState(now: now)
         }
         .onReceive(softLink.$globalState) { newState in
             switch newState {
@@ -1974,6 +2104,19 @@ struct ContentView: View {
             mlMonitor.setMode(newMode)
             videoStage.setMode(newMode)
         }
+        .onChange(of: hardwareInput.isConnected) { _, _ in
+            syncSirenSongState()
+        }
+        .onChange(of: hardwareInput.pedestals) { _, _ in
+            syncSirenSongState()
+        }
+        .onChange(of: client.isRunning) { _, _ in
+            reconcileJoltHoldState()
+            syncSirenSongState()
+        }
+        .onChange(of: audio.sirenPlaylistReady) { _, _ in
+            syncSirenSongState()
+        }
         .onReceive(audienceServer.$lastInfluenceTelemetry.receive(on: RunLoop.main)) { telemetry in
             videoStage.ingestAudienceInfluenceTelemetry(telemetry)
         }
@@ -1983,10 +2126,19 @@ struct ContentView: View {
         .onChange(of: isReplayRunning) { _, running in
             if running {
                 releaseAllJoltHolds()
+            } else {
+                reconcileJoltHoldState()
             }
+            syncSirenSongState()
         }
         .onDisappear {
             releaseAllJoltHolds()
+            resetPianoTunerMode(restoreAudio: true)
+            audio.setSirenSongActive(false, fadeSeconds: 0.12)
+            audio.setExternalLiveInputGain(target: 1.0, rampSeconds: 0.05)
+            audio.setSirenStatus(.bypass)
+            sirenSong.onAudioCommand = nil
+            sirenSong.onEvent = nil
             hardwareInput.stop()
             kinectProvider.stop()
             modelServer.stop()
@@ -2089,6 +2241,11 @@ struct ContentView: View {
         )
         .fixedSize(horizontal: true, vertical: true)
         ShellStatusPill(
+            title: "Siren",
+            value: audio.sirenStatus.rawValue,
+            tone: sirenStatusTone
+        )
+        ShellStatusPill(
             title: "Panel",
             value: hardwareInput.isConnected ? "Connected" : "---",
             tone: hardwareInput.isConnected ? .positive : .idle
@@ -2186,6 +2343,19 @@ struct ContentView: View {
         ShellMetaTile(label: "Bundle", value: bundleDisplayName)
         ShellMetaTile(label: "Input", value: analyzer.activeInputName)
         ShellMetaTile(label: "Output", value: outputRouteSummary)
+    }
+
+    private var sirenStatusTone: ShellStatusTone {
+        switch audio.sirenStatus {
+        case .bypass:
+            return .idle
+        case .armed:
+            return .positive
+        case .attract:
+            return .active
+        case .enterFade:
+            return .warning
+        }
     }
 
     private var leftRail: some View {
@@ -2455,12 +2625,12 @@ struct ContentView: View {
                             role: .secondaryAction,
                             accent: ShellChromePalette.warmAmber,
                             size: .compact,
-                            isActive: client.isJoltHeld,
+                            isActive: isRawJoltHeld,
                             onPressChanged: { isPressed in
                                 setJoltHold(.mouse, active: isPressed && !isReplayRunning)
                             }
                         ) {
-                            Label(client.isJoltHeld ? "Jolt Held" : "Hold Jolt", systemImage: client.isJoltHeld ? "bolt.fill" : "bolt")
+                            Label(isRawJoltHeld ? "Jolt Held" : "Hold Jolt", systemImage: isRawJoltHeld ? "bolt.fill" : "bolt")
                         }
                             .disabled(isReplayRunning)
                             .overlay(alignment: .topTrailing) {
@@ -2580,6 +2750,8 @@ struct ContentView: View {
                 .shellActionButton(role: .utilityAction, size: .compact)
             }
 
+            hardwareBridgeFallbackCard
+
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -2630,6 +2802,104 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color.black.opacity(0.12), lineWidth: 1)
         }
+    }
+
+    private var hardwareBridgeFallbackCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Panel Bridge (Teensy)")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                    Text("Fallback serial picker for install day. Auto is default; lock to a specific port only when needed.")
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(ShellChromePalette.inkSoft)
+                }
+                Spacer()
+                Text(hardwareInput.isConnected ? "Connected" : "Waiting")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .foregroundStyle(Color.black.opacity(0.88))
+                    .background((hardwareInput.isConnected ? Color.green.opacity(0.86) : Color.yellow.opacity(0.9)), in: Capsule())
+            }
+
+            HStack(spacing: 8) {
+                Menu {
+                    Button {
+                        hardwareInput.setPreferredDevicePath(nil)
+                        hardwareInput.reconnectNow()
+                    } label: {
+                        if hardwareInput.preferredDevicePath == nil {
+                            Label("Auto (recommended)", systemImage: "checkmark")
+                        } else {
+                            Text("Auto (recommended)")
+                        }
+                    }
+                    if hardwareInput.availableDevicePaths.isEmpty {
+                        Text("No serial devices found")
+                    } else {
+                        ForEach(hardwareInput.availableDevicePaths, id: \.self) { path in
+                            Button {
+                                hardwareInput.setPreferredDevicePath(path)
+                                hardwareInput.reconnectNow()
+                            } label: {
+                                if hardwareInput.preferredDevicePath == path {
+                                    Label(path, systemImage: "checkmark")
+                                } else {
+                                    Text(path)
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Panel Serial Device")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(ShellChromePalette.inkSoft)
+                            Text(hardwarePreferredPathLabel)
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(ShellChromePalette.ink)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .foregroundStyle(ShellChromePalette.inkSoft)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .shellActionButton(role: .utilityAction, size: .compact)
+
+                Button("Rescan Panel") {
+                    hardwareInput.refreshAvailableDevices()
+                }
+                .shellActionButton(role: .utilityAction, size: .compact)
+
+                Button("Reconnect Panel") {
+                    hardwareInput.reconnectNow()
+                }
+                .shellActionButton(role: .secondaryAction, accent: ShellChromePalette.accentBlue, size: .compact)
+            }
+
+            Text("Active port: \(hardwareInput.devicePath ?? "---")")
+                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .foregroundStyle(Color.black.opacity(0.72))
+                .lineLimit(1)
+        }
+        .padding(10)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.black.opacity(0.14), lineWidth: 1)
+        }
+    }
+
+    private var hardwarePreferredPathLabel: String {
+        if let preferred = hardwareInput.preferredDevicePath,
+           !preferred.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return preferred
+        }
+        return "Auto (recommended)"
     }
 
     private var liveOpsOutputCard: some View {
@@ -3492,7 +3762,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Video Output")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
-                    Text("Windowed preview, fullscreen presentation, and the live brain-view field.")
+                    Text("Two production output windows for System Picker / HDMI routing.")
                         .font(.system(size: 11, weight: .regular, design: .rounded))
                         .foregroundStyle(ShellChromePalette.inkSoft)
                 }
@@ -3501,31 +3771,63 @@ struct ContentView: View {
             }
 
             HStack(spacing: 8) {
-                videoDisplayMenu
-                Button(videoOutput.isPreviewEnabled ? "Hide Preview" : "Show Preview") {
-                    videoOutput.setPreviewEnabled(!videoOutput.isPreviewEnabled)
+                Button(videoOutput.isPreview1Enabled ? "Hide Preview 1" : "Show Preview 1") {
+                    videoOutput.setPreview1Enabled(!videoOutput.isPreview1Enabled)
                 }
                 .shellActionButton(
-                    role: videoOutput.isPreviewEnabled ? .destructiveAction : .secondaryAction,
-                    accent: videoOutput.isPreviewEnabled ? nil : ShellChromePalette.accentBlue,
+                    role: videoOutput.isPreview1Enabled ? .destructiveAction : .secondaryAction,
+                    accent: videoOutput.isPreview1Enabled ? nil : ShellChromePalette.accentBlue,
                     size: .compact
                 )
 
-                Button("Reveal Preview") {
-                    videoOutput.revealPreviewWindow()
+                Button("Reveal 1") {
+                    videoOutput.revealPreview1Window()
                 }
                 .shellActionButton(role: .utilityAction, size: .compact)
-                .disabled(videoOutput.displays.isEmpty || !videoOutput.isPreviewEnabled)
+                .disabled(!videoOutput.isPreview1Enabled)
 
-                Button(videoOutput.isPresenting ? "Exit Presentation" : "Present Fullscreen") {
-                    videoOutput.setPresentationEnabled(!videoOutput.isPresenting)
+                Button(videoOutput.isPreview2Enabled ? "Hide Preview 2" : "Show Preview 2") {
+                    videoOutput.setPreview2Enabled(!videoOutput.isPreview2Enabled)
                 }
                 .shellActionButton(
-                    role: videoOutput.isPresenting ? .destructiveAction : .secondaryAction,
-                    accent: videoOutput.isPresenting ? nil : ShellChromePalette.startGreen,
+                    role: videoOutput.isPreview2Enabled ? .destructiveAction : .secondaryAction,
+                    accent: videoOutput.isPreview2Enabled ? nil : ShellChromePalette.startGreen,
                     size: .compact
                 )
-                .disabled(videoOutput.displays.isEmpty)
+
+                Button("Reveal 2") {
+                    videoOutput.revealPreview2Window()
+                }
+                .shellActionButton(role: .utilityAction, size: .compact)
+                .disabled(!videoOutput.isPreview2Enabled)
+            }
+
+            HStack(spacing: 8) {
+                Button("Swap L ↔ R") {
+                    videoOutput.toggleSwapLR()
+                }
+                .shellActionButton(
+                    role: videoOutput.swapLR ? .secondaryAction : .utilityAction,
+                    accent: videoOutput.swapLR ? ShellChromePalette.accentBlue : nil,
+                    size: .compact
+                )
+                .help("Swap which output window renders the LEFT vs. RIGHT stage half.")
+
+                Toggle("Flip Output 1", isOn: Binding(
+                    get: { videoOutput.flipPrimary },
+                    set: { videoOutput.setFlipPrimary($0) }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+
+                Toggle("Flip Output 2", isOn: Binding(
+                    get: { videoOutput.flipSecondary },
+                    set: { videoOutput.setFlipSecondary($0) }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.system(size: 11, weight: .medium, design: .rounded))
             }
 
             if let warning = videoOutput.warningText, !warning.isEmpty {
@@ -3536,7 +3838,7 @@ struct ContentView: View {
                     .padding(.vertical, 6)
                     .background(ShellChromePalette.warmAmberSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else {
-                Text("Preview and presentation target: \(videoOutput.selectedDisplayTitle)")
+                Text(videoOutputTargetSummary)
                     .font(.system(size: 11, weight: .regular, design: .rounded))
                     .foregroundStyle(ShellChromePalette.inkSoft)
             }
@@ -3549,52 +3851,17 @@ struct ContentView: View {
         }
     }
 
-    private var videoDisplayMenu: some View {
-        Group {
-            if videoOutput.displays.isEmpty {
-                Text("No display available")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.orange)
-                    .padding(.horizontal, 12)
-                    .frame(minHeight: 34, alignment: .leading)
-                    .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color.orange.opacity(0.35), lineWidth: 1)
-                    }
-            } else {
-                Menu {
-                    ForEach(videoOutput.displays) { display in
-                        Button {
-                            videoOutput.selectDisplay(display.id)
-                        } label: {
-                            if display.id == videoOutput.selectedDisplayID {
-                                Label(display.title, systemImage: "checkmark")
-                            } else {
-                                Text(display.title)
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Video Display")
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundStyle(ShellChromePalette.inkSoft)
-                            Text(videoOutput.selectedDisplayTitle)
-                                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                .foregroundStyle(ShellChromePalette.ink)
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: 8)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .foregroundStyle(ShellChromePalette.inkSoft)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .shellActionButton(role: .utilityAction)
-            }
+    private var videoOutputTargetSummary: String {
+        let left = videoOutput.swapLR ? "Output 2" : "Output 1"
+        let right = videoOutput.swapLR ? "Output 1" : "Output 2"
+
+        if videoOutput.isPreview1Enabled || videoOutput.isPreview2Enabled {
+            var active: [String] = []
+            if videoOutput.isPreview1Enabled { active.append("Output 1") }
+            if videoOutput.isPreview2Enabled { active.append("Output 2") }
+            return "Active: \(active.joined(separator: " + ")) • LEFT feed: \(left) • RIGHT feed: \(right)"
         }
+        return "No outputs visible. Open Preview 1 and/or Preview 2."
     }
 
     private var videoOutputStatusChip: some View {
@@ -4061,6 +4328,7 @@ struct ContentView: View {
                 startSelectedProfile()
             }
         case "jolt":
+            guard !isPianoTunerActive else { break }
             client.pulseJolt()
             softLink.handleJoltPulse()
         case "softlink":
@@ -4089,19 +4357,83 @@ struct ContentView: View {
         } else {
             joltHoldSources.remove(source)
         }
-        let isHeld = !joltHoldSources.isEmpty
-        client.setJoltHeld(isHeld)
-        softLink.handleJoltHoldChanged(isHeld: isHeld)
-        print("[SoftLink-CV] setJoltHold source=\(source) active=\(active) isHeld=\(isHeld)")
+        reconcileJoltHoldState()
+        print("[SoftLink-CV] setJoltHold source=\(source) active=\(active) rawHeld=\(isRawJoltHeld) effectiveHeld=\(client.isJoltHeld) pianoTuner=\(isPianoTunerActive)")
     }
 
     private func releaseAllJoltHolds() {
-        guard !joltHoldSources.isEmpty || client.isJoltHeld else {
-            client.setJoltHeld(false)
-            return
-        }
+        guard !joltHoldSources.isEmpty || client.isJoltHeld || isPianoTunerActive else { return }
         joltHoldSources.removeAll()
-        client.setJoltHeld(false)
+        reconcileJoltHoldState()
+    }
+
+    private var isRawJoltHeld: Bool {
+        !joltHoldSources.isEmpty
+    }
+
+    private var eligiblePianoTunerHoldActive: Bool {
+        joltHoldSources.contains(where: \.isPianoTunerEligible)
+    }
+
+    private var inPianoTunerRunScope: Bool {
+        client.isRunning && !isReplayRunning
+    }
+
+    private func reconcileJoltHoldState(now: Date = Date()) {
+        softLink.handleJoltHoldChanged(isHeld: isRawJoltHeld)
+
+        let transition = pianoTunerCoordinator.update(
+            eligibleHoldActive: eligiblePianoTunerHoldActive,
+            inRunScope: inPianoTunerRunScope,
+            now: now
+        )
+        applyPianoTunerTransition(transition)
+
+        let effectiveHeld = isRawJoltHeld && !transition.shouldSuppressJolt
+        if client.isJoltHeld != effectiveHeld {
+            client.setJoltHeld(effectiveHeld)
+        }
+    }
+
+    private func applyPianoTunerTransition(_ transition: PianoTunerHoldTransition) {
+        let active = transition.state.isActive
+        if transition.didActivate {
+            audio.setPianoTunerDuckActive(
+                true,
+                duckGain: pianoTunerDuckGain,
+                fadeDownSeconds: pianoTunerDuckDownSeconds,
+                fadeUpSeconds: pianoTunerDuckUpSeconds
+            )
+            controlRoom.appendEvent("Piano tuner mode active: audio ducked to 2%.", severity: .warning)
+        } else if transition.didDeactivate {
+            audio.setPianoTunerDuckActive(
+                false,
+                duckGain: pianoTunerDuckGain,
+                fadeDownSeconds: pianoTunerDuckDownSeconds,
+                fadeUpSeconds: pianoTunerDuckUpSeconds
+            )
+            controlRoom.appendEvent("Piano tuner mode released: audio restoring.", severity: .info)
+        }
+        if isPianoTunerActive != active {
+            isPianoTunerActive = active
+            videoStage.setPianoTunerActive(active)
+        }
+    }
+
+    private func resetPianoTunerMode(restoreAudio: Bool) {
+        let transition = pianoTunerCoordinator.reset()
+        if transition.didDeactivate || restoreAudio {
+            audio.setPianoTunerDuckActive(
+                false,
+                duckGain: pianoTunerDuckGain,
+                fadeDownSeconds: pianoTunerDuckDownSeconds,
+                fadeUpSeconds: pianoTunerDuckUpSeconds
+            )
+        }
+        if isPianoTunerActive {
+            isPianoTunerActive = false
+        }
+        videoStage.setPianoTunerActive(false)
     }
 
     @ViewBuilder
@@ -4272,6 +4604,18 @@ struct ContentView: View {
         )
     }
 
+    private func syncSirenSongState(now: Date = Date()) {
+        sirenSong.updateInputs(
+            isBridgeConnected: hardwareInput.isConnected,
+            pedestals: hardwareInput.pedestals,
+            isLiveRun: client.isRunning,
+            isReplayRunning: isReplayRunning,
+            playlistReady: audio.sirenPlaylistReady,
+            now: now
+        )
+        audio.setSirenStatus(sirenSong.status)
+    }
+
     private func parseEvalModesCSV(_ raw: String) -> [Int] {
         let pieces = raw
             .split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\t" || $0 == "\n" })
@@ -4319,8 +4663,9 @@ struct ContentView: View {
             }
             let tubMlCommand = ".venv/bin/tub-ml \(evalArgs.joined(separator: " "))"
             let fallbackCommand = "source .venv/bin/activate && tub-ml \(evalArgs.joined(separator: " "))"
+            let tubMlRoot = TubPathDefaults.tubMLRoot.path
             let command = [
-                "cd /Users/seb/the-tub-ml",
+                "cd \(self.shellEscape(tubMlRoot))",
                 "if [ -x .venv/bin/tub-ml ]; then \(tubMlCommand); else \(fallbackCommand); fi"
             ]
             process.arguments = ["-lc", command.joined(separator: " && ")]
@@ -4368,6 +4713,10 @@ struct ContentView: View {
         }
         replayStatus = nil
         isTransportTransitioning = true
+
+        if runMode == .performance {
+            audio.applyDeterministicPerformanceOutputProfile()
+        }
 
         client.featuresProvider = { [weak analyzer] in
             analyzer?.snapshotFrame() ?? FeaturePacketSnapshot(
@@ -4466,6 +4815,77 @@ struct ContentView: View {
                 isTransportTransitioning = false
             }
         }
+    }
+
+    private func scheduleLaunchBootstrapIfNeeded() {
+        guard !didScheduleLaunchBootstrap else { return }
+        let needsDeviceBootstrap = (launchInputDeviceHint?.isEmpty == false) || (launchOutputDeviceHint?.isEmpty == false)
+        guard autoStartRun || needsDeviceBootstrap else { return }
+
+        didScheduleLaunchBootstrap = true
+        launchBootstrapAttemptsRemaining = 10
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            applyLaunchBootstrapAttempt()
+        }
+    }
+
+    private func applyLaunchBootstrapAttempt() {
+        let inputSatisfied = attemptForcedInputSelection()
+        let outputSatisfied = attemptForcedOutputSelection()
+
+        let needsInput = (launchInputDeviceHint?.isEmpty == false) && !inputSatisfied
+        let needsOutput = (launchOutputDeviceHint?.isEmpty == false) && !outputSatisfied
+
+        if (needsInput || needsOutput) && launchBootstrapAttemptsRemaining > 0 {
+            launchBootstrapAttemptsRemaining -= 1
+            analyzer.refreshInputDevices()
+            audio.refreshOutputDevices()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                applyLaunchBootstrapAttempt()
+            }
+            return
+        }
+
+        if autoStartRun && !client.isRunning && !isReplayRunning && !isTransportTransitioning {
+            startSelectedProfile()
+        }
+    }
+
+    private func attemptForcedInputSelection() -> Bool {
+        guard let hint = launchInputDeviceHint, !hint.isEmpty else { return true }
+        if let active = analyzer.inputDevices.first(where: { $0.uid == analyzer.selectedInputUID }),
+           matchesDeviceHint(active.name, hint: hint) {
+            return true
+        }
+        guard let matched = analyzer.inputDevices.first(where: { matchesDeviceHint($0.name, hint: hint) }) else {
+            return false
+        }
+        guard matched.uid != analyzer.selectedInputUID else { return true }
+        do {
+            try analyzer.selectInputDevice(uid: matched.uid)
+            audio.selectInputDevice(uid: matched.uid)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func attemptForcedOutputSelection() -> Bool {
+        guard let hint = launchOutputDeviceHint, !hint.isEmpty else { return true }
+        if let active = audio.outputDevices.first(where: { $0.uid == audio.selectedOutputUID }),
+           matchesDeviceHint(active.name, hint: hint) {
+            return true
+        }
+        guard let matched = audio.outputDevices.first(where: { matchesDeviceHint($0.name, hint: hint) }) else {
+            return false
+        }
+        guard matched.uid != audio.selectedOutputUID else { return true }
+        audio.selectOutputDevice(uid: matched.uid)
+        return true
+    }
+
+    private func matchesDeviceHint(_ deviceName: String, hint: String) -> Bool {
+        deviceName.localizedCaseInsensitiveContains(hint)
     }
 
     private func stopAll() {

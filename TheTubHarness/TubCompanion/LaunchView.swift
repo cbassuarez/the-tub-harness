@@ -618,12 +618,9 @@ struct ConnectionGateView: View {
 
     private func attemptQuietHarnessConnect() {
         guard harnessClient.connectionState == .disconnected else { return }
-        let port = appState.lastKnownHarnessPort
-        harnessClient.discoverHarnessOnLocalNetwork(port: port) { [harnessClient] result in
-            if case .success(let discovered) = result {
-                harnessClient.connectToHarness(host: discovered.host, port: port)
-            }
-        }
+        let host = appState.lastKnownHarnessHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedHost = host.isEmpty ? "tub-harness.local" : host
+        harnessClient.connectToHarness(host: resolvedHost, port: appState.lastKnownHarnessPort)
     }
 
     private func primeRuntimePermissionsIfNeeded() {
@@ -631,8 +628,6 @@ struct ConnectionGateView: View {
         didPrimeRuntimePermissions = true
 
         externalAudioRouteMonitor.refreshRouteState()
-
-        harnessClient.discoverHarnessOnLocalNetwork(port: appState.lastKnownHarnessPort) { _ in }
     }
 
     private var playLiveContent: some View {
@@ -987,53 +982,7 @@ struct ConnectionGateView: View {
         }
 
         harnessClient.connectToHarness(host: host, port: parsedPort)
-        harnessClient.preflightHandshake(host: host, port: parsedPort) { result in
-            switch result {
-            case .success(let payload):
-                let preferredHost = payload.hostHints?.first?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let resolvedHost = (preferredHost?.isEmpty == false) ? preferredHost! : host
-                let resolvedPort = payload.audiencePort
-                    .flatMap { UInt16(exactly: $0) }
-                    ?? parsedPort
-
-                if (resolvedHost != host || resolvedPort != parsedPort), appState.harnessConnectionState != .connected {
-                    appState.updateHarnessAddress(host: resolvedHost, port: resolvedPort)
-                    harnessClient.disconnect()
-                    harnessClient.connectToHarness(host: resolvedHost, port: resolvedPort)
-                }
-
-                let announcedPort = String(resolvedPort)
-                if let preferredHost {
-                    handshakeStatus = "Handshake OK (\(payload.status.uppercased())) / \(preferredHost):\(announcedPort)"
-                } else {
-                    handshakeStatus = "Handshake OK (\(payload.status.uppercased())) / audience port \(announcedPort)"
-                }
-            case .failure(let error):
-                guard
-                    harnessClient.shouldAttemptLocalDiscovery(for: host),
-                    appState.harnessConnectionState != .connected
-                else {
-                    handshakeStatus = "Handshake unavailable (\(error.localizedDescription)). Socket link still attempting."
-                    return
-                }
-
-                handshakeStatus = "Handshake unavailable (\(error.localizedDescription)). Scanning local network…"
-                harnessClient.discoverHarnessOnLocalNetwork(port: parsedPort) { discovery in
-                    switch discovery {
-                    case .success(let result):
-                        let discoveredPort = result.payload.audiencePort
-                            .flatMap { UInt16(exactly: $0) }
-                            ?? parsedPort
-                        appState.updateHarnessAddress(host: result.host, port: discoveredPort)
-                        harnessClient.disconnect()
-                        harnessClient.connectToHarness(host: result.host, port: discoveredPort)
-                        handshakeStatus = "Harness discovered at \(result.host):\(discoveredPort). Connecting…"
-                    case .failure(let discoveryError):
-                        handshakeStatus = "Handshake unavailable (\(error.localizedDescription)). Local scan failed (\(discoveryError.localizedDescription))."
-                    }
-                }
-            }
-        }
+        handshakeStatus = "Hybrid link running (DIRECT preferred, RELAY fallback)."
     }
 
     private var connectionStatusLine: some View {
@@ -1416,15 +1365,5 @@ struct ConnectionRequiredOverlay: View {
         quietReconnectSuppressedUntil = Date().addingTimeInterval(quietReconnectWindow)
         appState.syncHarnessState(.connecting)
         harnessClient.connectToHarness(host: resolvedHost, port: resolvedPort)
-        harnessClient.preflightHandshake(host: resolvedHost, port: resolvedPort) { result in
-            guard case .success(let payload) = result else { return }
-            let hintedHost = payload.hostHints?.first?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let handshakeHost = (hintedHost?.isEmpty == false) ? hintedHost! : resolvedHost
-            let handshakePort = payload.audiencePort.flatMap { UInt16(exactly: $0) } ?? resolvedPort
-            guard handshakeHost != resolvedHost || handshakePort != resolvedPort else { return }
-            appState.updateHarnessAddress(host: handshakeHost, port: handshakePort)
-            harnessClient.disconnect(manual: false)
-            harnessClient.connectToHarness(host: handshakeHost, port: handshakePort)
-        }
     }
 }

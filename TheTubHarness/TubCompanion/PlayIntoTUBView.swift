@@ -1123,7 +1123,7 @@ private final class PlayGridViewModel: ObservableObject {
         guard let touch = touches.first else { return }
         guard size.width > 0 else { return }
         let normalized = max(0, min(1, Double(touch.location.x / size.width)))
-        if let last = lastLongBlendX, abs(last - normalized) < 0.01 {
+        if let last = lastLongBlendX, abs(last - normalized) < 0.003 {
             return
         }
         lastLongBlendX = normalized
@@ -1378,37 +1378,53 @@ private final class PlayGridViewModel: ObservableObject {
                 let sampleClass = PlaySampleClass.classify(duration: duration, threshold: 4)
                 return PlaySampleDescriptor(url: url, duration: duration, sampleClass: sampleClass)
             }
+            let overrideLongEntries: [PlayLongSampleEntry] = PlayGridAudioEngine
+                .discoverLongBankOverrideLibrary()
+                .compactMap { url in
+                    let duration = PlayGridAudioEngine.sampleDuration(url: url) ?? 0
+                    guard duration >= 4 else { return nil }
+                    return PlayLongSampleEntry(
+                        url: url,
+                        duration: duration,
+                        displayToken: Self.longToken(for: url),
+                        displayName: url.deletingPathExtension().lastPathComponent
+                    )
+                }
             await MainActor.run {
                 self.sampleURLs = descriptors
                     .filter { $0.sampleClass == .short }
                     .map(\.url)
-                self.longSampleEntries = descriptors
-                    .filter { $0.sampleClass == .long }
-                    .map {
-                        PlayLongSampleEntry(
-                            url: $0.url,
-                            duration: $0.duration,
-                            displayToken: Self.longToken(for: $0.url),
-                            displayName: $0.url.deletingPathExtension().lastPathComponent
-                        )
-                    }
+                if overrideLongEntries.isEmpty {
+                    self.longSampleEntries = descriptors
+                        .filter { $0.sampleClass == .long }
+                        .map {
+                            PlayLongSampleEntry(
+                                url: $0.url,
+                                duration: $0.duration,
+                                displayToken: Self.longToken(for: $0.url),
+                                displayName: $0.url.deletingPathExtension().lastPathComponent
+                            )
+                        }
+                } else {
+                    self.longSampleEntries = overrideLongEntries
+                }
                 self.rebuildBanks()
                 self.libraryStatus = Self.libraryStatus(shortCount: self.sampleURLs.count, longCount: self.longSampleEntries.count)
-            if self.sampleURLs.isEmpty && self.longSampleEntries.isEmpty {
-                self.activityLine = "NO SAMPLE FILES DISCOVERED IN BUNDLE."
-                self.longActivityLine = "NO LONG SAMPLES DISCOVERED."
-            } else if self.sampleURLs.isEmpty {
-                self.activityLine = "SHORT EMPTY. GRID EVENTS DISABLED."
-                self.longActivityLine = "LONG STRIP READY (\(self.longBankStatus)). SWEEP TO BLEND."
-            } else if self.longSampleEntries.isEmpty {
-                self.activityLine = "GRID READY (\(self.bankStatus)). DRAG TO PLAY."
-                self.longActivityLine = "LONG EMPTY. SHORT GRID ONLY."
-            } else {
-                self.activityLine = "LIBRARY READY (\(self.bankStatus)). DRAG TO PLAY."
-                self.longActivityLine = "LONG READY (\(self.longBankStatus)). SWEEP TO BLEND."
+                if self.sampleURLs.isEmpty && self.longSampleEntries.isEmpty {
+                    self.activityLine = "NO SAMPLE FILES DISCOVERED IN BUNDLE."
+                    self.longActivityLine = "NO LONG SAMPLES DISCOVERED."
+                } else if self.sampleURLs.isEmpty {
+                    self.activityLine = "SHORT EMPTY. GRID EVENTS DISABLED."
+                    self.longActivityLine = "LONG STRIP READY (\(self.longBankStatus)). SWEEP TO BLEND."
+                } else if self.longSampleEntries.isEmpty {
+                    self.activityLine = "GRID READY (\(self.bankStatus)). DRAG TO PLAY."
+                    self.longActivityLine = "LONG EMPTY. SHORT GRID ONLY."
+                } else {
+                    self.activityLine = "LIBRARY READY (\(self.bankStatus)). DRAG TO PLAY."
+                    self.longActivityLine = "LONG READY (\(self.longBankStatus)). SWEEP TO BLEND."
+                }
             }
         }
-    }
     }
 
     private func rebuildBanks() {
@@ -1502,7 +1518,7 @@ private final class PlayGridViewModel: ObservableObject {
         audio.preload(urls: preloadURLs, limit: preloadURLs.count)
     }
 
-    private static func longToken(for url: URL) -> String {
+    nonisolated private static func longToken(for url: URL) -> String {
         let stem = url.deletingPathExtension().lastPathComponent.uppercased()
         let compact = stem.filter { $0.isLetter || $0.isNumber }
         if compact.count >= 4 {

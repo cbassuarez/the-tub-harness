@@ -42,6 +42,30 @@ class AudienceSessionServer: ObservableObject {
         let ttlBin: Int
     }
 
+    private struct RelaySessionCreateRequest: Encodable {
+        let sessionId: String
+        let ttlSeconds: Int
+
+        private enum CodingKeys: String, CodingKey {
+            case sessionId = "session_id"
+            case ttlSeconds = "ttl_seconds"
+        }
+    }
+
+    private struct RelaySessionCreateResponse: Decodable {
+        let status: String?
+        let code: String?
+        let wsURL: String?
+        let expiresAt: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case status
+            case code
+            case wsURL = "ws_url"
+            case expiresAt = "expires_at"
+        }
+    }
+
     @Published var activeSessions: [String: AudienceSessionState] = [:]
     @Published var claimStates: [String: AudienceClaimState] = [:]
     @Published private(set) var lastInfluenceTelemetry: AudienceInfluenceTelemetry?
@@ -69,6 +93,16 @@ class AudienceSessionServer: ObservableObject {
     private var operatorActivityEvents: [OperatorActivityEvent] = []
     private var operatorActivityEventIds: Set<String> = []
     private var lastActivityEmissionByKey: [String: Date] = [:]
+    private var relayWSURL: URL?
+    private var relaySessionCreateURL: URL?
+    private var relayJoinCode: String?
+    private var relaySessionExpiresAt: Date?
+    private var relayProvisionTask: URLSessionDataTask?
+    private var relayLastProvisionFailureAt: Date = .distantPast
+    private let relaySessionClientId = "harness-\(UUID().uuidString.prefix(8))"
+    private let relaySessionTTLSeconds: TimeInterval = 10 * 60
+    private let relaySessionRefreshLeadSeconds: TimeInterval = 45
+    private let relayProvisionRetrySeconds: TimeInterval = 8
 
     private let descriptorFallback: [AudienceDescriptorState] = [
         .init(descriptorId: "dense", label: "DENSE", priority: 1.0, isVisible: true, systemStateId: nil),
@@ -94,6 +128,32 @@ class AudienceSessionServer: ObservableObject {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         self.encoder = encoder
+
+        if let wsURLString = ProcessInfo.processInfo.environment["TUB_RELAY_WS_URL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !wsURLString.isEmpty,
+           let wsURL = URL(string: wsURLString) {
+            relayWSURL = wsURL
+            let configuredAPI = ProcessInfo.processInfo.environment["TUB_RELAY_API_URL"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let configuredAPI, !configuredAPI.isEmpty {
+                relaySessionCreateURL = URL(string: configuredAPI)
+            } else {
+                relaySessionCreateURL = Self.relaySessionCreateURL(from: wsURL)
+            }
+            let configuredCode = ProcessInfo.processInfo.environment["TUB_RELAY_JOIN_CODE"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if relaySessionCreateURL == nil {
+                relayJoinCode = (configuredCode?.isEmpty == false) ? configuredCode?.uppercased() : Self.makeRelayJoinCode()
+                relaySessionExpiresAt = Date().addingTimeInterval(relaySessionTTLSeconds)
+            } else if let configuredCode, !configuredCode.isEmpty {
+                relayJoinCode = configuredCode.uppercased()
+                relaySessionExpiresAt = Date().addingTimeInterval(relaySessionTTLSeconds)
+            } else {
+                relayJoinCode = nil
+                relaySessionExpiresAt = nil
+            }
+        }
     }
 
     func startListening(on port: UInt16 = 9911) {
@@ -120,6 +180,7 @@ class AudienceSessionServer: ObservableObject {
                 }
 
                 self.listener?.start(queue: self.listeningQueue)
+                self.refreshRelaySessionIfNeeded(now: Date(), force: true)
                 print("Audience session server listening on port \(port)")
             } catch {
                 print("Failed to start audience server: \(error)")
@@ -132,6 +193,8 @@ class AudienceSessionServer: ObservableObject {
             guard let self else { return }
             self.listener?.cancel()
             self.listener = nil
+            self.relayProvisionTask?.cancel()
+            self.relayProvisionTask = nil
             self.connections.removeAll()
             self.receiveBuffers.removeAll()
             self.sessionConnectionKeys.removeAll()
@@ -253,15 +316,7 @@ class AudienceSessionServer: ObservableObject {
         let path = String(components[1])
         switch path {
         case "/handshake":
-            let iso8601 = ISO8601DateFormatter()
-            let payload: [String: Any] = [
-                "status": "ok",
-                "service": "tub-harness-audience",
-                "protocol": "ndjson-envelope-v1",
-                "audiencePort": Int(listeningPort),
-                "hostHints": localHostHints(),
-                "timestamp": iso8601.string(from: Date())
-            ]
+            let payload = handshakePayload(now: Date())
             let body = (try? JSONSerialization.data(withJSONObject: payload, options: []))
                 ?? Data(#"{"status":"ok"}"#.utf8)
             sendHTTPResponse(
@@ -273,6 +328,17 @@ class AudienceSessionServer: ObservableObject {
             )
         case "/health":
             let body = Data(#"{"status":"ok"}"#.utf8)
+            sendHTTPResponse(
+                to: connectionKey,
+                statusCode: 200,
+                reason: "OK",
+                contentType: "application/json",
+                body: body
+            )
+        case "/status":
+            let payload = statusPayload(now: Date())
+            let body = (try? JSONSerialization.data(withJSONObject: payload, options: []))
+                ?? Data(#"{"status":"ok","isRunning":false}"#.utf8)
             sendHTTPResponse(
                 to: connectionKey,
                 statusCode: 200,
@@ -344,6 +410,191 @@ class AudienceSessionServer: ObservableObject {
 
         return Array(Set(hints)).sorted()
     }
+
+    private func statusPayload(now: Date) -> [String: Any] {
+        let iso8601 = ISO8601DateFormatter()
+        var payload: [String: Any] = [
+            "status": "ok",
+            "service": "tub-harness-audience",
+            "audiencePort": Int(listeningPort),
+            "timestamp": iso8601.string(from: now),
+            "isRunning": false,
+            "hasStageSnapshot": false
+        ]
+
+        if let snapshot = cachedStageSnapshot {
+            payload["isRunning"] = snapshot.isRunning
+            payload["hasStageSnapshot"] = true
+            payload["mode"] = snapshot.mode
+            payload["sceneId"] = snapshot.sceneId
+            payload["thought"] = snapshot.thought
+            payload["isWaiting"] = snapshot.isWaiting
+            payload["snapshotTimestamp"] = iso8601.string(from: snapshot.timestamp)
+            if let waitingReason = snapshot.waitingReason, !waitingReason.isEmpty {
+                payload["waitingReason"] = waitingReason
+            }
+        }
+        return payload
+    }
+
+    private func handshakePayload(now: Date) -> [String: Any] {
+        let iso8601 = ISO8601DateFormatter()
+        var transports: [String] = ["direct_tcp"]
+        var payload: [String: Any] = [
+            "status": "ok",
+            "service": "tub-harness-audience",
+            "protocol": "ndjson-envelope-v1",
+            "audiencePort": Int(listeningPort),
+            "hostHints": localHostHints(),
+            "timestamp": iso8601.string(from: now)
+        ]
+
+        if let relay = relayAnnouncement(now: now) {
+            transports.append("relay_ws")
+            payload["relayJoinCode"] = relay.code
+            payload["relayWsURL"] = relay.wsURL.absoluteString
+            payload["relaySessionExpiresAt"] = iso8601.string(from: relay.expiresAt)
+        }
+        payload["transports"] = transports
+        return payload
+    }
+
+    private func relayAnnouncement(now: Date) -> (wsURL: URL, code: String, expiresAt: Date)? {
+        guard let relayWSURL else {
+            return nil
+        }
+        refreshRelaySessionIfNeeded(now: now)
+        if relaySessionCreateURL == nil {
+            if relayJoinCode == nil {
+                relayJoinCode = Self.makeRelayJoinCode()
+            }
+            if relaySessionExpiresAt == nil || relaySessionExpiresAt! <= now {
+                relaySessionExpiresAt = now.addingTimeInterval(relaySessionTTLSeconds)
+                relayJoinCode = Self.makeRelayJoinCode()
+            }
+        }
+        guard let relayJoinCode, let relaySessionExpiresAt, relaySessionExpiresAt > now else {
+            return nil
+        }
+        return (relayWSURL, relayJoinCode, relaySessionExpiresAt)
+    }
+
+    private func refreshRelaySessionIfNeeded(now: Date, force: Bool = false) {
+        guard relayWSURL != nil else { return }
+        guard let relaySessionCreateURL else { return }
+
+        let refreshCutoff = now.addingTimeInterval(relaySessionRefreshLeadSeconds)
+        let hasFreshSession = relayJoinCode != nil && (relaySessionExpiresAt ?? .distantPast) > refreshCutoff
+        if hasFreshSession, !force {
+            return
+        }
+        if relayProvisionTask != nil {
+            return
+        }
+        if !force, now.timeIntervalSince(relayLastProvisionFailureAt) < relayProvisionRetrySeconds {
+            return
+        }
+
+        var request = URLRequest(url: relaySessionCreateURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 3.0
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let relayAPIKey = ProcessInfo.processInfo.environment["TUB_RELAY_API_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !relayAPIKey.isEmpty {
+            request.setValue("Bearer \(relayAPIKey)", forHTTPHeaderField: "Authorization")
+        }
+        let requestBody = RelaySessionCreateRequest(
+            sessionId: relaySessionClientId,
+            ttlSeconds: max(60, Int(relaySessionTTLSeconds.rounded()))
+        )
+        request.httpBody = try? JSONEncoder().encode(requestBody)
+
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            self.listeningQueue.async {
+                self.relayProvisionTask = nil
+                defer {
+                    session.invalidateAndCancel()
+                }
+
+                if error != nil {
+                    self.relayLastProvisionFailureAt = Date()
+                    return
+                }
+                guard
+                    let http = response as? HTTPURLResponse,
+                    (200...299).contains(http.statusCode),
+                    let data
+                else {
+                    self.relayLastProvisionFailureAt = Date()
+                    return
+                }
+                guard
+                    let payload = try? JSONDecoder().decode(RelaySessionCreateResponse.self, from: data),
+                    let code = payload.code?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    !code.isEmpty,
+                    let wsURLRaw = payload.wsURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    !wsURLRaw.isEmpty,
+                    let wsURL = URL(string: wsURLRaw),
+                    let expiresAt = self.parseISO8601Date(payload.expiresAt),
+                    expiresAt > Date()
+                else {
+                    self.relayLastProvisionFailureAt = Date()
+                    return
+                }
+
+                self.relayWSURL = wsURL
+                self.relayJoinCode = code.uppercased()
+                self.relaySessionExpiresAt = expiresAt
+                self.relayLastProvisionFailureAt = .distantPast
+            }
+        }
+        relayProvisionTask = task
+        task.resume()
+    }
+
+    private static func relaySessionCreateURL(from relayWSURL: URL) -> URL? {
+        guard var components = URLComponents(url: relayWSURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        if components.scheme == "wss" {
+            components.scheme = "https"
+        } else if components.scheme == "ws" {
+            components.scheme = "http"
+        }
+        components.path = "/v1/link/sessions"
+        components.query = nil
+        return components.url
+    }
+
+    private func parseISO8601Date(_ raw: String?) -> Date? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        if let fractional = Self.iso8601WithFractional.date(from: raw) {
+            return fractional
+        }
+        return Self.iso8601.date(from: raw)
+    }
+
+    private static func makeRelayJoinCode(length: Int = 6) -> String {
+        let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return String((0..<length).map { _ in alphabet.randomElement() ?? "X" })
+    }
+
+    private static let iso8601: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    private static let iso8601WithFractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     private func sendHTTPResponse(
         to connectionKey: String,
@@ -940,6 +1191,17 @@ class AudienceSessionServer: ObservableObject {
 
     func simulateEnvelopeForTesting(_ envelope: AudienceEnvelope, connectionKey: String = "test-connection") {
         handleEnvelope(envelope, connectionKey: connectionKey)
+    }
+
+    func setRelayAnnouncementForTesting(wsURL: String?, joinCode: String?, expiresAt: Date?) {
+        relayWSURL = wsURL.flatMap(URL.init(string:))
+        relayJoinCode = joinCode
+        relaySessionExpiresAt = expiresAt
+    }
+
+    func handshakePayloadDataForTesting(now: Date = Date()) -> Data {
+        let payload = handshakePayload(now: now)
+        return (try? JSONSerialization.data(withJSONObject: payload, options: [])) ?? Data()
     }
 }
 

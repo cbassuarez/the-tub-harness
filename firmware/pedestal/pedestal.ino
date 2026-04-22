@@ -1,4 +1,4 @@
-// pedestal.ino — THE TUB pedestal controller (QT Py RP2040)
+// pedestal.ino — THE TUB pedestal controller (Waveshare RP2040-Zero)
 //
 // Each pedestal runs this firmware with a unique PEDESTAL_ADDR (1, 2, or 3).
 // Communicates with central Teensy over RS-485 as a slave.
@@ -25,24 +25,27 @@
 static const int PEDESTAL_ADDR = 1;  // Set to 1, 2, or 3
 
 // ============================================================
-// PIN ASSIGNMENTS (QT Py RP2040)
+// PIN ASSIGNMENTS (RP2040-Zero)
 // ============================================================
 
-static const uint8_t PIN_RS485_DE  = A0;   // DE + RE tied together
-// Serial1 TX = pin TX (QT Py), Serial1 RX = pin RX (QT Py)
+static const uint8_t PIN_RS485_DE  = 2;   // GP2 → MAX485 E (DE+RE combined)
+// Serial1 TX = GP0, Serial1 RX = GP1 (RP2040 UART0)
 
-static const uint8_t PIN_HALO_PWM  = A1;   // MOSFET gate for 24V halo LED
-static const uint8_t PIN_NEOPIXEL  = A2;   // NeoPixel data
-static const uint8_t PIN_BUTTON    = A3;   // Button input (active LOW, pull-up)
+static const uint8_t PIN_HALO_PWM  = 6;   // GP6 → MOSFET gate (unused on pedestals without halo)
+#ifdef PIN_NEOPIXEL
+#undef PIN_NEOPIXEL   // Waveshare variant pre-defines this for onboard LED (GP16); we use our own pin
+#endif
+static const uint8_t PIN_NEO_RING  = 3;   // GP3 → NeoPixel ring data (via 330Ω at ring)
+static const uint8_t PIN_BUTTON    = 7;   // GP7 → local button input (unused on pedestals without button)
 
-// I2C uses default SDA/SCL pins on QT Py RP2040
+// I2C uses default pins: SDA=GP4, SCL=GP5 (Wire / I2C0)
 
 // ============================================================
 // NEOPIXEL CONFIG
 // ============================================================
 
-static const int NEOPIXEL_COUNT = 12;  // adjust to your strip/ring length
-Adafruit_NeoPixel pixels(NEOPIXEL_COUNT, PIN_NEOPIXEL, NEO_GRBW + NEO_KHZ800);
+static const int NEOPIXEL_COUNT = 16;  // 16-LED RGBW ring (w28666-c)
+Adafruit_NeoPixel pixels(NEOPIXEL_COUNT, PIN_NEO_RING, NEO_GRBW + NEO_KHZ800);
 
 // ============================================================
 // VL6180X REGISTERS (direct I2C, no library dependency)
@@ -171,6 +174,10 @@ static bool neoPixelDirty = true;  // force initial update
 static char rxBuf[64];
 static int rxBufLen = 0;
 
+// Install-verification debug output over USB Serial
+static unsigned long lastDebugMs = 0;
+static const unsigned long DEBUG_INTERVAL_MS = 1000;
+
 // ============================================================
 // RS-485 TRANSCEIVER CONTROL
 // ============================================================
@@ -267,6 +274,9 @@ void processRS485Line(const char* line) {
 // ============================================================
 
 void setup() {
+  // USB Serial for install-verification output
+  Serial.begin(115200);
+
   // RS-485 UART
   Serial1.begin(115200);
   pinMode(PIN_RS485_DE, OUTPUT);
@@ -283,14 +293,54 @@ void setup() {
   pinMode(PIN_HALO_PWM, OUTPUT);
   analogWrite(PIN_HALO_PWM, 0);
 
-  // NeoPixels
+  // NeoPixels + visible boot test: R, G, B, W each for 1s at bright level
   pixels.begin();
+  pixels.setBrightness(24);  // ~10% — keeps ring under ~150mA to avoid USB brownout
+  uint32_t testSeq[4] = {
+    pixels.Color(255, 0, 0, 0),  // red
+    pixels.Color(0, 255, 0, 0),  // green
+    pixels.Color(0, 0, 255, 0),  // blue
+    pixels.Color(0, 0, 0, 255),  // white (dedicated W channel)
+  };
+  for (int c = 0; c < 4; c++) {
+    for (int i = 0; i < NEOPIXEL_COUNT; i++) pixels.setPixelColor(i, testSeq[c]);
+    pixels.show();
+    delay(1000);
+  }
   pixels.clear();
   pixels.show();
+  // Keep low brightness for main-loop test (USB-powered). Raise to 255 once running off buck 5V.
+  pixels.setBrightness(24);
 
   // I2C + VL6180X
   Wire.begin();
+  delay(100);
+
+  // I2C bus scan for install-verification
+  delay(2000);  // let USB CDC enumerate before printing banner
+  Serial.print("PED");
+  Serial.print(PEDESTAL_ADDR);
+  Serial.print(" I2C scan:");
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.print(" 0x");
+      if (addr < 0x10) Serial.print('0');
+      Serial.print(addr, HEX);
+      found++;
+    }
+  }
+  Serial.print(" (");
+  Serial.print(found);
+  Serial.println(" device(s))");
+
   vl6180xReady = vl6180xInit();
+
+  Serial.print("PED");
+  Serial.print(PEDESTAL_ADDR);
+  Serial.print(" boot OK, tof=");
+  Serial.println(vl6180xReady ? "ready" : "MISSING");
 }
 
 // ============================================================
@@ -309,8 +359,29 @@ void loop() {
     }
   }
 
-  // --- Update NeoPixels if changed ---
-  if (neoPixelDirty) {
+  // --- LOCAL NEOPIXEL TEST PATTERN (overrides RS-485 until removed) ---
+  // Cycles R→G→B→W at 1s per color on all 16 LEDs.
+  {
+    static unsigned long lastColorMs = 0;
+    static uint8_t colorIdx = 0;
+    unsigned long nowMs = millis();
+    if (nowMs - lastColorMs >= 1000) {
+      lastColorMs = nowMs;
+      colorIdx = (colorIdx + 1) & 0x03;
+      uint32_t c;
+      switch (colorIdx) {
+        case 0: c = pixels.Color(255, 0, 0, 0); break;  // red
+        case 1: c = pixels.Color(0, 255, 0, 0); break;  // green
+        case 2: c = pixels.Color(0, 0, 255, 0); break;  // blue
+        default: c = pixels.Color(0, 0, 0, 255); break; // white
+      }
+      for (int i = 0; i < NEOPIXEL_COUNT; i++) pixels.setPixelColor(i, c);
+      pixels.show();
+    }
+  }
+
+  // --- Update NeoPixels if changed (RS-485 path, disabled by local test above) ---
+  if (false && neoPixelDirty) {
     for (int i = 0; i < NEOPIXEL_COUNT; i++) {
       pixels.setPixelColor(i, pixels.Color(neoR, neoG, neoB, neoW));
     }
@@ -330,5 +401,41 @@ void loop() {
     } else if (c != '\r' && rxBufLen < (int)sizeof(rxBuf) - 1) {
       rxBuf[rxBufLen++] = c;
     }
+  }
+
+  // --- 1Hz install-verification status over USB Serial ---
+  unsigned long now = millis();
+  if (now - lastDebugMs >= DEBUG_INTERVAL_MS) {
+    lastDebugMs = now;
+    // I2C live scan each tick
+    int i2cFound = 0;
+    bool sawTof = false;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+      Wire.beginTransmission(addr);
+      if (Wire.endTransmission() == 0) {
+        i2cFound++;
+        if (addr == VL6180X_ADDR) sawTof = true;
+      }
+    }
+
+    Serial.print("PED");
+    Serial.print(PEDESTAL_ADDR);
+    Serial.print(" i2c=");
+    Serial.print(i2cFound);
+    Serial.print(" tofAck=");
+    Serial.print(sawTof ? 1 : 0);
+    Serial.print(" tofReady=");
+    Serial.print(vl6180xReady ? 1 : 0);
+    Serial.print(" tof=");
+    Serial.print(currentTofMm);
+    Serial.print(" button=");
+    Serial.print(button.state ? 1 : 0);
+    Serial.print(" halo=");
+    Serial.print(currentHaloPwm);
+    Serial.print(" neo=");
+    Serial.print(neoR); Serial.print('.');
+    Serial.print(neoG); Serial.print('.');
+    Serial.print(neoB); Serial.print('.');
+    Serial.println(neoW);
   }
 }

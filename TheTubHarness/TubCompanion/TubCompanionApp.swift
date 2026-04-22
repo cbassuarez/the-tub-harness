@@ -438,7 +438,6 @@ struct MainShellView: View {
     @State private var selectedTab: AppTab = .steer
     @State private var didApplyInitialTab = false
     @State private var didReportShellReady = false
-    @State private var lastHarnessDiscoveryAttemptAt: Date?
     @StateObject private var shellLayout = ShellLayoutModel()
 
     var body: some View {
@@ -743,35 +742,6 @@ struct MainShellView: View {
 
         appState.syncHarnessState(.connecting)
         harnessClient.connectToHarness(host: resolvedHost, port: port)
-        harnessClient.preflightHandshake(host: resolvedHost, port: port) { result in
-            switch result {
-            case .success(let payload):
-                let hintedHost = payload.hostHints?.first?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let handshakeHost = (hintedHost?.isEmpty == false) ? hintedHost! : resolvedHost
-                let handshakePort = payload.audiencePort.flatMap { UInt16(exactly: $0) } ?? port
-                guard handshakeHost != resolvedHost || handshakePort != port else { return }
-                appState.updateHarnessAddress(host: handshakeHost, port: handshakePort)
-                harnessClient.disconnect(manual: false)
-                harnessClient.connectToHarness(host: handshakeHost, port: handshakePort)
-            case .failure:
-                guard harnessClient.shouldAttemptLocalDiscovery(for: resolvedHost) else { return }
-                let now = Date()
-                if let lastHarnessDiscoveryAttemptAt,
-                   now.timeIntervalSince(lastHarnessDiscoveryAttemptAt) < 12 {
-                    return
-                }
-                lastHarnessDiscoveryAttemptAt = now
-                harnessClient.discoverHarnessOnLocalNetwork(port: port) { discovery in
-                    guard case .success(let found) = discovery else { return }
-                    let discoveredPort = found.payload.audiencePort
-                        .flatMap { UInt16(exactly: $0) }
-                        ?? port
-                    appState.updateHarnessAddress(host: found.host, port: discoveredPort)
-                    harnessClient.disconnect(manual: false)
-                    harnessClient.connectToHarness(host: found.host, port: discoveredPort)
-                }
-            }
-        }
     }
 
     private var steerInspectorState: SteerInspectorState {

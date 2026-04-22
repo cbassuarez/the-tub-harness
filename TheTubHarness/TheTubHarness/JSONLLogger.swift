@@ -703,7 +703,9 @@ enum RunBundleFactory {
         if let env = ProcessInfo.processInfo.environment["TUB_POLICY_VERSION"], !env.isEmpty {
             return env
         }
-        let defaultPath = "/Users/seb/the-tub-ml/configs/stub_policy_v1.yaml"
+        let defaultPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("the-tub-ml/configs/stub_policy_v1.yaml")
+            .path
         let path = policyConfigPath
             ?? ProcessInfo.processInfo.environment["TUB_POLICY_CONFIG_PATH"]
             ?? defaultPath

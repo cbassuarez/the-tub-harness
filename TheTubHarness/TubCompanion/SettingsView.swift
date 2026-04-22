@@ -135,6 +135,7 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var isEditingOperatorVector = false
     @Published private(set) var pendingRemoteOperatorVector: OperatorVectorLiveState?
     @Published private(set) var lastVectorSourceSessionId: String?
+    @Published var relayLinkCodeInput: String = ""
 
     private let appState: TubCompanionAppState
     private let harnessClient: HarnessClient
@@ -180,6 +181,16 @@ final class SettingsViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        harnessClient.$relayJoinCode
+            .receive(on: RunLoop.main)
+            .sink { [weak self] code in
+                guard let self, let code, !code.isEmpty else { return }
+                self.relayLinkCodeInput = code
+            }
+            .store(in: &cancellables)
+
+        relayLinkCodeInput = harnessClient.relayJoinCode ?? ""
+
         decayTicker = Timer.publish(every: 0.25, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] now in
@@ -199,6 +210,14 @@ final class SettingsViewModel: ObservableObject {
         case .connected: return "CONNECTED"
         case .error: return "ERROR"
         }
+    }
+
+    var transportPathLabel: String {
+        harnessClient.activeTransportPath.chipLabel
+    }
+
+    var networkFingerprintLabel: String {
+        harnessClient.networkFingerprint
     }
 
     var isHarnessLinked: Bool {
@@ -316,20 +335,53 @@ final class SettingsViewModel: ObservableObject {
     func reconnectHarness() {
         let address = normalizedAddress()
         appState.updateHarnessAddress(host: address.host, port: address.port)
-        harnessActionStatus = "PROBING HARNESS..."
-        // Handshake first to resolve the correct address, then connect.
-        // Running connectToHarness concurrently with the HTTP handshake
-        // can saturate the server's connection handler and cause the
-        // handshake to time out even though the link succeeds.
+        let overrideCode = relayLinkCodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        harnessClient.setRelayJoinCodeOverride(overrideCode.isEmpty ? nil : overrideCode)
+        harnessActionStatus = "HYBRID LINK ATTEMPT RUNNING..."
         harnessClient.disconnect(manual: false)
-        runHandshake(host: address.host, port: address.port, reconnectOnResolve: true)
+        harnessClient.connectToHarness(host: address.host, port: address.port)
     }
 
     func reprobeHarnessLink() {
         let address = normalizedAddress()
         appState.updateHarnessAddress(host: address.host, port: address.port)
+        let overrideCode = relayLinkCodeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        harnessClient.setRelayJoinCodeOverride(overrideCode.isEmpty ? nil : overrideCode)
         harnessActionStatus = "PROBING HANDSHAKE..."
         runHandshake(host: address.host, port: address.port, reconnectOnResolve: false)
+    }
+
+    func linkHarnessByCode() {
+        let code = relayLinkCodeInput
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        guard !code.isEmpty else {
+            harnessActionStatus = "ENTER A RELAY CODE FIRST."
+            return
+        }
+
+        relayLinkCodeInput = code
+        harnessClient.setRelayJoinCodeOverride(code)
+        harnessActionStatus = "LINKING VIA CODE \(code) (DIRECT + RELAY)..."
+        let address = normalizedAddress()
+        appState.updateHarnessAddress(host: address.host, port: address.port)
+        harnessClient.disconnect(manual: false)
+        harnessClient.connectToHarness(host: address.host, port: address.port)
+    }
+
+    func runLocalDiscoveryDiagnostic() {
+        let address = normalizedAddress()
+        harnessActionStatus = "RUNNING LOCAL DIAGNOSTIC SCAN..."
+        harnessClient.discoverHarnessOnLocalNetwork(port: address.port) { [weak self] discovery in
+            guard let self else { return }
+            switch discovery {
+            case .success(let result):
+                let discoveredPort = result.payload.audiencePort.flatMap { UInt16(exactly: $0) } ?? address.port
+                self.harnessActionStatus = "LOCAL DIAGNOSTIC FOUND \(result.host.uppercased()):\(discoveredPort)"
+            case .failure(let error):
+                self.harnessActionStatus = "LOCAL DIAGNOSTIC FAILED / \(error.localizedDescription.uppercased())"
+            }
+        }
     }
 
     func beginPowerUnlockGate() {
@@ -479,10 +531,14 @@ final class SettingsViewModel: ObservableObject {
             guard let self else { return }
             switch result {
             case .success(let payload):
-                let preferredHost = payload.hostHints?.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let useHintedHost = self.harnessClient.shouldAttemptLocalDiscovery(for: host)
+                let preferredHost = useHintedHost ? payload.hostHints?.first?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
                 let resolvedHost = (preferredHost?.isEmpty == false) ? preferredHost! : host
                 let resolvedPort = payload.audiencePort.flatMap { UInt16(exactly: $0) } ?? port
                 self.appState.updateHarnessAddress(host: resolvedHost, port: resolvedPort)
+                if let relayCode = payload.relayJoinCode?.trimmingCharacters(in: .whitespacesAndNewlines), !relayCode.isEmpty {
+                    self.relayLinkCodeInput = relayCode.uppercased()
+                }
 
                 if reconnectOnResolve {
                     if resolvedHost != host || resolvedPort != port {
@@ -491,28 +547,10 @@ final class SettingsViewModel: ObservableObject {
                     self.harnessClient.connectToHarness(host: resolvedHost, port: resolvedPort)
                 }
 
-                self.harnessActionStatus = "HANDSHAKE OK / \(resolvedHost.uppercased()):\(resolvedPort)"
+                let transportToken = payload.transports?.joined(separator: ",").uppercased() ?? "DIRECT_TCP"
+                self.harnessActionStatus = "HANDSHAKE OK / \(resolvedHost.uppercased()):\(resolvedPort) / \(transportToken)"
             case .failure(let error):
-                guard self.harnessClient.shouldAttemptLocalDiscovery(for: host), !self.isHarnessLinked else {
-                    self.harnessActionStatus = "HANDSHAKE FAILED / \(error.localizedDescription.uppercased())"
-                    return
-                }
-
-                self.harnessActionStatus = "HANDSHAKE UNAVAILABLE. SCANNING LOCAL NETWORK..."
-                self.harnessClient.discoverHarnessOnLocalNetwork(port: port) { discovery in
-                    switch discovery {
-                    case .success(let result):
-                        let discoveredPort = result.payload.audiencePort.flatMap { UInt16(exactly: $0) } ?? port
-                        self.appState.updateHarnessAddress(host: result.host, port: discoveredPort)
-                        if reconnectOnResolve {
-                            self.harnessClient.disconnect()
-                            self.harnessClient.connectToHarness(host: result.host, port: discoveredPort)
-                        }
-                        self.harnessActionStatus = "HARNESS DISCOVERED / \(result.host.uppercased()):\(discoveredPort)"
-                    case .failure(let discoveryError):
-                        self.harnessActionStatus = "LOCAL DISCOVERY FAILED / \(discoveryError.localizedDescription.uppercased())"
-                    }
-                }
+                self.harnessActionStatus = "HANDSHAKE FAILED / \(error.localizedDescription.uppercased())"
             }
         }
     }
@@ -1237,6 +1275,9 @@ struct SettingsView: View {
                                 statusLine("HARNESS LINK", viewModel.harnessStatusLabel, active: viewModel.isHarnessLinked)
                                 statusLine("STAGE FEED", harnessClient.stageFeedState.chipLabel, active: isStageFeedOnline)
                                 statusLine("OUTPUT", appState.externalAudioRouteDescription, active: isAudioOutputAvailable)
+                                statusLine("TRANSPORT PATH", viewModel.transportPathLabel, active: harnessClient.activeTransportPath != .none)
+                                statusLine("NETWORK FP", viewModel.networkFingerprintLabel)
+                                statusLine("TRANSPORT STATE", harnessClient.transportStatus)
 
                                 HStack(spacing: 8) {
                                     CommandRailButton(
@@ -1261,6 +1302,38 @@ struct SettingsView: View {
                                     ) {
                                         viewModel.reprobeHarnessLink()
                                     }
+                                }
+
+                                HStack(spacing: 8) {
+                                    TextField("Relay code", text: $viewModel.relayLinkCodeInput)
+                                        .textInputAutocapitalization(.characters)
+                                        .disableAutocorrection(true)
+                                        .playMono(11, weight: .semibold)
+                                        .foregroundStyle(Color.white)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 8)
+                                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+
+                                    CommandRailButton(
+                                        title: "LINK BY CODE",
+                                        systemImage: "qrcode.viewfinder",
+                                        isEnabled: true,
+                                        isActive: true,
+                                        isSolid: true,
+                                        accent: BrandingColors.warningYellow
+                                    ) {
+                                        viewModel.linkHarnessByCode()
+                                    }
+                                }
+
+                                CommandRailButton(
+                                    title: "LOCAL DIAGNOSTIC SCAN",
+                                    systemImage: "magnifyingglass",
+                                    isEnabled: true,
+                                    isActive: false,
+                                    accent: BrandingColors.aberrationCyan
+                                ) {
+                                    viewModel.runLocalDiscoveryDiagnostic()
                                 }
 
                                 Text(viewModel.harnessActionStatus)

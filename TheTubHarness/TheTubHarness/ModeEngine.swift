@@ -221,15 +221,16 @@ final class ModeEngine {
             control.motionIntensity = max(fracture, mutation)
             control.motionSpeed = param("motion_speed", fallback: "motion_intensity", default: max(control.motionSpeed, 0.22 + 0.60 * normalize(sceneRateHz, min: 0.25, max: 12.0)), from: out.params)
             control.spread = max(param("spread", default: control.spread, from: out.params), 0.45 + 0.35 * fracture)
-            control.wetLevel = min(0.60, max(0.54, 0.52 + 0.12 * fracture + 0.12 * mutation))
-            control.dryLevel = max(0.02, min(0.30, 0.24 - (0.10 * fracture) - (0.08 * mutation)))
+            control.wetLevel = min(0.60, max(0.56, 0.56 + 0.10 * fracture + 0.10 * mutation))
+            control.dryLevel = max(0.01, min(0.24, 0.20 - (0.08 * fracture) - (0.06 * mutation)))
+            control.level = min(1.0, max(control.level, 0.90 + 0.06 * fracture + 0.04 * mutation))
             control.gridDiv = normalizeGridDiv(resolved.picks.gridDiv ?? control.gridDiv)
             control.repeatStyleId = resolved.picks.repeatStyleId ?? control.repeatStyleId
             control.mode1SceneId = resolveMode1SceneId(
                 requestedSceneId: resolved.picks.sceneId,
                 repeatStyleId: control.repeatStyleId
             )
-            control.reverb.wet = min(0.36, 0.14 + 0.16 * mutation + 0.10 * fracture)
+            control.reverb.wet = min(0.42, 0.18 + 0.18 * mutation + 0.12 * fracture)
             control.reverb.damping = min(1.0, max(0.0, 0.35 + 0.45 * (1.0 - mutation)))
             control.mode1ClearRequest = sentButtons.clear
             control.mode1JoltRequest = sentButtons.jolt
@@ -253,9 +254,10 @@ final class ModeEngine {
             control.scanJumpProb = max(control.scanJumpProb, pitchSpreadNorm * 0.74)
             control.motionSpeed = param("motion_speed", default: max(control.motionSpeed, control.scanRate), from: out.params)
             control.spread = max(param("spread", default: control.spread, from: out.params), pitchSpreadNorm * 0.65)
-            control.wetLevel = min(0.64, (0.20 + 0.32 * control.grainDensity + 0.10 * pitchSpreadNorm) * voicing.wetScale)
-            control.dryLevel = max(0.20, min(0.94, voicing.dryBase - (control.wetLevel * 0.58)))
-            control.reverb.wet = min(0.32, (0.08 + 0.16 * control.grainDensity + 0.06 * pitchSpreadNorm) * voicing.reverbScale)
+            control.wetLevel = min(0.60, (0.30 + 0.42 * control.grainDensity + 0.12 * pitchSpreadNorm) * voicing.wetScale)
+            control.dryLevel = max(0.12, min(0.86, voicing.dryBase - (control.wetLevel * 0.90)))
+            control.level = min(1.0, max(control.level, 0.88 + 0.10 * control.grainDensity))
+            control.reverb.wet = min(0.38, (0.12 + 0.20 * control.grainDensity + 0.08 * pitchSpreadNorm) * voicing.reverbScale)
             control.reverb.damping = min(1.0, max(0.0, 0.35 + 0.40 * (1.0 - control.grainDensity)))
 
         case 3:
@@ -270,8 +272,8 @@ final class ModeEngine {
             let toneNorm = normalize(toneDb, min: -9.0, max: 6.0)
             let crushSeverity = min(1.0, max(0.0, (0.60 * (1.0 - bitDepthNorm)) + (0.40 * control.downsample)))
             control.exciteAmount = toneNorm
-            control.wetLevel = min(0.60, max(0.40, 0.42 + (0.20 * crushSeverity) + (0.08 * control.resonance)))
-            control.dryLevel = min(0.56, max(0.20, 0.44 - (0.22 * crushSeverity) + (0.08 * (1.0 - control.drive))))
+            control.wetLevel = min(0.56, max(0.36, 0.36 + (0.16 * crushSeverity) + (0.06 * control.resonance)))
+            control.dryLevel = min(0.60, max(0.24, 0.50 - (0.16 * crushSeverity) + (0.10 * (1.0 - control.drive))))
             control.motionSpeed = param("motion_speed", default: control.motionSpeed, from: out.params)
             control.spread = param("spread", default: control.spread, from: out.params)
             control.resonatorTuningProfileId = resolved.picks.presetId ?? "res_default"
@@ -286,9 +288,17 @@ final class ModeEngine {
             control.callResponseBias = min(1.0, max(0.0, 0.85 - (0.60 * density)))
             control.memoryWeight = param("stability", fallback: "memory_weight", default: control.memoryWeight, from: out.params)
             control.similarityTarget = min(1.0, max(0.0, 0.25 + 0.65 * control.memoryWeight))
-            control.dryLevel = param("dry_level", default: control.dryLevel, from: out.params)
-            control.gestureLevel = param("sample_mix", fallbacks: ["gesture_level", "sample_level", "wet"], default: control.gestureLevel, from: out.params)
-            control.wetLevel = min(0.40, 0.08 + 0.34 * control.gestureLevel)
+            let dryRequested = paramReal("dry_level", default: control.dryLevel, min: 0.0, max: 0.35, from: out.params)
+            control.dryLevel = min(0.18, dryRequested)
+            let gestureMix = param(
+                "sample_mix",
+                fallbacks: ["gesture_level", "sample_level", "wet"],
+                default: max(control.gestureLevel, 0.78),
+                from: out.params
+            )
+            control.gestureLevel = max(0.65, gestureMix)
+            control.wetLevel = max(0.82, min(1.0, 0.70 + 0.30 * control.gestureLevel))
+            control.level = max(control.level, 0.84 + 0.10 * control.gestureLevel)
             control.bankId = resolved.picks.bankId
             control.categoryId = resolved.picks.categoryId
             control.gestureTypeId = resolved.picks.gestureTypeId ?? "call_response"
@@ -339,21 +349,21 @@ final class ModeEngine {
             control.resetVoices = sentButtons.clear || out.flags.resetVoices
 
         case 7:
-            control.wetLevel = max(0.86, param("mix", fallback: "wet", default: control.wetLevel, from: out.params))
-            control.dryLevel = min(0.14, max(0.0, 0.24 - (control.wetLevel * 0.14)))
+            control.wetLevel = max(0.90, param("mix", fallback: "wet", default: control.wetLevel, from: out.params))
+            control.dryLevel = min(0.08, max(0.0, 0.18 - (control.wetLevel * 0.14)))
             let swapRate = paramReal("swap_rate_hz", fallback: "morph_rate", default: 1.8, min: 0.1, max: 6.0, from: out.params)
             control.morphRate = normalize(swapRate, min: 0.1, max: 6.0)
             let crossfadeMs = paramReal("crossfade_ms", fallback: "crossfade", default: 180.0, min: 20.0, max: 600.0, from: out.params)
             control.swapCrossfade = normalize(crossfadeMs, min: 20.0, max: 600.0)
-            control.sharpness = param("bucket_sharpness", fallback: "sharpness", default: control.sharpness, from: out.params)
+            control.sharpness = max(0.72, param("bucket_sharpness", fallback: "sharpness", default: control.sharpness, from: out.params))
             control.bias = param("mapping_entropy", fallback: "bias", default: control.bias, from: out.params)
             control.mappingId = resolved.picks.mappingId ?? control.mappingId
             control.varianceAmt = max(0.0, min(1.0, resolved.picks.varianceAmt ?? control.varianceAmt))
             control.variantSeed = resolved.picks.variantSeed ?? control.variantSeed
             control.mappingFamily = resolved.picks.mappingFamily ?? control.mappingFamily
-            control.motionSpeed = max(control.motionSpeed, 0.28 + 0.52 * control.morphRate)
-            control.spread = max(control.spread, 0.62)
-            control.motionRadius = max(control.motionRadius, 0.46)
+            control.motionSpeed = max(control.motionSpeed, 0.34 + 0.60 * control.morphRate)
+            control.spread = max(control.spread, 0.68)
+            control.motionRadius = max(control.motionRadius, 0.54)
             control.reverb.wet = min(control.reverb.wet, 0.08)
 
         case 8:
@@ -445,14 +455,14 @@ final class ModeEngine {
         case 1:
             return AudioControl(
                 mode: 1,
-                level: 0.82,
-                dryLevel: 0.30,
-                wetLevel: 0.52,
+                level: 0.92,
+                dryLevel: 0.20,
+                wetLevel: 0.58,
                 spread: 0.62,
                 motionSpeed: 0.44,
                 motionRadius: 0.40,
                 spatialMotion: .orbitPulse,
-                reverb: ReverbTarget(presetId: "beat_A", wet: 0.11, decay: 0.28, preDelay: 0.05, damping: 0.52, xfadeMs: 400),
+                reverb: ReverbTarget(presetId: "beat_A", wet: 0.20, decay: 0.28, preDelay: 0.05, damping: 0.52, xfadeMs: 400),
                 mode1Fracture: 0.58,
                 mode1Mutation: 0.42,
                 mode1PitchLock: 0.68,
@@ -474,14 +484,14 @@ final class ModeEngine {
         case 2:
             return AudioControl(
                 mode: 2,
-                level: 0.80,
-                dryLevel: 0.76,
-                wetLevel: 0.36,
+                level: 0.90,
+                dryLevel: 0.58,
+                wetLevel: 0.48,
                 spread: 0.60,
                 motionSpeed: 0.42,
                 motionRadius: 0.40,
                 spatialMotion: .fragment,
-                reverb: ReverbTarget(presetId: "fracture", wet: 0.24, decay: 0.30, preDelay: 0.07, damping: 0.58, xfadeMs: 450),
+                reverb: ReverbTarget(presetId: "fracture", wet: 0.30, decay: 0.30, preDelay: 0.07, damping: 0.58, xfadeMs: 450),
                 grainSize: 0.22,
                 grainDensity: 0.62,
                 scanRate: 0.58,
@@ -494,8 +504,8 @@ final class ModeEngine {
             return AudioControl(
                 mode: 3,
                 level: 0.78,
-                dryLevel: 0.33,
-                wetLevel: 0.52,
+                dryLevel: 0.42,
+                wetLevel: 0.48,
                 spread: 0.50,
                 motionSpeed: 0.34,
                 motionRadius: 0.30,
@@ -512,20 +522,20 @@ final class ModeEngine {
         case 4:
             return AudioControl(
                 mode: 4,
-                level: 0.82,
-                dryLevel: 0.72,
-                wetLevel: 0.22,
-                spread: 0.40,
-                motionSpeed: 0.25,
+                level: 0.86,
+                dryLevel: 0.08,
+                wetLevel: 0.92,
+                spread: 0.52,
+                motionSpeed: 0.30,
                 motionRadius: 0.30,
                 spatialMotion: .clusterRotate,
-                reverb: ReverbTarget(presetId: "ultrachunk_A", wet: 0.16, decay: 0.26, preDelay: 0.06, damping: 0.45, xfadeMs: 450),
-                gestureRate: 0.45,
-                interruptiveness: 0.30,
-                callResponseBias: 0.55,
+                reverb: ReverbTarget(presetId: "ultrachunk_A", wet: 0.10, decay: 0.24, preDelay: 0.04, damping: 0.42, xfadeMs: 420),
+                gestureRate: 0.55,
+                interruptiveness: 0.45,
+                callResponseBias: 0.50,
                 memoryWeight: 0.65,
                 similarityTarget: 0.70,
-                gestureLevel: 0.35,
+                gestureLevel: 0.82,
                 bankId: "samples_A",
                 categoryId: "general",
                 gestureTypeId: "call_response"
@@ -577,20 +587,20 @@ final class ModeEngine {
         case 7:
             return AudioControl(
                 mode: 7,
-                level: 0.84,
-                dryLevel: 0.08,
-                wetLevel: 0.94,
-                spread: 0.68,
-                motionSpeed: 0.48,
-                motionRadius: 0.55,
+                level: 0.90,
+                dryLevel: 0.03,
+                wetLevel: 0.98,
+                spread: 0.74,
+                motionSpeed: 0.58,
+                motionRadius: 0.62,
                 spatialMotion: .clusterRotate,
                 reverb: ReverbTarget(presetId: "buckets_A", wet: 0.06, decay: 0.24, preDelay: 0.03, damping: 0.42, xfadeMs: 420),
-                morphRate: 0.55,
-                swapCrossfade: 0.22,
-                sharpness: 0.74,
-                bias: 0.72,
-                mappingId: "swap_pairs",
-                varianceAmt: 0.28,
+                morphRate: 0.68,
+                swapCrossfade: 0.16,
+                sharpness: 0.82,
+                bias: 0.78,
+                mappingId: "invert_diagonal",
+                varianceAmt: 0.34,
                 variantSeed: 7,
                 mappingFamily: "bucket_swap"
             )
@@ -785,7 +795,8 @@ final class ModeEngine {
 
     private func clampFinal(_ control: inout AudioControl) {
         control.mode = max(0, min(10, control.mode))
-        control.level = min(max(control.level, 0.0), 1.0)
+        // Keep show output deterministic and avoid near-silent renders if upstream emits tiny level values.
+        control.level = min(max(control.level, minimumLevelFloor(for: control.mode)), 1.0)
         control.dryLevel = min(max(control.dryLevel, 0.0), 1.0)
         if control.mode == 7 {
             control.wetLevel = min(max(control.wetLevel, 0.75), 1.0)
@@ -841,6 +852,21 @@ final class ModeEngine {
         control.bias = min(max(control.bias, 0.0), 1.0)
         control.varianceAmt = min(max(control.varianceAmt, 0.0), 1.0)
         control.reverb.clampRails()
+    }
+
+    private func minimumLevelFloor(for mode: Int) -> Double {
+        switch mode {
+        case 1: return 0.86
+        case 2: return 0.82
+        case 3: return 0.74
+        case 4: return 0.86
+        case 5: return 0.84
+        case 6: return 0.84
+        case 7: return 0.88
+        case 8: return 0.76
+        case 9: return 0.80
+        default: return 0.76
+        }
     }
 
     private func normalizeGridDiv(_ value: String) -> String {

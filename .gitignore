@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Local build / derived artifacts
+.derivedData/
+TheTubHarness/build/
+
+# Large local bundle assets (do not commit)
+TheTubHarness/TheTubHarness/Assets/JoltClips/
+TheTubHarness/TheTubHarness/Assets/SirenSong/
+TheTubHarness/TheTubHarness/Assets/Samples/long_bank_gradient/
+
+# Generated companion links to local long-bank samples
+TheTubHarness/TubCompanion/Samples/[0-1][0-9]_*.wav
+
+# Generated reports
+TheTubHarness/docs/long-gradient-bank-report.json
